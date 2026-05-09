@@ -1,0 +1,8 @@
+{
+  "name": "Remix: DubStudio Pro",
+  "description": "Профессиональное кроссплатформенное приложение для озвучки аниме и фандаба с многодорожечной записью и синхронизацией субтитров.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

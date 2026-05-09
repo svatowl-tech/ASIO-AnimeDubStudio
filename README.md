@@ -1,11 +1,67 @@
-<div align="center">
+# DubStudio Pro 🎙️
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+**DubStudio Pro** — это профессиональное кроссплатформенное приложение, созданное специально для озвучки аниме, фандаба и пост-продакшена видео. Оно объединяет в себе мощный инструмент многодорожечной записи, редактор таймингов и продвинутый телепромптер.
 
-  <h1>Built with AI Studio</h2>
+![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)
+![Build](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+## ✨ Основные возможности
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+### 🎧 Аудио и Запись
+- **Многодорожечная запись (Multitrack):** Записывайте несколько дублей на разные дорожки, сравнивайте их и выбирайте лучшие.
+- **High-Fidelity Engine:** Кастомный движок воспроизведения на Web Audio API с компенсацией задержек (Master Sync) и мягкими фейдами для предотвращения щелчков.
+- **Умный Сплит (Precise Split):** Точное разделение сегментов с защитой от создания микро-фрагментов и автоматической нормализацией времени.
+- **Waveform Visualization:** Детальная визуализация волны для точного попадания в липсинк.
 
-</div>
+### 📄 Работа с Текстом и Субтитрами
+- **Универсальный импорт:** Поддержка `txt`, `docx`, `epub`, `fb2`, `pdf`, `ass`, `srt`.
+- **Авто-парсинг:** Автоматическое распределение ролей и таймингов из сценариев.
+- **Smart Teleprompter:** Интерактивный суфлер, синхронизированный с таймлайном.
+
+### 🎞️ Инструментарий
+- **Интеграция FFmpeg:** Извлечение аудио, муксинг видео и рендеринг готовых проектов прямо из приложения.
+- **Экспорт Stems:** Возможность выгрузки всех дорожек по отдельности или общим миксом.
+- **AI Integration (Gemini):** Помощь в переводе, адаптации текста и генерации описаний.
+
+## 🚀 Быстрый старт
+
+### Требования
+- Node.js 18+
+- NPM или Yarn
+
+### Установка
+```bash
+# Клонируйте репозиторий
+git clone https://github.com/your-username/dubstudio-pro.git
+
+# Перейдите в папку проекта
+cd dubstudio-pro
+
+# Установите зависимости
+npm install
+```
+
+### Разработка
+```bash
+# Запуск в режиме разработки (Vite)
+npm run dev
+```
+
+### Сборка
+```bash
+# Для создания установочных пакетов (Electron Builder)
+npm run electron:build:all
+```
+
+## 🛠 Технологический стек
+- **Frontend:** React + TypeScript + Vite
+- **Styling:** Tailwind CSS + Framer Motion
+- **Runtime:** Electron / Tauri
+- **Audio:** Web Audio API (custom engine)
+- **Processing:** FFmpeg (ffmpeg-static)
+
+## 📄 Лицензия
+Copyright © 2026 DubStudio Team. Распространяется под лицензией MIT.
+
+---
+*Создано с любовью для сообщества фандаба.*

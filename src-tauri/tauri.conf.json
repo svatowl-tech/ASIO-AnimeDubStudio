@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DubStudio Pro",
+  "version": "1.0.0",
+  "identifier": "com.dubstudio.pro",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:3000",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' asset: https: http://asset.localhost http://ipc.localhost; img-src 'self' asset: https: data: http://asset.localhost; media-src 'self' asset: https: blob: http://asset.localhost; connect-src 'self' asset: https: http://ipc.localhost http://asset.localhost;",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**", "C:\\**", "\\\\?\\**"]
+      }
+    },
+    "windows": [
+      {
+        "title": "DubStudio Pro",
+        "width": 1280,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": [
+      "bin/ffmpeg",
+      "bin/ffprobe"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+       "entitlements": "Entitlements.plist",
+       "infoPlist": "Info.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://api.dubstudio.pro/update/{{target}}/{{current_version}}"
+      ],
+      "pubkey": "DWN7/17...REPLACE_WITH_REAL_PUBKEY..."
+    }
+  }
+}
