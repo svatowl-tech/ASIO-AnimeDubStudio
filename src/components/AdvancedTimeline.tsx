@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
+import { useTimelineData } from '../contexts/TimelineContext';
 import { 
   Play, 
   Pause, 
@@ -22,6 +23,53 @@ import { TimelineMinimap } from './TimelineMinimap';
 
 import VirtualizedWaveform from './VirtualizedWaveform';
 
+
+export const Playhead = ({ zoom }: { zoom: number }) => {
+  const { currentTime } = useTimelineData();
+  return (
+    <div 
+      className="absolute top-0 bottom-0 w-px bg-rose-500 z-50 pointer-events-none shadow-[0_0_15px_rgba(244,63,94,0.5)]"
+      style={{ left: `${currentTime * zoom}px` }}
+    >
+      <div className="absolute -top-1 -left-1.5 w-3 h-3 bg-rose-500 rotate-45 shadow-lg" />
+      <div className="absolute top-0 bottom-0 -left-1 w-2 bg-rose-500/10" />
+    </div>
+  );
+};
+
+
+export const CurrentTimeDisplay = () => {
+  const { currentTime } = useTimelineData();
+  return (
+    <span className="text-xl font-mono font-bold text-indigo-400 tracking-widest leading-none">
+      {Math.floor(currentTime / 60).toString().padStart(2, '0')}:
+      {Math.floor(currentTime % 60).toString().padStart(2, '0')}:
+      {Math.floor((currentTime % 1) * 30).toString().padStart(2, '0')}
+    </span>
+  );
+};
+
+
+export const TimelineAutoScroller = ({ timelineRef, isPlaying, zoom }: any) => {
+  const { currentTime } = useTimelineData();
+  useEffect(() => {
+    if (!timelineRef.current) return;
+    const scrollLeft = timelineRef.current.scrollLeft;
+    const clientWidth = timelineRef.current.clientWidth;
+    const currentX = currentTime * zoom;
+    
+    // Auto-scroll if playhead goes beyond 90% of visible width, or behind current view (rewind)
+    // Or if it's a significant jump while not playing
+    if (currentX > scrollLeft + clientWidth * 0.9 || currentX < scrollLeft) {
+      timelineRef.current.scrollTo({
+        left: Math.max(0, currentX - clientWidth * 0.4), // Center it a bit more
+        behavior: 'smooth'
+      });
+    }
+  }, [currentTime, isPlaying, zoom, timelineRef]);
+  return null;
+};
+
 interface LiveRecordingSegmentProps {
   recordingStartTime?: number;
   currentTime: number;
@@ -30,7 +78,8 @@ interface LiveRecordingSegmentProps {
   timelineWidth?: number;
 }
 
-const LiveRecordingSegment = ({ recordingStartTime, currentTime, zoom, recordingPeaks, timelineWidth }: LiveRecordingSegmentProps) => {
+const LiveRecordingSegment = ({ recordingStartTime, zoom, recordingPeaks, timelineWidth }: Omit<LiveRecordingSegmentProps, 'currentTime'>) => {
+  const { currentTime } = useTimelineData();
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -195,7 +244,6 @@ const TrackRow = React.memo(({
 
 export const AdvancedTimeline = ({ 
   project, 
-  currentTime, 
   duration, 
   isPlaying, 
   isRecording, 
@@ -225,10 +273,10 @@ export const AdvancedTimeline = ({
   onGlueSegments,
   recordingPeaks,
   recordingStartTime,
-  onOpenProcessing
+  onOpenProcessing,
+  currentTimeRef
 }: { 
   project: Project, 
-  currentTime: number, 
   duration: number, 
   isPlaying: boolean, 
   isRecording: boolean, 
@@ -258,8 +306,22 @@ export const AdvancedTimeline = ({
   onGlueSegments?: () => void,
   recordingPeaks?: number[],
   recordingStartTime?: number,
-  onOpenProcessing?: (id: string) => void
+  onOpenProcessing?: (id: string) => void,
+  currentTimeRef: React.MutableRefObject<number>
 }) => {
+  const handleSeek = (time: number) => {
+    onSeek(time);
+    
+    // Force scroll to center the new position
+    if (timelineRef.current) {
+      const scrollTarget = (time * zoom) - (timelineRef.current.clientWidth / 2);
+      timelineRef.current.scrollTo({
+        left: Math.max(0, scrollTarget),
+        behavior: 'instant' 
+      });
+    }
+  };
+
   if (!project) return null;
 
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -281,11 +343,6 @@ export const AdvancedTimeline = ({
       return 0;
     });
   }, [project.tracks]);
-
-  const currentTimeRef = useRef(currentTime);
-  useEffect(() => {
-    currentTimeRef.current = currentTime;
-  }, [currentTime]);
 
   const zoomRef = useRef(zoom);
   const sortedTracksRef = useRef(sortedTracks);
@@ -386,18 +443,7 @@ export const AdvancedTimeline = ({
     updateVisibleRange();
   }, [zoom, duration]);
 
-  // Auto-scroll when playing
-  useEffect(() => {
-    if (!timelineRef.current || !isPlaying) return;
-    const scrollLeft = timelineRef.current.scrollLeft;
-    const clientWidth = timelineRef.current.clientWidth;
-    const currentX = currentTime * zoom;
-    
-    // If playhead goes past 80% of the view, scroll to keep it at 20%
-    if (currentX > scrollLeft + clientWidth * 0.8 || currentX < scrollLeft) {
-      timelineRef.current.scrollLeft = Math.max(0, currentX - clientWidth * 0.2);
-    }
-  }, [currentTime, isPlaying, zoom]);
+  /* Auto-scroll moved to component */
 
   const handleTimelineInteraction = (e: React.MouseEvent | React.TouchEvent) => {
     if (!timelineRef.current) return;
@@ -418,7 +464,7 @@ export const AdvancedTimeline = ({
       }
     } else {
       const { time: snappedTime, snapped } = snapTime(time);
-      onSeek(Math.max(0, Math.min(duration, snappedTime)));
+      handleSeek(Math.max(0, Math.min(duration, snappedTime)));
       setSnapLine(snapped ? snappedTime : null);
     }
   };
@@ -564,11 +610,7 @@ export const AdvancedTimeline = ({
 
           <div className="flex flex-col items-center justify-center bg-black/60 px-4 py-1 rounded border border-white/5 min-w-[140px]">
             <span className="text-[10px] font-black text-zinc-500 uppercase tracking-tighter leading-none mb-1">Текущее время</span>
-            <span className="text-xl font-mono font-bold text-indigo-400 tracking-widest leading-none">
-              {Math.floor(currentTime / 60).toString().padStart(2, '0')}:
-              {Math.floor(currentTime % 60).toString().padStart(2, '0')}:
-              {Math.floor((currentTime % 1) * 30).toString().padStart(2, '0')}
-            </span>
+            <CurrentTimeDisplay />
           </div>
         </div>
 
@@ -578,15 +620,7 @@ export const AdvancedTimeline = ({
             <TimelineMinimap 
               project={project}
               duration={duration}
-              currentTime={currentTime}
-              onSeek={(time) => {
-                  onSeek(time);
-                  // Make sure viewport updates
-                  if (timelineRef.current) {
-                    const scrollTarget = (time * zoom) - (timelineRef.current.clientWidth / 2);
-                    timelineRef.current.scrollLeft = Math.max(0, scrollTarget);
-                  }
-              }}
+              onSeek={handleSeek}
               visibleRange={timelineVisibleRange}
             />
           </div>
@@ -746,7 +780,6 @@ export const AdvancedTimeline = ({
             >
               <TimelineCanvas 
                 project={project} 
-                currentTime={currentTime} 
                 duration={duration} 
                 zoom={zoom} 
                 visibleRange={timelineVisibleRange}
@@ -778,7 +811,6 @@ export const AdvancedTimeline = ({
                   {isRecording && idx === recordingTrackIndex && (
                     <LiveRecordingSegment 
                       recordingStartTime={recordingStartTime} 
-                      currentTime={currentTime} 
                       zoom={zoom} 
                       recordingPeaks={recordingPeaks} 
                       timelineWidth={timelineRef.current?.clientWidth} 
@@ -791,13 +823,10 @@ export const AdvancedTimeline = ({
             </div>
 
             {/* Playhead */}
-            <div 
-              className="absolute top-0 bottom-0 w-px bg-rose-500 z-50 pointer-events-none shadow-[0_0_15px_rgba(244,63,94,0.5)]"
-              style={{ left: `${currentTime * zoom}px` }}
-            >
-              <div className="absolute -top-1 -left-1.5 w-3 h-3 bg-rose-500 rotate-45 shadow-lg" />
-              <div className="absolute top-0 bottom-0 -left-1 w-2 bg-rose-500/10" />
-            </div>
+            <Playhead zoom={zoom} />
+            
+            {/* Auto-scroller */}
+            <TimelineAutoScroller timelineRef={timelineRef} isPlaying={isPlaying} zoom={zoom} />
 
             {/* Snap Line */}
             {snapLine !== null && (
@@ -826,4 +855,15 @@ export const AdvancedTimeline = ({
   );
 };
 
-export default AdvancedTimeline;
+export default React.memo(AdvancedTimeline, (prev, next) => {
+  return prev.project === next.project && 
+         prev.zoom === next.zoom && 
+         prev.isPlaying === next.isPlaying &&
+         prev.isRecording === next.isRecording &&
+         prev.loopRange === next.loopRange &&
+         prev.isLooping === next.isLooping &&
+         prev.isRippleEnabled === next.isRippleEnabled &&
+         prev.selectedSegmentIds === next.selectedSegmentIds &&
+         prev.recordingStartTime === next.recordingStartTime &&
+         prev.recordingPeaks === next.recordingPeaks;
+});

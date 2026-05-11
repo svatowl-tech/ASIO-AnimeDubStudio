@@ -19,6 +19,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { cn, formatHotkey, getDefaultKeyMap } from '../lib/utils';
 import { Tooltip } from './Tooltip';
 import { ImportModal } from './ImportModal';
+import HistoryControls from './HistoryControls';
+import { useUIState } from '../contexts/UIContext';
 
 interface HeaderProps {
   project: any;
@@ -38,8 +40,6 @@ interface HeaderProps {
   handleToggleBackstage: () => void;
   setShowQuickImport: (show: boolean) => void;
   handleBulkImport: () => void;
-  showSettings: boolean;
-  setShowSettings: (show: boolean) => void;
   isElectron: boolean;
   handleExport: (format: 'WAV' | 'MP3' | 'FLAC') => void;
   handleBatchExport: () => void;
@@ -122,8 +122,6 @@ const Header: React.FC<HeaderProps> = ({
   handleToggleBackstage,
   setShowQuickImport,
   handleBulkImport,
-  showSettings,
-  setShowSettings,
   isElectron,
   handleExport,
   handleBatchExport,
@@ -134,6 +132,7 @@ const Header: React.FC<HeaderProps> = ({
   handleOpenProjectFolder,
   onLoadProject
 }) => {
+  const { toggleSettings } = useUIState();
   const [showHotkeys, setShowHotkeys] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
 
@@ -161,6 +160,7 @@ const Header: React.FC<HeaderProps> = ({
         </div>
 
         <div className="flex items-center gap-3 shrink-0 ml-auto">
+          <HistoryControls />
           <button 
               onClick={() => setShowImportModal(true)}
               className="px-4 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-xs font-bold flex items-center gap-2 transition-all border border-white/5"
@@ -249,7 +249,7 @@ const Header: React.FC<HeaderProps> = ({
                           <button 
                             onClick={() => { handleSelectProjectFolder(); setShowProjectMenu(false); }}
                             className="w-full flex items-center gap-3 px-3 py-2 hover:bg-white/5 rounded-lg text-xs font-bold transition-colors"
-                            title={project.projectPath || 'Выбрать...'}
+                            title={project?.projectPath || 'Выбрать...'}
                           >
                             <Plus className="w-4 h-4 text-zinc-400" />
                             Сменить / Переместить проект
@@ -258,7 +258,7 @@ const Header: React.FC<HeaderProps> = ({
                         <button 
                           onClick={() => { handleSelectBackstageFolder?.(); setShowProjectMenu(false); }}
                           className="w-full flex items-center gap-3 px-3 py-2 hover:bg-white/5 rounded-lg text-xs font-bold transition-colors"
-                          title={project.audioSettings?.backstageFolderPath || 'Выбрать...'}
+                          title={project?.audioSettings?.backstageFolderPath || 'Выбрать...'}
                         >
                           <VideoIcon className="w-4 h-4 text-rose-400" />
                           Папка бекстейджа
@@ -302,7 +302,7 @@ const Header: React.FC<HeaderProps> = ({
             <Keyboard className="w-5 h-5" />
           </button>
           <button 
-            onClick={() => setShowSettings(!showSettings)}
+            onClick={toggleSettings}
             className="p-2 hover:bg-white/5 rounded-lg transition-colors text-zinc-400 hover:text-white"
             title="Настройки проекта"
           >

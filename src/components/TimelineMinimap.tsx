@@ -1,11 +1,11 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { Project } from '../types';
 import { cn } from '../lib/utils';
+import { useTimelineData } from '../contexts/TimelineContext';
 
 interface TimelineMinimapProps {
   project: Project;
   duration: number;
-  currentTime: number;
   onSeek: (time: number) => void;
   visibleRange: { start: number, end: number };
 }
@@ -13,10 +13,10 @@ interface TimelineMinimapProps {
 export const TimelineMinimap: React.FC<TimelineMinimapProps> = ({
   project,
   duration,
-  currentTime,
   onSeek,
   visibleRange
 }) => {
+  const { currentTime } = useTimelineData();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 

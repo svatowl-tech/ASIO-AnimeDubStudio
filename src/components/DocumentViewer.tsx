@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { 
   FileText, 
   Settings, 
@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { SubtitleLine } from '../types';
+import { useSyncScriptScroll } from '../hooks/useSyncScriptScroll';
 
 export const DocumentViewer = ({ 
   subtitles, 
@@ -45,19 +46,15 @@ export const DocumentViewer = ({
     return isTimeMatch && (s.role === activeRole || !activeRole);
   }) || subtitles.findIndex(s => currentTime >= s.start && currentTime <= s.end);
   const containerRef = useRef<HTMLDivElement>(null);
-  const activeLineRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (activeLineRef.current && containerRef.current) {
-      activeLineRef.current.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center'
-      });
-    }
-  }, [currentLineIndex]);
+  const { handleManualInteraction } = useSyncScriptScroll(currentTime, subtitles, containerRef);
 
   return (
-    <div className="flex flex-col h-full bg-zinc-950 border-l border-zinc-800 shadow-2xl z-20">
+    <div 
+      className="flex flex-col h-full bg-zinc-950 border-l border-zinc-800 shadow-2xl z-20"
+      onWheel={handleManualInteraction}
+      onTouchMove={handleManualInteraction}
+    >
       {/* Document Header */}
       <div className="h-14 border-b border-zinc-800 bg-zinc-900/50 flex items-center px-6 justify-between">
         <div className="flex items-center gap-3">
@@ -128,7 +125,7 @@ export const DocumentViewer = ({
           return (
             <div 
               key={idx}
-              ref={isActive ? activeLineRef : null}
+              id={line.id || `sub-${line.start.toFixed(3)}`}
               onClick={() => onSeek(line.start)}
               className={cn(
                 "group relative p-6 rounded-2xl transition-all duration-500 cursor-pointer border",

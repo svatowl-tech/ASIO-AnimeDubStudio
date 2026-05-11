@@ -14,33 +14,31 @@ import {
 } from 'lucide-react';
 import { Project, AudioSegment } from '../types';
 import { cn, safeConfirm } from '../lib/utils';
-
-interface ProjectHealthManagerProps {
-  project: Project;
-  onUpdate: (project: Project) => void;
-  onClose: () => void;
-}
+import { useUIState } from '../contexts/UIContext';
+import { useProjectData } from '../contexts/ProjectContext';
 
 interface VerificationData {
   missingSegments: AudioSegment[];
   orphanedFiles: string[];
 }
 
-export const ProjectHealthManager: React.FC<ProjectHealthManagerProps> = ({ 
-  project, 
-  onUpdate, 
-  onClose 
-}) => {
+export const ProjectHealthManager: React.FC = () => {
+  const { activeModal, setActiveModal } = useUIState();
+  const { project, setProject } = useProjectData();
+  const isOpen = activeModal === 'health';
+  const onClose = () => setActiveModal(null);
+  
   const [isVerifying, setIsVerifying] = useState(false);
   const [data, setData] = useState<VerificationData | null>(null);
   const [relinkingId, setRelinkingId] = useState<string | null>(null);
   const [isCleaning, setIsCleaning] = useState(false);
 
   const runVerification = async () => {
-    if (!window.electronAPI || !project.projectPath) return;
+    if (!window.electronAPI || !project?.projectPath) return;
     setIsVerifying(true);
     try {
       const res = await window.electronAPI.verifyProjectFiles(project.id, project.projectPath);
+
       if (res.success && res.data) {
         setData(res.data);
       }
@@ -77,7 +75,7 @@ export const ProjectHealthManager: React.FC<ProjectHealthManagerProps> = ({
   };
 
   const handleRelinkByHash = async (segment: AudioSegment) => {
-    if (!window.electronAPI || !project.projectPath) return;
+    if (!window.electronAPI || !project?.projectPath) return;
     setRelinkingId(segment.id);
     try {
         // We can't calculate hash of a missing file, BUT if the project was originally exported/saved 
@@ -116,7 +114,7 @@ export const ProjectHealthManager: React.FC<ProjectHealthManagerProps> = ({
       ...t,
       segments: t.segments.map(s => s.id === segmentId ? { ...s, filePath: newPath } : s)
     }));
-    onUpdate({ ...project, tracks: updatedTracks });
+    setProject({ ...project, tracks: updatedTracks });
     
     // Refresh verification list
     runVerification();
@@ -137,10 +135,26 @@ export const ProjectHealthManager: React.FC<ProjectHealthManagerProps> = ({
     }
   };
 
+  if (!isOpen || !project) return null;
+
   return (
-    <div className="bg-zinc-900 overflow-hidden flex flex-col h-full max-h-[80vh]">
-      {/* Header */}
-      <div className="p-6 border-b border-white/5 flex items-center justify-between bg-zinc-900/50 backdrop-blur-md">
+    <AnimatePresence>
+      <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          onClick={onClose}
+          className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        />
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.95, y: 20 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: 0.95, y: 20 }}
+          className="relative w-full max-w-2xl bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col h-full max-h-[80vh]"
+        >
+          {/* Header */}
+          <div className="p-6 border-b border-white/5 flex items-center justify-between bg-zinc-900/50 backdrop-blur-md">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-indigo-500/10 rounded-xl flex items-center justify-center border border-indigo-500/20">
             <ShieldCheck className="w-5 h-5 text-indigo-400" />
@@ -309,6 +323,8 @@ export const ProjectHealthManager: React.FC<ProjectHealthManagerProps> = ({
           Закрыть
         </button>
       </div>
-    </div>
+        </motion.div>
+      </div>
+    </AnimatePresence>
   );
 };

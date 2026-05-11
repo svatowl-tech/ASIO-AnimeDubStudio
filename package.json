@@ -111,7 +111,8 @@
     "react-resizable-panels": "^4.9.0",
     "tailwind-merge": "^3.5.0",
     "wavesurfer.js": "^7.12.5",
-    "windows": "^0.1.2"
+    "windows": "^0.1.2",
+    "zustand": "^5.0.13"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.0",

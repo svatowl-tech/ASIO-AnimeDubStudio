@@ -3,14 +3,12 @@ import { Project } from '../types';
 
 export const TimelineCanvas = React.memo(({ 
   project, 
-  currentTime, 
   duration, 
   zoom, 
   visibleRange: vRange,
   loopRange
 }: { 
   project: Project, 
-  currentTime: number, 
   duration: number, 
   zoom: number, 
   visibleRange: { start: number, end: number },

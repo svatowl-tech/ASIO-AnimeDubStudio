@@ -45,20 +45,33 @@ const DEFAULT_PRESETS: ProcessingPreset[] = [
   }
 ];
 
-export const TrackProcessingModal = ({
-  isOpen,
-  onClose,
-  initialSettings,
-  onSave,
-  trackName
-}: {
-  isOpen: boolean;
-  onClose: () => void;
-  initialSettings?: TrackProcessing;
-  onSave: (settings: TrackProcessing) => void;
-  trackName: string;
-}) => {
-  const [settings, setSettings] = useState<TrackProcessing>(initialSettings || { enabled: false });
+import { useUIState } from '../contexts/UIContext';
+import { useProjectData } from '../contexts/ProjectContext';
+
+export const TrackProcessingModal = () => {
+  const { activeModal, setActiveModal, processingTrackId, setProcessingTrackId } = useUIState();
+  const { project, setProject } = useProjectData();
+  
+  const isOpen = activeModal === 'processing' && !!processingTrackId;
+  const track = project?.tracks.find(t => t.id === processingTrackId);
+  const trackName = track?.name || '';
+  const initialSettings = track?.processing || { enabled: false };
+
+  const onClose = () => {
+    setActiveModal(null);
+    setProcessingTrackId(null);
+  };
+
+  const onSave = (settings: TrackProcessing) => {
+    if (!project || !processingTrackId) return;
+    const newTracks = project.tracks.map(t => 
+      t.id === processingTrackId ? { ...t, processing: settings } : t
+    );
+    setProject({ ...project, tracks: newTracks });
+    onClose();
+  };
+
+  const [settings, setSettings] = useState<TrackProcessing>(initialSettings);
   const [presets, setPresets] = useState<ProcessingPreset[]>([]);
   const [presetName, setPresetName] = useState('');
 

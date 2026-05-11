@@ -4,24 +4,26 @@ import { Plus, Activity } from 'lucide-react';
 import { cn, getGlobalAudioSettings } from '../lib/utils';
 import AudioDeviceManager from './AudioDeviceManager';
 import { HotkeySettings } from './HotkeySettings';
+import { useUIState } from '../contexts/UIContext';
+import { useProjectData } from '../contexts/ProjectContext';
 
-import { PlaybackEngine } from '../services/playbackEngine';
+const SettingsModal: React.FC = () => {
+  const { activeModal, setActiveModal } = useUIState();
+  const { project, setProject } = useProjectData();
+  const show = activeModal === 'settings';
 
-interface SettingsModalProps {
-  show: boolean;
-  onClose: () => void;
-  project: any;
-  onProjectUpdate: (updates: any) => void;
-  onStartCalibration: () => void;
-}
+  const onClose = () => setActiveModal(null);
 
-const SettingsModal: React.FC<SettingsModalProps> = ({
-  show,
-  onClose,
-  project,
-  onProjectUpdate,
-  onStartCalibration
-}) => {
+  const onProjectUpdate = (updates: any) => {
+    if (project) {
+      setProject({ ...project, ...updates });
+    }
+  };
+
+  const onStartCalibration = () => {
+    setActiveModal('calibration' as any);
+  };
+
   return (
     <AnimatePresence>
       {show && (

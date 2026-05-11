@@ -84,31 +84,34 @@ export function punchInSegment(existingSegments: AudioSegment[], newSegment: Aud
   return result.sort((a, b) => a.startTime - b.startTime);
 }
 
-const MIN_SPLIT_DISTANCE = 0.05;
-
 /**
  * Splits a single segment at a specific time and returns the resulting segments.
  * Calculates duration and fileOffset appropriately.
  */
 export function splitSegmentAtTime(segment: AudioSegment, splitTime: number): AudioSegment[] {
-  const normalizedSplitTime = Math.round(splitTime * 1000) / 1000;
-  const segStart = Math.round(segment.startTime * 1000) / 1000;
-  const segEnd = Math.round((segment.startTime + segment.duration) * 1000) / 1000;
+  let normalizedSplitTime = Number(splitTime.toFixed(3));
+  const segStart = Number(segment.startTime.toFixed(3));
+  const segEnd = Number((segment.startTime + segment.duration).toFixed(3));
 
-  // Strictly greater than start and strictly less than end with MIN_SPLIT_DISTANCE buffer
-  if (normalizedSplitTime <= segStart + MIN_SPLIT_DISTANCE || 
-      normalizedSplitTime >= segEnd - MIN_SPLIT_DISTANCE) {
-    return [segment];
+  // New logic: Clamp splitTime to force split
+  if (normalizedSplitTime <= segStart) {
+    normalizedSplitTime = Number((segStart + 0.001).toFixed(3));
+  } else if (normalizedSplitTime >= segEnd) {
+    normalizedSplitTime = Number((segEnd - 0.001).toFixed(3));
   }
+  
+  // Re-normalize just in case
+  normalizedSplitTime = Number(normalizedSplitTime.toFixed(3));
 
-  const leftDuration = Math.round((normalizedSplitTime - segment.startTime) * 1000) / 1000;
-  const rightDuration = Math.round((segment.duration - leftDuration) * 1000) / 1000;
+  const leftDuration = Number((normalizedSplitTime - segment.startTime).toFixed(3));
+  // Ensure sum equals original duration
+  const rightDuration = Number((segment.duration - leftDuration).toFixed(3));
   
   const rate = segment.playbackRate || 1;
   // newFileOffset = originalFileOffset + (currentTime - originalStartTime) * rate
-  const rightFileOffset = Math.round((segment.fileOffset + (leftDuration * rate)) * 1000) / 1000;
+  const rightFileOffset = Number((segment.fileOffset + (leftDuration * rate)).toFixed(3));
 
-  const actualSplitTimeOnTimeline = Math.round((segment.startTime + leftDuration) * 1000) / 1000;
+  const actualSplitTimeOnTimeline = Number((segment.startTime + leftDuration).toFixed(3));
 
   const leftSeg: AudioSegment = { 
     ...segment, 

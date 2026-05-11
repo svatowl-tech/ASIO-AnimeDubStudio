@@ -15,7 +15,8 @@ export const Teleprompter = ({
   onLineHeightChange,
   onPacingChange,
   onModeChange,
-  onResize
+  onResize,
+  onSeek
 }: { 
   subtitles: SubtitleLine[], 
   currentTime: number,
@@ -28,14 +29,26 @@ export const Teleprompter = ({
   onLineHeightChange: (height: number) => void,
   onPacingChange: (pacing: 'auto' | 'manual') => void,
   onModeChange: (mode: 'compact' | 'expanded') => void,
-  onResize?: (width: number, height: number) => void
+  onResize?: (width: number, height: number) => void,
+  onSeek?: (time: number) => void
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [manualOffset, setManualOffset] = useState(0);
   const [isResizing, setIsResizing] = useState(false);
+  const [userInteracting, setUserInteracting] = useState(false);
+  const interactionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const activeLine = subtitles.find(s => currentTime >= s.start && currentTime <= s.end && s.role === activeRole);
   const nextActiveLine = subtitles.find(s => s.start > currentTime && s.role === activeRole);
+
+  const handleInteraction = () => {
+    setUserInteracting(true);
+    if (interactionTimeoutRef.current) clearTimeout(interactionTimeoutRef.current);
+    interactionTimeoutRef.current = setTimeout(() => {
+      setUserInteracting(false);
+    }, 2000);
+  };
+
   const timeToNext = nextActiveLine ? Math.max(0, nextActiveLine.start - currentTime) : null;
 
   const handleResizeStart = (e: React.MouseEvent | React.PointerEvent) => {
@@ -70,7 +83,7 @@ export const Teleprompter = ({
 
   // Auto-scroll logic
   useEffect(() => {
-    if (pacing === 'auto' && containerRef.current) {
+    if (pacing === 'auto' && containerRef.current && !userInteracting) {
       const target = activeLine || nextActiveLine;
       if (target && target.id !== activeLineIdRef.current) {
         activeLineIdRef.current = target.id;
@@ -82,7 +95,7 @@ export const Teleprompter = ({
         activeLineIdRef.current = null;
       }
     }
-  }, [currentTime, pacing, subtitles, activeRole, activeLine, nextActiveLine]);
+  }, [currentTime, pacing, subtitles, activeRole, activeLine, nextActiveLine, userInteracting]);
 
   // Handle keyboard pacing
   useEffect(() => {
@@ -176,6 +189,12 @@ export const Teleprompter = ({
       <div 
         ref={containerRef}
         className="h-full overflow-y-auto no-scrollbar scroll-smooth"
+        onWheel={() => {
+          if (pacing === 'auto') handleInteraction();
+        }}
+        onTouchMove={() => {
+          if (pacing === 'auto') handleInteraction();
+        }}
       >
         <div 
           className={cn(
@@ -193,8 +212,11 @@ export const Teleprompter = ({
               <div 
                 key={line.id}
                 id={`tp-line-${line.id}`}
+                onClick={() => {
+                  if (onSeek) onSeek(line.start);
+                }}
                 className={cn(
-                  "transition-all duration-300 px-8",
+                  "transition-all duration-300 px-8 cursor-pointer hover:bg-white/5 rounded-lg",
                   isSelectedRole 
                     ? (isCurrent ? "text-white scale-110 opacity-100 drop-shadow-[0_0_20px_rgba(255,255,255,0.3)]" : "text-white/70 opacity-70") 
                     : "text-zinc-600 opacity-30 scale-90"

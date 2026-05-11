@@ -216,37 +216,8 @@ export function useTimelineHotkeys({
         e.preventDefault();
         e.stopPropagation();
         
-        const proj = projectRef.current;
-        const currentTime = currentTimeRef.current;
-        const selectedIds = selectedSegmentIds;
-
-        if (proj) {
-          proj.tracks.forEach(track => {
-            // Skip "originals" track unless segments are explicitly selected
-            const isOriginalTrack = track.id === 'originals-track' || track.name === 'Оригинал' || track.id === 'original-audio-track';
-            
-            track.segments.forEach(seg => {
-              const segEnd = seg.startTime + seg.duration;
-              const intersects = currentTime > seg.startTime && currentTime < segEnd;
-              
-              if (intersects) {
-                const isOriginalSeg = String(seg.id) === 'original-audio-seg';
-
-                if (selectedIds && selectedIds.length > 0) {
-                  // If segments are selected, only split those.
-                  if (selectedIds.some(id => String(id) === String(seg.id))) {
-                    handleSplitSegment(track.id, seg.id, currentTime);
-                  }
-                } else {
-                  // If no selection: Split segments on normal working tracks (skip originals)
-                  if (!isOriginalTrack && !isOriginalSeg) {
-                    handleSplitSegment(track.id, seg.id, currentTime);
-                  }
-                }
-              }
-            });
-          });
-        }
+        // Always trigger split - the logic for what to split resides in handleSplitSegment
+        handleSplitSegment('', '', -1); 
         return;
       }
     };

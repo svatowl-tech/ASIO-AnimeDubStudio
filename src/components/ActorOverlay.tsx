@@ -31,7 +31,8 @@ export const ActorOverlay = ({
   isBackstageRecording = false,
   activeRole = '',
   project,
-  onSettingsChange
+  onSettingsChange,
+  onSeek
 }: { 
   currentLine?: SubtitleLine, 
   nextLine?: SubtitleLine,
@@ -58,7 +59,8 @@ export const ActorOverlay = ({
   isBackstageRecording?: boolean,
   activeRole?: string,
   project?: Project,
-  onSettingsChange?: (settings: any) => void
+  onSettingsChange?: (settings: any) => void,
+  onSeek?: (time: number) => void
 }) => {
   return (
     <div className="absolute inset-0 pointer-events-none z-40 overflow-hidden">
@@ -113,6 +115,7 @@ export const ActorOverlay = ({
             onPacingChange={setTeleprompterPacing}
             onModeChange={setTeleprompterMode}
             onResize={(w, h) => setTeleprompterSize({ width: w, height: h })}
+            onSeek={onSeek}
           />
         </motion.div>
       )}

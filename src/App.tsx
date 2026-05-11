@@ -49,8 +49,8 @@ import { Waveform } from './components/Waveform';
 import AudioSegmentView from './components/AudioSegmentView';
 import VUMeter from './components/VUMeter';
 import AudioDeviceManager from './components/AudioDeviceManager';
-import ExportOverlay from './components/ExportOverlay';
 import ExportModal from './components/ExportModal';
+import QuickImportModal from './components/QuickImportModal';
 import PreRollCountdown from './components/PreRollCountdown';
 import Teleprompter from './components/Teleprompter';
 import { Project, SubtitleLine, AudioTrack, AudioSegment, Fix, Marker, TrackProcessing } from './types';
@@ -76,14 +76,22 @@ import TrackHeader from './components/TrackHeader';
 import Header from './components/Header';
 import Sidebar from './components/Sidebar';
 import TransportControls from './components/TransportControls';
-import QuickImportModal from './components/QuickImportModal';
-import SettingsModal from './components/SettingsModal';
-import { TrackProcessingModal } from './components/TrackProcessingModal';
+
+
+
 
 import { useProject } from './hooks/useProject';
 import { useTimelineState } from './hooks/useTimelineState';
 import { useTimelineHotkeys } from './hooks/useTimelineHotkeys';
 import { useTimelineHistory } from './hooks/useTimelineHistory';
+import { useProjectActions } from './hooks/useProjectActions';
+import { ProjectProvider } from './contexts/ProjectContext';
+import { TimelineProvider } from './contexts/TimelineContext';
+import LeftSidebar from './components/layout/LeftSidebar';
+import { UIProvider } from './contexts/UIContext';
+import ModalsManager from './components/layout/ModalsManager';
+import TopHeader from './components/layout/TopHeader';
+import StyledExportOverlay from './components/layout/ExportOverlay';
 import { useAudioEngine } from './hooks/useAudioEngine';
 import { useProjectImport } from './hooks/useProjectImport';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -178,298 +186,40 @@ export default function App() {
     isRecordingRef
   } = useAudioEngine(project, setProject, videoRef, currentTimeRef, isPlayingRef, togglePlay);
 
-  const { saveSnapshot, undo, redo } = useTimelineHistory(project, setProject);
+  const { saveSnapshot, undo, redo, canUndo, canRedo } = useTimelineHistory(project, setProject);
 
-  const handleSplit = useCallback((trackId?: string, segmentId?: string, splitTime?: number) => {
-    // 1. Determine target segment
-    const targetSegmentId = segmentId || selectedSegmentIds[0];
-    if (!targetSegmentId) {
-      console.warn("[Split] No segment provided or selected for splitting");
-      return;
-    }
+  
+  const isRippleEnabledRef = useRef(isRippleEnabled);
+  useEffect(() => { isRippleEnabledRef.current = isRippleEnabled; }, [isRippleEnabled]);
 
-    // 2. Get precise time from video element directly to ensure perfect split alignment
-    const rawSplitTime = videoRef.current ? videoRef.current.currentTime : (splitTime ?? currentTimeRef.current);
-    const actualSplitTime = Math.round(rawSplitTime * 1000) / 1000;
-    
-    saveSnapshot();
-    // We no longer call playbackEngine.stop() here, instead we use reconcile() after state update
-    
-    let newPart2Id: string | null = null;
-    setProject(currentProject => {
-      if (!currentProject) return null;
-      
-      // 4. Find trackIndex and segmentIndex by looking through all tracks
-      let foundTrackIndex = -1;
-      let foundSegmentIndex = -1;
-
-      for (let t = 0; t < currentProject.tracks.length; t++) {
-        const sIndex = currentProject.tracks[t].segments.findIndex(s => String(s.id) === String(targetSegmentId));
-        if (sIndex !== -1) {
-          foundTrackIndex = t;
-          foundSegmentIndex = sIndex;
-          break;
-        }
-      }
-
-      if (foundTrackIndex === -1) {
-        console.warn("[Split] Segment not found in any track:", targetSegmentId);
-        return currentProject;
-      }
-
-      const track = currentProject.tracks[foundTrackIndex];
-      const segment = track.segments[foundSegmentIndex];
-
-      const MIN_SPLIT_DISTANCE = 0.05;
-      const segStart = Math.round(segment.startTime * 1000) / 1000;
-      const segEnd = Math.round((segment.startTime + segment.duration) * 1000) / 1000;
-
-      // Bounds check: actualSplitTime must be strictly between start and end with buffer
-      if (actualSplitTime <= segStart + MIN_SPLIT_DISTANCE || actualSplitTime >= segEnd - MIN_SPLIT_DISTANCE) {
-        console.warn("[Split] Split time too close to boundaries or out of bounds:", actualSplitTime, "for segment:", segment.id);
-        return currentProject;
-      }
-
-      const splitResult = splitSegmentAtTime(segment, actualSplitTime);
-      if (splitResult.length < 2) return currentProject; // No split occurred
-
-      const [part1, part2] = splitResult;
-      newPart2Id = part2.id;
-
-      // 5. Build new tracks array, keeping other tracks and segments unchanged
-      const newTracks = [...currentProject.tracks];
-      const updatedSegments = [...track.segments];
-      updatedSegments.splice(foundSegmentIndex, 1, part1, part2);
-      
-      newTracks[foundTrackIndex] = {
-        ...track,
-        segments: updatedSegments
-      };
-
-      const updatedProject = { ...currentProject, tracks: newTracks };
-
-      // 6. Reconcile playback engine segments without stopping
-      if (isPlayingRef.current) {
-        playbackEngine.reconcile(updatedProject.tracks);
-      }
-
-      return updatedProject;
-    });
-
-    // 7. Automatically select the second part of the segment after the split
-    if (newPart2Id) {
-      setSelectedSegmentIds([newPart2Id]);
-    }
-  }, [saveSnapshot, setProject, selectedSegmentIds, setSelectedSegmentIds]);
-
-  const addMarker = useCallback(() => {
-    if (!project) return;
-    const newMarker: Marker = {
-      id: Math.random().toString(36).substr(2, 9),
-      time: currentTime,
-      label: `Marker ${project.markers?.length ? project.markers.length + 1 : 1}`,
-      color: '#f59e0b'
-    };
-    setProject({
-      ...project,
-      markers: [...(project.markers || []), newMarker]
-    });
-  }, [project, currentTime]);
-
-  const handleJoinSegments = useCallback(() => {
-    if (selectedSegmentIds.length !== 2) return;
-    saveSnapshot();
-    setProject(prev => {
-      if (!prev) return prev;
-      const newTracks = prev.tracks.map(track => {
-        const segs = track.segments.filter(s => selectedSegmentIds.includes(s.id));
-        if (segs.length !== 2) return track;
-        
-        const [s1, s2] = [...segs].sort((a, b) => a.startTime - b.startTime);
-        
-        const gap = s2.startTime - (s1.startTime + s1.duration);
-        if (Math.abs(gap) > 0.1) return track;
-        
-        if (s1.blobUrl === s2.blobUrl && Math.abs(s2.fileOffset - (s1.fileOffset + s1.duration)) < 0.1) {
-           const newSeg = {
-             ...s1,
-             duration: s1.duration + s2.duration + gap,
-             text: s1.text || s2.text
-           };
-           return {
-             ...track,
-             segments: track.segments.filter(s => s.id !== s1.id && s.id !== s2.id).concat(newSeg)
-           };
-        }
-        return track;
-      });
-      return { ...prev, tracks: newTracks };
-    });
-    setSelectedSegmentIds([]);
-  }, [selectedSegmentIds, saveSnapshot]);
-
-  const deleteTrack = useCallback((id: string) => {
-    if (!project) return;
-    const updatedTracks = project.tracks.filter(track => track.id !== id);
-    setProject({ ...project, tracks: updatedTracks });
-  }, [project]);
-
-  const updateSegment = useCallback((id: string, updates: Partial<AudioSegment>, targetTrackId?: string) => {
-    if (!project) return;
-    
-    const isMultiSelect = selectedSegmentIds.includes(id);
-    
-    setProject(prevProject => {
-      if (!prevProject) return prevProject;
-      
-      let deltaStartTime = 0;
-      let sourceTrackId: string | null = null;
-      let segmentToMove: AudioSegment | null = null;
-      
-      if (isMultiSelect && updates.startTime !== undefined) {
-        // Find the original segment to calculate delta
-        for (const track of prevProject.tracks) {
-          const seg = track.segments.find(s => s.id === id);
-          if (seg) {
-            deltaStartTime = updates.startTime - seg.startTime;
-            break;
-          }
-        }
-      }
-
-      if (targetTrackId) {
-        for (const track of prevProject.tracks) {
-          const seg = track.segments.find(s => s.id === id);
-          if (seg) {
-            sourceTrackId = track.id;
-            segmentToMove = { ...seg, ...updates };
-            break;
-          }
-        }
-      }
-
-      // If moving across tracks, we handle that as a special case
-      if (targetTrackId && sourceTrackId && targetTrackId !== sourceTrackId && segmentToMove) {
-         const updatedTracks = prevProject.tracks.map(track => {
-            if (track.id === sourceTrackId) {
-               return { ...track, segments: track.segments.filter(s => s.id !== id) };
-            }
-            if (track.id === targetTrackId) {
-               return { ...track, segments: [...track.segments, segmentToMove!] };
-            }
-            return track;
-         });
-         return { ...prevProject, tracks: updatedTracks };
-      }
-
-      // Normal update
-      const updatedTracks = prevProject.tracks.map(track => {
-        let newSegments = [...track.segments];
-        let rippleDiff = 0;
-        let rippleStartIndex = -1;
-
-        newSegments = newSegments.map((seg, idx) => {
-          if (seg.id === id) {
-            const newSeg = { ...seg, ...updates };
-            if (isRippleEnabledRef.current && updates.duration !== undefined && updates.duration !== seg.duration) {
-              rippleDiff = updates.duration - seg.duration;
-              rippleStartIndex = idx;
-            }
-            return newSeg;
-          } else if (isMultiSelect && selectedSegmentIds.includes(seg.id)) {
-            // Apply delta to other selected segments
-            const newSeg = { ...seg };
-            if (updates.startTime !== undefined) {
-              newSeg.startTime = Math.max(0, seg.startTime + deltaStartTime);
-            }
-            // We could also apply other updates like volume, mute, etc. if needed
-            return newSeg;
-          }
-          return seg;
-        });
-
-        // Ripple Edit Logic for duration changes
-        if (rippleDiff !== 0 && rippleStartIndex !== -1) {
-          newSegments = newSegments.map((seg, idx) => {
-            if (idx > rippleStartIndex && !selectedSegmentIds.includes(seg.id)) {
-              return { ...seg, startTime: Math.max(0, seg.startTime + rippleDiff) };
-            }
-            return seg;
-          });
-        }
-        
-        return { ...track, segments: newSegments };
-      });
-      return { ...prevProject, tracks: updatedTracks };
-    });
-  }, [project, selectedSegmentIds]);
-
-  const updateAllTracks = useCallback((updates: Partial<AudioTrack>) => {
-    if (!project) return;
-    const updatedTracks = project.tracks.map(track => ({ ...track, ...updates }));
-    setProject({ ...project, tracks: updatedTracks });
-  }, [project]);
-
-  const deleteSegments = useCallback((targetIds?: string[]) => {
-    if (!project) return;
-    
-    // Safely collect IDs to delete
-    const validSelected = selectedSegmentIds.filter((cid): cid is string => cid !== undefined && cid !== null);
-    
-    // If specific target IDs provided and they are partially selected, delete all selection
-    // If specific target IDs provided but NOT selected, delete only the target
-    // If NO target IDs provided, delete all currently selected
-    let idsToDelete: string[] = [];
-    if (targetIds && targetIds.length > 0) {
-      if (targetIds.some(tid => validSelected.includes(tid))) {
-        idsToDelete = validSelected;
-      } else {
-        idsToDelete = targetIds;
-      }
-    } else {
-      idsToDelete = validSelected;
-    }
-
-    if (idsToDelete.length === 0) return;
-    
-    saveSnapshot();
-    setProject(prevProject => {
-      if (!prevProject) return prevProject;
-      
-      const updatedTracks = prevProject.tracks.map(track => {
-        const segmentsToDelete = track.segments.filter(s => s.id && idsToDelete.includes(s.id));
-        if (segmentsToDelete.length === 0) return track;
-        
-        let newSegments = track.segments.filter(s => !s.id || !idsToDelete.includes(s.id));
-        
-        // Ripple Edit Logic for deletion
-        if (isRippleEnabledRef.current && segmentsToDelete.length > 0) {
-          const firstDeleted = segmentsToDelete.reduce((prev, curr) => prev.startTime < curr.startTime ? prev : curr);
-          const totalDeletedDuration = segmentsToDelete.reduce((sum, seg) => sum + seg.duration, 0);
-          
-          newSegments = newSegments.map(seg => {
-            if (seg.startTime >= firstDeleted.startTime) {
-              return { ...seg, startTime: Math.max(0, seg.startTime - totalDeletedDuration) };
-            }
-            return seg;
-          });
-        }
-        
-        return { ...track, segments: newSegments };
-      });
-      return { ...prevProject, tracks: updatedTracks };
-    });
-    
-    // Clear selection if any of the deleted segments were selected
-    if (idsToDelete.some(id => selectedSegmentIds.includes(id))) {
-      setSelectedSegmentIds(prev => prev.filter(selId => !idsToDelete.includes(selId)));
-    }
-  }, [project, selectedSegmentIds, saveSnapshot]);
+  const {
+    handleSplit,
+    deleteSegments,
+    updateSegment,
+    updateAllTracks,
+    deleteTrack,
+    addMarker,
+    handleJoinSegments,
+    handleArmTrack,
+    handleUpdateProcessing,
+    handleAddTrack,
+    handleDuplicateSegment,
+    moveSegmentToTrack
+  } = useProjectActions({
+    project,
+    setProject,
+    saveSnapshot,
+    selectedSegmentIds,
+    setSelectedSegmentIds,
+    isPlayingRef,
+    currentTimeRef,
+    videoRef,
+    isRippleEnabledRef
+  });
 
   const { handleSelectVideo } = useProjectImport(project, setProject, setDuration);
 
   const [showProjectMenu, setShowProjectMenu] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const [showFixes, setShowFixes] = useState(true);
   const [showQuickImport, setShowQuickImport] = useState(false);
   const [processingTrackId, setProcessingTrackId] = useState<string | null>(null);
@@ -547,9 +297,6 @@ export default function App() {
   const [teleprompterFontSize, setTeleprompterFontSize] = useState(32);
   const [teleprompterLineHeight, setTeleprompterLineHeight] = useState(1.4);
   const [teleprompterPacing, setTeleprompterPacing] = useState<'auto' | 'manual'>('auto');
-
-  const isRippleEnabledRef = useRef(isRippleEnabled);
-  useEffect(() => { isRippleEnabledRef.current = isRippleEnabled; }, [isRippleEnabled]);
 
   useEffect(() => {
     if (project?.id && project.uiState) {
@@ -2015,67 +1762,8 @@ export default function App() {
     }
   };
 
-  const handleArmTrack = useCallback((trackId: string) => {
-    setProject(prev => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        tracks: prev.tracks.map(t => ({
-          ...t,
-          isArmed: t.id === trackId ? !t.isArmed : false
-        }))
-      };
-    });
-  }, []);
-
-  const handleUpdateProcessing = useCallback((trackId: string, settings: TrackProcessing) => {
-    setProject(prev => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        tracks: prev.tracks.map(t => t.id === trackId ? { ...t, processing: settings } : t)
-      };
-    });
-  }, []);
-
-  const handleAddTrack = useCallback(() => {
-    setProject(prev => {
-      if (!prev) return prev;
-      const dubsCount = prev.tracks.filter(t => t.name.toLowerCase().includes('dub')).length;
-      const newTrack: AudioTrack = {
-        id: `track-${Date.now()}`,
-        name: `Dubs ${dubsCount + 1}`,
-        segments: [],
-        volume: 1.0,
-        isMuted: false,
-        isArmed: false,
-        height: 80
-      };
-      return { ...prev, tracks: [...prev.tracks, newTrack] };
-    });
-  }, []);
-
-  const handleDuplicateSegment = useCallback((trackId: string, segmentId: string, newStartTime: number) => {
-    setProject(prev => {
-      if (!prev) return prev;
-      const newTracks = prev.tracks.map(track => {
-        if (track.id !== trackId) return track;
-        
-        const segToDuplicate = track.segments.find(s => s.id === segmentId);
-        if (!segToDuplicate) return track;
-        
-        const newSeg = {
-          ...segToDuplicate,
-          id: Math.random().toString(36).substr(2, 9),
-          startTime: newStartTime
-        };
-        
-        return { ...track, segments: [...track.segments, newSeg] };
-      });
-      return { ...prev, tracks: newTracks };
-    });
-  }, []);
-
+  
+  // Actions moved to useProjectActions
   const handleGlueSegments = useCallback(async () => {
     if (!project || !project.projectPath || selectedSegmentIds.length < 2) return;
     
@@ -2276,9 +1964,23 @@ export default function App() {
   const currentLine = project?.subtitles.find(l => currentTime >= l.start - 0.5 && currentTime <= l.end);
   const nextLine = project?.subtitles.find(l => l.start > currentTime);
 
+  const projectContextValue = {
+    project, setProject, recentProjects, handleNewProject, handleOpenProject, handleSaveProject, onLoadProject,
+    undo, redo, canUndo, canRedo
+  };
+  const timelineContextValue = {
+    currentTime, duration, isPlaying, zoomLevel, timelineHeight, isAutoHeight, sidebarWidth,
+    isRippleEnabled, selectedSegmentIds, isLooping, loopRange, currentTimeRef, videoRef, referenceAudioRef,
+    setCurrentTime, setDuration, setIsPlaying, setZoomLevel, setTimelineHeight, setIsAutoHeight, setSidebarWidth,
+    setIsRippleEnabled, setSelectedSegmentIds, setIsLooping, setLoopRange, togglePlay, handleSeek
+  };
+
   return (
-    <div 
-      {...getRootProps()}
+    <ProjectProvider value={projectContextValue}>
+      <UIProvider>
+      <TimelineProvider value={timelineContextValue}>
+        <div 
+          {...getRootProps()}
       className="h-screen bg-zinc-950 text-white flex flex-col overflow-hidden font-sans relative"
     >
       <input {...getInputProps()} />
@@ -2303,63 +2005,9 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <Header 
-        project={project}
-        recentProjects={recentProjects}
+            <TopHeader 
         showProjectMenu={showProjectMenu}
         setShowProjectMenu={setShowProjectMenu}
-        handleNewProject={handleNewProject}
-        handleOpenProject={handleOpenProject}
-        handleSaveProject={handleSaveProject}
-        handleSelectProjectFolder={async () => {
-          if (window.electronAPI && project && project.projectPath) {
-            const newFolder = await window.electronAPI.openFolder();
-            if (newFolder.success && newFolder.data && newFolder.data !== project.projectPath) {
-              const oldPath = project.projectPath;
-              const targetPath = newFolder.data;
-              
-              if (await safeConfirm(`Вы уверены, что хотите переместить все файлы проекта в новую папку?\nИз: ${oldPath}\nВ: ${targetPath}`)) {
-                setExportOperation("Moving project files...");
-                setIsExporting(true);
-                try {
-                  logger.info(`Moving project from ${oldPath} to ${targetPath}`);
-                  const moveRes = await window.electronAPI.moveProject(oldPath, targetPath);
-                  if (moveRes.success) {
-                    setProject({ ...project, projectPath: targetPath });
-                    alert("Проект успешно перемещен!");
-                    logger.info("Project move successful.");
-                  } else {
-                    alert(`Ошибка при перемещении: ${moveRes.error}`);
-                    logger.error("Project move failed:", moveRes.error);
-                  }
-                } catch (err) {
-                  logger.error("Move error:", err);
-                  alert("Критическая ошибка при перемещении файлов.");
-                } finally {
-                  setIsExporting(false);
-                  setExportOperation('');
-                }
-              }
-            }
-          }
-        }}
-        handleOpenProjectFolder={async () => {
-          if (window.electronAPI && project?.projectPath) {
-            await window.electronAPI.openPath(project.projectPath);
-          }
-        }}
-        handleSelectBackstageFolder={async () => {
-          if (window.electronAPI) {
-            const folder = await window.electronAPI.openFolder();
-            if (folder && project) {
-              const settings = project.audioSettings || {};
-              setProject({
-                ...project,
-                audioSettings: { ...settings, backstageFolderPath: folder }
-              });
-            }
-          }
-        }}
         handleSelectVideo={handleSelectVideo}
         handleSelectSubs={handleSelectSubs}
         handleSelectDocument={handleSelectDocument}
@@ -2368,8 +2016,6 @@ export default function App() {
         handleToggleBackstage={handleToggleBackstage}
         setShowQuickImport={setShowQuickImport}
         handleBulkImport={handleBulkImport}
-        showSettings={showSettings}
-        setShowSettings={setShowSettings}
         isElectron={isElectron}
         handleExport={(format) => {
           setPendingExportFormat(format);
@@ -2380,24 +2026,13 @@ export default function App() {
         handleExportAudioBook={handleExportAudioBook}
         handleExportStems={handleExportStems}
         handleExportAllStemsZip={handleExportAllStemsZip}
-        onLoadProject={onLoadProject}
+        setIsExporting={setIsExporting}
+        setExportOperation={setExportOperation}
       />
 
       {/* Main Content */}
       <main className="flex-1 flex min-h-0 overflow-hidden relative">
-        <Sidebar 
-          project={project}
-          selectedRole={project?.selectedRole || ''}
-          onRoleChange={(role) => project && setProject({ ...project, selectedRole: role })}
-          currentTime={currentTime}
-          onSeek={handleSeek}
-          onTogglePlay={togglePlay}
-          isPlaying={isPlaying}
-          sidebarScrollTop={sidebarScrollTop}
-          onScroll={setSidebarScrollTop}
-          sidebarRef={sidebarRef}
-          width={sidebarWidth}
-        />
+        <LeftSidebar />
 
         {/* Sidebar Resizer Handle */}
         <div 
@@ -2588,6 +2223,7 @@ export default function App() {
                 activeRole={project.selectedRole || ''}
                 project={project}
                 onSettingsChange={(newSettings) => setProject({ ...project, audioSettings: newSettings })}
+                onSeek={handleSeek}
               />
             )}
 
@@ -2780,7 +2416,6 @@ export default function App() {
               {project ? (
                 <AdvancedTimeline 
                   project={project} 
-                  currentTime={currentTime} 
                   duration={duration} 
                   isPlaying={isPlaying}
                   isRecording={isRecording}
@@ -2789,7 +2424,13 @@ export default function App() {
                   onSeek={handleSeek} 
                   zoom={zoomLevel}
                   onZoom={setZoomLevel}
-                  onUpdateSegment={(trackId, segmentId, updates, targetTrackId) => updateSegment(segmentId, updates, targetTrackId)}
+                  onUpdateSegment={(sourceTrackId, segmentId, updates, targetTrackId) => {
+                    if (targetTrackId && targetTrackId !== sourceTrackId) {
+                      moveSegmentToTrack(segmentId, sourceTrackId, targetTrackId, updates.startTime ?? 0);
+                    } else {
+                      updateSegment(segmentId, updates, targetTrackId);
+                    }
+                  }}
                   onDeleteSegment={(trackId, segmentId) => deleteSegments([segmentId])}
                   onDuplicateSegment={handleDuplicateSegment}
                   onAddTrack={handleAddTrack}
@@ -2847,6 +2488,7 @@ export default function App() {
                   recordingPeaks={recordingPeaks}
                   recordingStartTime={recordingStartTimeRef.current}
                   onOpenProcessing={setProcessingTrackId}
+                  currentTimeRef={currentTimeRef}
                 />
               ) : (
                 <div className="flex-1 flex flex-col items-center justify-center bg-zinc-950 text-zinc-600 gap-4">
@@ -2872,32 +2514,7 @@ export default function App() {
         onImport={handleQuickImport}
       />
 
-      <TrackProcessingModal 
-        isOpen={!!processingTrackId}
-        onClose={() => setProcessingTrackId(null)}
-        trackName={project?.tracks.find(t => t.id === processingTrackId)?.name || ''}
-        initialSettings={project?.tracks.find(t => t.id === processingTrackId)?.processing}
-        onSave={(settings) => processingTrackId && handleUpdateProcessing(processingTrackId, settings)}
-      />
-
-      <SettingsModal 
-        show={showSettings}
-        onClose={() => setShowSettings(false)}
-        project={project}
-        onProjectUpdate={(updates) => {
-          if (project) {
-            setProject(p => p ? { ...p, ...updates } : null);
-          } else if (updates.audioSettings) {
-            localStorage.setItem('dubstudio_global_audio_settings', JSON.stringify(updates.audioSettings));
-            // Force re-render of components using global settings
-            setSettingsRevision(r => r + 1);
-          }
-        }}
-        onStartCalibration={() => {
-          setShowSettings(false);
-          setShowCalibration(true);
-        }}
-      />
+      <ModalsManager />
 
       {isExportModalOpen && (
         <ExportModal 
@@ -2907,51 +2524,14 @@ export default function App() {
         />
       )}
       
-      {/* Export Progress Modal */}
-      <AnimatePresence>
-        {isExporting && (
-          <div className="fixed inset-0 z-[200] flex items-center justify-center p-6">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="absolute inset-0 bg-black/80 backdrop-blur-md"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative w-full max-w-sm bg-zinc-900 border border-white/10 rounded-2xl p-8 text-center shadow-2xl"
-            >
-              <div className="w-16 h-16 bg-indigo-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
-                <motion.div
-                  animate={{ rotate: 360 }}
-                  transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                >
-                  <Download className="w-8 h-8 text-indigo-400" />
-                </motion.div>
-              </div>
-              <h3 className="text-xl font-bold mb-2">Exporting Project...</h3>
-              {exportOperation && (
-                <p className="text-indigo-400 text-[10px] font-mono mb-2 animate-pulse uppercase tracking-widest">{exportOperation}</p>
-              )}
-              <p className="text-sm text-zinc-400 mb-8">Merging audio tracks and syncing with video. Please wait.</p>
-              
-              <div className="h-2 bg-zinc-800 rounded-full overflow-hidden mb-4">
-                <motion.div 
-                  className="h-full bg-indigo-500 shadow-[0_0_10px_rgba(99,102,241,0.5)]"
-                  initial={{ width: 0 }}
-                  animate={{ width: `${exportProgress}%` }}
-                />
-              </div>
-              <div className="flex justify-between items-center text-xs font-bold uppercase tracking-widest">
-                <span className="text-zinc-500">Progress</span>
-                <span className="text-indigo-400">{Math.round(exportProgress)}%</span>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      <StyledExportOverlay 
+        isExporting={isExporting} 
+        exportProgress={exportProgress} 
+        exportOperation={exportOperation} 
+      />
     </div>
+      </TimelineProvider>
+    </UIProvider>
+    </ProjectProvider>
   );
 }

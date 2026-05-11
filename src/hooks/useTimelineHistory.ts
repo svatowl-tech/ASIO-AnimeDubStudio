@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState, Dispatch, SetStateAction } from 'react';
 import { Project, AudioTrack } from '../types';
+import { playbackEngine } from '../services/playbackEngine';
 
 export function useTimelineHistory(
   project: Project | null,
@@ -25,6 +26,7 @@ export function useTimelineHistory(
       isUndoRedoActionRef.current = true;
       const previousTracks = history[historyIndex - 1];
       setProject(prev => prev ? { ...prev, tracks: JSON.parse(JSON.stringify(previousTracks)) } : prev);
+      playbackEngine.reconcile(previousTracks);
       setHistoryIndex(prev => prev - 1);
     } else if (historyIndex === 0 && project && history.length > 0) {
       // If we go back to the original state right before our first snapshot:
@@ -34,6 +36,7 @@ export function useTimelineHistory(
       isUndoRedoActionRef.current = true;
       const previousTracks = history[0];
       setProject(prev => prev ? { ...prev, tracks: JSON.parse(JSON.stringify(previousTracks)) } : prev);
+      playbackEngine.reconcile(previousTracks);
     }
   }, [historyIndex, history, project, setProject]);
 
@@ -42,9 +45,13 @@ export function useTimelineHistory(
       isUndoRedoActionRef.current = true;
       const nextTracks = history[historyIndex + 1];
       setProject(prev => prev ? { ...prev, tracks: JSON.parse(JSON.stringify(nextTracks)) } : prev);
+      playbackEngine.reconcile(nextTracks);
       setHistoryIndex(prev => prev + 1);
     }
   }, [historyIndex, history, project, setProject]);
 
-  return { saveSnapshot, undo, redo };
+  const canUndo = historyIndex > 0;
+  const canRedo = historyIndex < history.length - 1;
+
+  return { saveSnapshot, undo, redo, canUndo, canRedo };
 }
