@@ -13,7 +13,9 @@
 - **Умный Сплит (Precise Split):** Точное разделение сегментов с защитой от создания микро-фрагментов и автоматической нормализацией времени.
 - **Waveform Visualization:** Детальная визуализация волны для точного попадания в липсинк.
 
-### 📄 Работа с Текстом и Субтитрами
+### 📄 Работа с Текстом и Сценарием
+- **Smart Script Sync:** Продвинутая система авто-скролла реплик. Список центрируется только при выходе активного элемента за пределы «комфортной зоны» (центральные 60% экрана), что убирает лишнюю тряску интерфейса.
+- **Precision Navigation:** Интеллектуальное переключение между репликами. Логика учитывает прероллы (запас времени перед звуком) и поддерживает промышленный стандарт: первое нажатие «Назад» возвращает в начало текущей фразы, второе — к предыдущей.
 - **Универсальный импорт:** Поддержка `txt`, `docx`, `epub`, `fb2`, `pdf`, `ass`, `srt`.
 - **Авто-парсинг:** Автоматическое распределение ролей и таймингов из сценариев.
 - **Smart Teleprompter:** Интерактивный суфлер, синхронизированный с таймлайном.
@@ -43,22 +45,28 @@ npm install
 
 ### Разработка
 ```bash
-# Запуск в режиме разработки (Vite)
+# Запуск веб-интерфейса
 npm run dev
+
+# Запуск в режиме десктопного приложения (Tauri)
+npm run tauri dev
 ```
 
 ### Сборка
 ```bash
-# Для создания установочных пакетов (Electron Builder)
-npm run electron:build:all
+# Сборка установочных пакетов (Windows, macOS, Linux)
+npm run tauri build
 ```
 
 ## 🛠 Технологический стек
-- **Frontend:** React + TypeScript + Vite
-- **Styling:** Tailwind CSS + Framer Motion
-- **Runtime:** Electron / Tauri
-- **Audio:** Web Audio API (custom engine)
-- **Processing:** FFmpeg (ffmpeg-static)
+- **Frontend:** React 19 + TypeScript + Vite 8
+- **Styling:** Tailwind CSS 4 + Framer Motion
+- **Runtime:** Tauri 2.0 (Cross-platform Desktop)
+- **State Management:** Zustand
+- **Audio Engine:** Web Audio API + Wavesurfer.js
+- **Media Processing:** FFmpeg (ffmpeg-static)
+- **AI Integration:** Google Gemini SDK (@google/genai)
+- **Document Parsing:** PDF.js, Epub.js, Mammoth (Docx)
 
 ## 📄 Лицензия
 Copyright © 2026 DubStudio Team. Распространяется под лицензией MIT.
