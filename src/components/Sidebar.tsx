@@ -2,6 +2,7 @@ import React from 'react';
 import { FileText } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Project } from '../types';
+import { useSyncScriptScroll } from '../hooks/useSyncScriptScroll';
 
 interface SidebarProps {
   project: Project | null;
@@ -31,26 +32,84 @@ const Sidebar: React.FC<SidebarProps> = ({
   width = 320
 }) => {
   const currentLineIndex = React.useMemo(() => {
-    if (!project) return -1;
-    // Prioritize selected role
-    const roleMatch = project.subtitles.findIndex(s => currentTime >= s.start && currentTime <= s.end && s.role === selectedRole);
-    if (roleMatch !== -1) return roleMatch;
-    // Fallback to any matching line
-    return project.subtitles.findIndex(s => currentTime >= s.start && currentTime <= s.end);
-  }, [project, currentTime, selectedRole]);
-
-  React.useEffect(() => {
-    if (currentLineIndex !== undefined && currentLineIndex !== -1 && sidebarRef.current) {
-      const itemHeight = 80;
-      const targetScroll = currentLineIndex * itemHeight - (sidebarRef.current.clientHeight / 2) + (itemHeight / 2);
-      
-      // Only auto-scroll if it's not being manually scrolled or if it's a significant jump
-      sidebarRef.current.scrollTo({
-        top: targetScroll,
-        behavior: 'smooth'
-      });
+    if (!project || project.subtitles.length === 0) return 0;
+    const subs = project.subtitles;
+    
+    // 1. Try to find the exact active line
+    const exactIndex = subs.findIndex(s => currentTime >= s.start && currentTime <= s.end);
+    if (exactIndex !== -1) return exactIndex;
+    
+    // 2. Fallback: Find the last subtitle that started before or at currentTime
+    for (let i = subs.length - 1; i >= 0; i--) {
+      if (subs[i].start <= currentTime) return i;
     }
-  }, [currentLineIndex, sidebarRef]);
+    
+    return 0;
+  }, [project, currentTime]);
+
+  const { handleManualInteraction } = useSyncScriptScroll(currentTime, project?.subtitles || [], sidebarRef);
+
+  const goToPrevSubtitle = React.useCallback(() => {
+    if (!project || project.subtitles.length === 0) return;
+    const subs = project.subtitles;
+    const preroll = project?.audioSettings?.prerollSeconds ?? 3;
+
+    // Search for a phrase that started BEFORE current time minus a buffer
+    // Adding 0.6s buffer ensures we don't jump to the start of the current subtitle if we're near its beginning
+    const searchTime = currentTime - 0.6;
+
+    let targetSubIndex = -1;
+    for (let i = subs.length - 1; i >= 0; i--) {
+      if (subs[i].start < searchTime && (subs[i].role === selectedRole || !selectedRole)) {
+        targetSubIndex = i;
+        break;
+      }
+    }
+
+    if (targetSubIndex !== -1) {
+      onSeek(Math.max(0, subs[targetSubIndex].start - preroll));
+    } else {
+      onSeek(0);
+    }
+
+    handleManualInteraction();
+    window.dispatchEvent(new CustomEvent('syncScroll'));
+  }, [project, selectedRole, currentTime, onSeek, handleManualInteraction]);
+
+  const goToNextSubtitle = React.useCallback(() => {
+    if (!project || project.subtitles.length === 0) return;
+    const subs = project.subtitles;
+    const preroll = project?.audioSettings?.prerollSeconds ?? 3;
+
+    // Search for a phrase that starts AFTER current time + preroll + buffer
+    // This ensures we skip the subtitle we are currently targeting/viewing
+    const searchTime = currentTime + preroll + 0.5;
+
+    let targetSubIndex = -1;
+    for (let i = 0; i < subs.length; i++) {
+      if (subs[i].start >= searchTime && (subs[i].role === selectedRole || !selectedRole)) {
+        targetSubIndex = i;
+        break;
+      }
+    }
+
+    // Fallback: if no match for role, find any next subtitle
+    if (targetSubIndex === -1) {
+       targetSubIndex = subs.findIndex(s => s.start > currentTime + 0.5);
+    }
+
+    if (targetSubIndex !== -1) {
+      onSeek(Math.max(0, subs[targetSubIndex].start - preroll));
+      handleManualInteraction();
+      window.dispatchEvent(new CustomEvent('syncScroll'));
+    } else {
+      // If nothing ahead, go to the end of the script
+      const maxEnd = project.subtitles[project.subtitles.length - 1]?.end || currentTime;
+      onSeek(maxEnd);
+      handleManualInteraction();
+      window.dispatchEvent(new CustomEvent('syncScroll'));
+    }
+  }, [project, selectedRole, currentTime, onSeek, handleManualInteraction]);
 
   return (
     <aside 
@@ -74,30 +133,16 @@ const Sidebar: React.FC<SidebarProps> = ({
         {project && (
           <div className="flex gap-2">
             <button 
-              onClick={() => {
-                const subs = project.subtitles;
-                const prev = subs.slice().reverse().find(s => s.role === selectedRole && s.start < currentTime - 0.5);
-                if (prev) {
-                  const preroll = project?.audioSettings?.prerollSeconds ?? 3;
-                  onSeek(Math.max(0, prev.start - preroll));
-                }
-              }}
+              onClick={goToPrevSubtitle}
               className="flex-1 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 border border-white/5 rounded-lg text-[10px] font-bold text-zinc-300 transition-colors uppercase tracking-wider"
-              disabled={!project.subtitles.some(s => s.role === selectedRole && s.start < currentTime - 0.5)}
+              disabled={currentTime <= 0.1}
             >
               Пред.
             </button>
             <button 
-              onClick={() => {
-                const subs = project.subtitles;
-                const next = subs.find(s => s.role === selectedRole && s.start > currentTime + 0.5);
-                if (next) {
-                  const preroll = project?.audioSettings?.prerollSeconds ?? 3;
-                  onSeek(Math.max(0, next.start - preroll));
-                }
-              }}
+              onClick={goToNextSubtitle}
               className="flex-1 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 border border-white/5 rounded-lg text-[10px] font-bold text-zinc-300 transition-colors uppercase tracking-wider"
-              disabled={!project.subtitles.some(s => s.role === selectedRole && s.start > currentTime + 0.5)}
+              disabled={false}
             >
               След.
             </button>
@@ -107,28 +152,26 @@ const Sidebar: React.FC<SidebarProps> = ({
       
       <div 
         ref={sidebarRef}
-        onScroll={(e) => onScroll(e.currentTarget.scrollTop)}
+        onScroll={(e) => {
+          onScroll(e.currentTarget.scrollTop);
+          handleManualInteraction();
+        }}
+        onWheel={handleManualInteraction}
+        onTouchMove={handleManualInteraction}
         className="flex-1 overflow-y-auto p-4 space-y-4"
       >
         <label className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2 block">Сценарий</label>
         {project ? (
-          <div style={{ height: `${project.subtitles.length * 80}px`, position: 'relative' }}>
+          <div className="flex flex-col gap-4 pb-20">
             {project.subtitles.map((line, index) => {
-              const itemHeight = 80;
-              const visibleStart = sidebarScrollTop;
-              const visibleEnd = sidebarScrollTop + 600; // sidebar height
-              const itemTop = index * itemHeight;
-              
-              if (itemTop + itemHeight < visibleStart - 200 || itemTop > visibleEnd + 200) return null;
-
               const isActive = index === currentLineIndex;
 
               return (
                 <div 
                   key={line.id}
-                  style={{ position: 'absolute', top: `${itemTop}px`, left: 0, right: 0, height: `${itemHeight - 16}px` }}
+                  id={`sub-${line.id}`}
                   className={cn(
-                    "p-3 rounded-xl border transition-all cursor-pointer flex flex-col",
+                    "p-3 rounded-xl border transition-all cursor-pointer flex flex-col min-h-[80px]",
                     line.role === selectedRole 
                       ? "bg-blue-500/10 border-blue-500/30" 
                       : "bg-zinc-800/20 border-white/5 opacity-50",

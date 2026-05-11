@@ -79,27 +79,47 @@ export const AudioSegmentView = React.memo(({
         const { time: snappedStartTime, snapped } = snapTime(rawStartTime, seg.id);
         onSnapLine(snapped ? snappedStartTime : null);
         
-        const actualDeltaT = snappedStartTime - initialStartTime;
-        const newDuration = Math.max(0.1, initialDuration - actualDeltaT);
-        const newFileOffset = Math.max(0, initialFileOffset + actualDeltaT);
+        let actualDeltaT = snappedStartTime - initialStartTime;
         
-        // Ensure we don't trim past the file end
-        if (newFileOffset + newDuration <= seg.fileDuration) {
-          onUpdate(seg.id, { 
-            startTime: snappedStartTime, 
-            duration: newDuration, 
-            fileOffset: newFileOffset 
-          });
+        // Ensure we don't trim past the available fileOffset
+        actualDeltaT = Math.max(actualDeltaT, -initialFileOffset);
+        // Ensure we don't shrink the duration below 0.1s
+        if (initialDuration - actualDeltaT < 0.1) {
+            actualDeltaT = initialDuration - 0.1;
+        }
+
+        const finalStartTime = initialStartTime + actualDeltaT;
+        const newDuration = initialDuration - actualDeltaT;
+        const newFileOffset = initialFileOffset + actualDeltaT;
+        
+        // Ensure we don't trim past the file end, with 2ms tolerance for float precision
+        if (Math.abs(actualDeltaT) > 0.001) {
+          if (newFileOffset + newDuration <= (seg.fileDuration || seg.duration) + 0.002) {
+            onUpdate(seg.id, { 
+              startTime: finalStartTime, 
+              duration: newDuration, 
+              fileOffset: newFileOffset 
+            });
+          }
         }
       } else if (side === 'right') {
         const rawEndTime = initialStartTime + initialDuration + deltaT;
         const { time: snappedEndTime, snapped } = snapTime(rawEndTime, seg.id);
         onSnapLine(snapped ? snappedEndTime : null);
         
-        const newDuration = Math.max(0.1, snappedEndTime - initialStartTime);
-        // Ensure we don't trim past the file end
-        if (seg.fileOffset + newDuration <= seg.fileDuration) {
-          onUpdate(seg.id, { duration: newDuration });
+        let actualDeltaT = snappedEndTime - (initialStartTime + initialDuration);
+        
+        // Don't drag beyond available file end!
+        const maxDeltaT = (seg.fileDuration || seg.duration) - (initialFileOffset + initialDuration);
+        actualDeltaT = Math.min(actualDeltaT, maxDeltaT);
+        
+        const newDuration = Math.max(0.1, initialDuration + actualDeltaT);
+        
+        // Ensure we don't trim past the file end, with 2ms tolerance for float precision
+        if (Math.abs(actualDeltaT) > 0.001) {
+          if (initialFileOffset + newDuration <= (seg.fileDuration || seg.duration) + 0.002) {
+            onUpdate(seg.id, { duration: newDuration });
+          }
         }
       } else if (currentMode === 'slip') {
         const newFileOffset = Math.max(0, initialFileOffset - deltaT);

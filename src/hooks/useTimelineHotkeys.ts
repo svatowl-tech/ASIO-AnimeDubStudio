@@ -123,14 +123,48 @@ export function useTimelineHotkeys({
         e.preventDefault();
         const proj = projectRef.current;
         if (proj && proj.subtitles.length > 0 && handleSeek) {
+          const subs = proj.subtitles;
           const role = proj.selectedRole;
-          // Try to find previous phrase for selected role first
-          let prev = [...proj.subtitles].reverse().find(s => s.role === role && s.start < currentTimeRef.current - 0.1);
-          // If not found or no role selected, find any previous phrase
-          if (!prev) {
-            prev = [...proj.subtitles].reverse().find(s => s.start < currentTimeRef.current - 0.1);
+          const currentTime = currentTimeRef.current;
+          
+          // 1. Find current index
+          let currentIndex = -1;
+          const exactIndex = subs.findIndex(s => currentTime >= s.start && currentTime <= s.end);
+          if (exactIndex !== -1) {
+            currentIndex = exactIndex;
+          } else {
+            for (let i = subs.length - 1; i >= 0; i--) {
+              if (currentTime > subs[i].start) {
+                currentIndex = i;
+                break;
+              }
+            }
           }
-          if (prev) handleSeek(prev.start);
+
+          // 2. Logic: If inside sub and > 0.5s from start, go to start
+          const currentSub = currentIndex !== -1 ? subs[currentIndex] : null;
+          if (currentSub && currentTime > currentSub.start + 0.5) {
+            handleSeek(currentSub.start);
+            window.dispatchEvent(new CustomEvent('syncScroll'));
+            return;
+          }
+
+          // 3. Otherwise find previous
+          let targetIndex = -1;
+          for (let i = currentIndex - 1; i >= 0; i--) {
+            if (subs[i].role === role || !role) {
+              targetIndex = i;
+              break;
+            }
+          }
+          if (targetIndex === -1 && currentIndex > 0) targetIndex = currentIndex - 1;
+
+          if (targetIndex !== -1) {
+            handleSeek(subs[targetIndex].start);
+          } else {
+            handleSeek(0);
+          }
+          window.dispatchEvent(new CustomEvent('syncScroll'));
         }
         return;
       }
@@ -140,14 +174,49 @@ export function useTimelineHotkeys({
         e.preventDefault();
         const proj = projectRef.current;
         if (proj && proj.subtitles.length > 0 && handleSeek) {
+          const subs = proj.subtitles;
           const role = proj.selectedRole;
-          // Try to find next phrase for selected role first
-          let next = proj.subtitles.find(s => s.role === role && s.start > currentTimeRef.current + 0.1);
-          // If not found or no role selected, find any next phrase
-          if (!next) {
-            next = proj.subtitles.find(s => s.start > currentTimeRef.current + 0.1);
+          const currentTime = currentTimeRef.current;
+
+          // 1. Find current index
+          let currentIndex = -1;
+          const exactIndex = subs.findIndex(s => currentTime >= s.start && currentTime <= s.end);
+          if (exactIndex !== -1) {
+            currentIndex = exactIndex;
+          } else {
+            for (let i = subs.length - 1; i >= 0; i--) {
+              if (currentTime > subs[i].start) {
+                currentIndex = i;
+                break;
+              }
+            }
           }
-          if (next) handleSeek(next.start);
+
+          // 2. Find next
+          let targetIndex = -1;
+          for (let i = currentIndex + 1; i < subs.length; i++) {
+            if (subs[i].role === role || !role) {
+              targetIndex = i;
+              break;
+            }
+          }
+          if (targetIndex === -1 && currentIndex < subs.length - 1) {
+            targetIndex = currentIndex + 1;
+          }
+
+          if (targetIndex !== -1) {
+            handleSeek(subs[targetIndex].start);
+          } else {
+            // Seek to end
+            let maxEnd = 0;
+            proj.tracks.forEach(t => {
+              t.segments.forEach(s => {
+                maxEnd = Math.max(maxEnd, s.startTime + s.duration);
+              });
+            });
+            handleSeek(maxEnd);
+          }
+          window.dispatchEvent(new CustomEvent('syncScroll'));
         }
         return;
       }
