@@ -211,6 +211,8 @@ declare global {
       moveProject: (oldPath: string, newPath: string) => Promise<BridgeResponse<boolean>>;
       openPath: (path: string) => Promise<BridgeResponse<void>>;
       forceStopAll: () => Promise<BridgeResponse<void>>;
+      getMediaInfo: (path: string) => Promise<BridgeResponse<string>>;
+      extractMkvAssets: (data: { inputPath: string, videoOutput: string, subOutput?: string, audioIndex: number, subIndex?: number, duration?: number }) => Promise<BridgeResponse<string>>;
     };
   }
 }

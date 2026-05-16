@@ -77,11 +77,12 @@ export class UniversalParserService {
     let match;
     while ((match = srtRegex.exec(content)) !== null) {
       const [ , startStr, endStr, text] = match;
+      const cleanText = text.replace(/<[^>]+>/g, '').replace(/\{[^}]+\}/g, '').trim().replace(/\\N/g, ' ').replace(/\\n/g, ' ').replace(/\n/g, ' ');
       lines.push({
         id: `srt-${lines.length}-${Date.now()}`,
         start: this.srtTimeToSeconds(startStr),
         end: this.srtTimeToSeconds(endStr),
-        text: text.trim().replace(/\\N/g, ' ').replace(/\\n/g, ' ').replace(/\n/g, ' '),
+        text: cleanText,
         role: 'Default',
       });
     }

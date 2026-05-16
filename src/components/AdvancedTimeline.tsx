@@ -52,19 +52,29 @@ export const CurrentTimeDisplay = () => {
 
 export const TimelineAutoScroller = ({ timelineRef, isPlaying, zoom }: any) => {
   const { currentTime } = useTimelineData();
+  
   useEffect(() => {
     if (!timelineRef.current) return;
-    const scrollLeft = timelineRef.current.scrollLeft;
-    const clientWidth = timelineRef.current.clientWidth;
+    const el = timelineRef.current;
+    const scrollLeft = el.scrollLeft;
+    const clientWidth = el.clientWidth;
     const currentX = currentTime * zoom;
     
-    // Auto-scroll if playhead goes beyond 90% of visible width, or behind current view (rewind)
-    // Or if it's a significant jump while not playing
-    if (currentX > scrollLeft + clientWidth * 0.9 || currentX < scrollLeft) {
-      timelineRef.current.scrollTo({
-        left: Math.max(0, currentX - clientWidth * 0.4), // Center it a bit more
-        behavior: 'smooth'
-      });
+    // Auto-scroll if playhead goes beyond 95% of visible width, or behind current view
+    const isOutRight = currentX > scrollLeft + clientWidth * 0.95;
+    const isOutLeft = currentX < scrollLeft;
+
+    if (isOutRight || isOutLeft) {
+      if (isPlaying) {
+        // Simple assignment during playback for a clean "page turn" or to follow along instantly
+        el.scrollLeft = Math.max(0, currentX - clientWidth * 0.1);
+      } else {
+        // Smooth snap to center if seeking or clicking around while paused
+        el.scrollTo({
+          left: Math.max(0, currentX - clientWidth * 0.4),
+          behavior: 'smooth'
+        });
+      }
     }
   }, [currentTime, isPlaying, zoom, timelineRef]);
   return null;
@@ -209,7 +219,7 @@ const TrackRow = React.memo(({
   }, [track.segments, timelineVisibleRange]);
 
   return (
-    <div className="border-b border-white/5 relative group timeline-track" data-track-id={track.id} style={{ height: track.height || 80 }}>
+    <div className="border-b border-white/5 relative group timeline-track pointer-events-none" data-track-id={track.id} style={{ height: track.height || 80 }}>
       {/* Track Background Grid */}
       <div className="absolute inset-0 pointer-events-none opacity-20 bg-[linear-gradient(to_right,#ffffff05_1px,transparent_1px)]" style={{ backgroundSize: `${zoom}px 100%` }} />
       
@@ -676,18 +686,25 @@ export const AdvancedTimeline = ({
           className="flex-1 overflow-auto relative bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] bg-repeat"
           onMouseDown={(e) => {
             if (e.button === 0) {
-              const rect = timelineRef.current?.getBoundingClientRect();
-              if (rect) {
-                const x = e.clientX - rect.left + (timelineRef.current?.scrollLeft || 0);
-                const y = e.clientY - rect.top + (timelineRef.current?.scrollTop || 0);
-                
-                // If clicking below the ruler (y > 40), start marquee selection
-                if (e.clientY - rect.top > 40) {
-                  onClearSelection?.();
-                  setIsMarqueeSelecting(true);
-                  setMarqueeStart({ x, y });
-                  setMarqueeCurrent({ x, y });
-                }
+              const rect = e.currentTarget.getBoundingClientRect();
+              const scrollLeft = e.currentTarget.scrollLeft;
+              const scrollTop = e.currentTarget.scrollTop;
+              
+              const clickX = e.clientX - rect.left;
+              const time = (clickX + scrollLeft) / zoom;
+              
+              onSeek(Math.max(0, Math.min(duration, time)));
+              
+              if (e.shiftKey && e.clientY - rect.top > 40) {
+                // Marquee selection with Shift
+                onClearSelection?.();
+                setIsMarqueeSelecting(true);
+                setMarqueeStart({ x: clickX + scrollLeft, y: e.clientY - rect.top + scrollTop });
+                setMarqueeCurrent({ x: clickX + scrollLeft, y: e.clientY - rect.top + scrollTop });
+              } else {
+                // Normal scrubbing
+                setIsScrubbing(true);
+                handleTimelineInteraction(e);
               }
             }
           }}

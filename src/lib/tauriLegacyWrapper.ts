@@ -969,6 +969,26 @@ export const tauriAPI = {
         return { success: false, error: String(err) };
     }
   },
+
+  getMediaInfo: async (path: string): Promise<BridgeResponse<string>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        const result = await invoke<string>('get_media_info', { path });
+        return { success: true, data: result };
+    } catch(err) {
+        return { success: false, error: typeof err === 'object' ? JSON.stringify(err) : String(err) };
+    }
+  },
+
+  extractMkvAssets: async (data: { inputPath: string, videoOutput: string, subOutput?: string, audioIndex: number, subIndex?: number, duration?: number }): Promise<BridgeResponse<string>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        const result = await invokeWithWatchdog<string>('extract_mkv_assets', data, { progressEvent: 'media-progress', timeoutMs: 300000 });
+        return { success: true, data: result };
+    } catch(err) {
+        return { success: false, error: typeof err === 'object' ? JSON.stringify(err) : String(err) };
+    }
+  },
 };
 
 export function setupTauriLegacyWrapper() {

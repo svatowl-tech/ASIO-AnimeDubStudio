@@ -293,28 +293,47 @@ pub(crate) async fn run_ffmpeg_with_progress(
     let re = Regex::new(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})").unwrap();
 
     while let Some(event) = rx.recv().await {
-        if let CommandEvent::Stderr(line_bytes) = event {
-            let line = String::from_utf8_lossy(&line_bytes);
-            if let Some(caps) = re.captures(&line) {
-                let h: f64 = caps[1].parse().unwrap_or(0.0);
-                let m: f64 = caps[2].parse().unwrap_or(0.0);
-                let s: f64 = caps[3].parse().unwrap_or(0.0);
-                let ms: f64 = caps[4].parse().unwrap_or(0.0);
-                
-                let current_secs = h * 3600.0 + m * 60.0 + s + ms / 100.0;
-                
-                let percent = if let Some(total) = duration_secs {
-                    (current_secs / total * 100.0).min(100.0)
-                } else {
-                    0.0
-                };
+        match event {
+            CommandEvent::Stderr(line_bytes) => {
+                let line = String::from_utf8_lossy(&line_bytes);
+                println!("[ffmpeg] {}", line.trim_end());
+                if let Some(caps) = re.captures(&line) {
+                    let h: f64 = caps[1].parse().unwrap_or(0.0);
+                    let m: f64 = caps[2].parse().unwrap_or(0.0);
+                    let s: f64 = caps[3].parse().unwrap_or(0.0);
+                    let ms: f64 = caps[4].parse().unwrap_or(0.0);
+                    
+                    let current_secs = h * 3600.0 + m * 60.0 + s + ms / 100.0;
+                    
+                    let percent = if let Some(total) = duration_secs {
+                        (current_secs / total * 100.0).min(100.0)
+                    } else {
+                        0.0
+                    };
 
-                let _ = app_handle.emit("media-progress", MediaProgress {
-                    time: format!("{:02}:{:02}:{:02}", h as i32, m as i32, s as i32),
-                    percent,
-                    operation: operation_name.clone(),
-                });
+                    let _ = app_handle.emit("media-progress", MediaProgress {
+                        time: format!("{:02}:{:02}:{:02}", h as i32, m as i32, s as i32),
+                        percent,
+                        operation: operation_name.clone(),
+                    });
+                }
+            },
+            CommandEvent::Stdout(line_bytes) => {
+                let line = String::from_utf8_lossy(&line_bytes);
+                println!("[ffmpeg stdout] {}", line.trim_end());
+            },
+            CommandEvent::Error(err) => {
+                eprintln!("[ffmpeg command error] {}", err);
+            },
+            CommandEvent::Terminated(status) => {
+                println!("[ffmpeg terminated] with status: {:?}", status.code);
+                if let Some(code) = status.code {
+                    if code != 0 {
+                        return Err(format!("FFmpeg failed with exit code {}", code));
+                    }
+                }
             }
+            _ => {}
         }
     }
 
@@ -373,6 +392,105 @@ pub async fn render_final_video(
     run_ffmpeg_with_progress(app_handle, args, "Rendering Final Video".to_string(), None).await?;
     
     Ok(output_path)
+}
+
+#[tauri::command]
+pub async fn get_media_info(
+    app_handle: AppHandle,
+    path: String,
+) -> Result<String, String> {
+    println!("Calling get_media_info for path: {}", path);
+    // Escape single quotes for standard paths isn't normally necessary since Tauri's sidecar command 
+    // handles arguments as is, but we are just passing path directly to args.
+    
+    let sidecar_command = app_handle
+        .shell()
+        .sidecar("ffprobe")
+        .map_err(|e| {
+            eprintln!("Failed to create ffprobe sidecar: {}", e);
+            format!("Failed to create ffprobe sidecar: {}", e)
+        })?
+        .args(vec![
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_format",
+            "-show_streams",
+            &path
+        ]);
+
+    let output = sidecar_command.output().await.map_err(|e| {
+        eprintln!("ffprobe command failed to execute: {}", e);
+        e.to_string()
+    })?;
+    
+    if !output.status.success() {
+        let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+        eprintln!("ffprobe failed with status: {:?}, stderr: {}", output.status.code(), err_msg);
+        return Err(err_msg);
+    }
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
+    println!("ffprobe succeeded, got output of length {}", stdout_str.len());
+    Ok(stdout_str)
+}
+
+#[tauri::command]
+pub async fn extract_mkv_assets(
+    app_handle: AppHandle,
+    input_path: String,
+    video_output: String,
+    sub_output: Option<String>,
+    audio_index: usize,
+    sub_index: Option<usize>,
+    duration: Option<f64>,
+) -> Result<String, String> {
+    println!("Starting extract_mkv_assets with input: {}, video_output: {}, audio_index: {}, sub_index: {:?}", input_path, video_output, audio_index, sub_index);
+
+    let mut args = vec![
+        "-y".to_string(),
+        "-i".to_string(), input_path.clone(),
+    ];
+
+    // Map the main video stream
+    args.push("-map".to_string());
+    args.push("0:v:0".to_string());
+
+    // Map the selected audio stream
+    args.push("-map".to_string());
+    args.push(format!("0:{}", audio_index));
+
+    args.push("-c:v".to_string());
+    args.push("copy".to_string());
+    args.push("-c:a".to_string());
+    args.push("aac".to_string()); 
+    args.push("-movflags".to_string());
+    args.push("faststart".to_string());
+    args.push(video_output.clone());
+
+    // If subtitles are selected, extract them to a separate file in the same ffmpeg run
+    if let (Some(s_idx), Some(s_out)) = (sub_index, sub_output) {
+        println!("Adding subtitle extraction args. s_idx={:?}, s_out={:?}", s_idx, s_out);
+        args.push("-map".to_string());
+        args.push(format!("0:{}", s_idx));
+        args.push("-c:s".to_string());
+        // For standard text subs
+        if s_out.ends_with(".srt") {
+            args.push("srt".to_string());
+        } else if s_out.ends_with(".vtt") {
+            args.push("webvtt".to_string());
+        } else if s_out.ends_with(".ass") {
+            args.push("ass".to_string());
+        } else {
+            args.push("copy".to_string()); // fallback
+        }
+        args.push(s_out);
+    }
+
+    println!("Calling run_ffmpeg_with_progress with args: {:?}", args);
+    run_ffmpeg_with_progress(app_handle, args, "Extracting MKV Assets".to_string(), duration).await?;
+    println!("run_ffmpeg_with_progress completed successfully.");
+    
+    Ok(video_output)
 }
 
 #[tauri::command]
@@ -438,6 +556,7 @@ pub async fn mux_video(
         "-map".to_string(), "0:v:0".to_string(), // Take video from first input
         "-map".to_string(), "1:a:0".to_string(), // Take audio from second input
         "-shortest".to_string(), 
+        "-movflags".to_string(), "faststart".to_string(),
         output_path.clone(),
     ];
 

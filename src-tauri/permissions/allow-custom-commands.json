@@ -46,7 +46,9 @@
           "relink_segment_file",
           "calculate_file_hash",
           "find_file_by_hash",
-          "concat_backstage_videos"
+          "concat_backstage_videos",
+          "get_media_info",
+          "extract_mkv_assets"
         ],
         "deny": []
       }

@@ -90,6 +90,7 @@ import { TimelineProvider } from './contexts/TimelineContext';
 import LeftSidebar from './components/layout/LeftSidebar';
 import { UIProvider } from './contexts/UIContext';
 import ModalsManager from './components/layout/ModalsManager';
+import { MkvTrackSelectorModal } from './components/MkvTrackSelectorModal';
 import TopHeader from './components/layout/TopHeader';
 import StyledExportOverlay from './components/layout/ExportOverlay';
 import { useAudioEngine } from './hooks/useAudioEngine';
@@ -217,7 +218,19 @@ export default function App() {
     isRippleEnabledRef
   });
 
-  const { handleSelectVideo } = useProjectImport(project, setProject, setDuration);
+  const { 
+    handleSelectVideo, 
+    mkvImportData, 
+    handleMkvConfirm, 
+    handleMkvCancel 
+  } = useProjectImport(
+    project, 
+    setProject, 
+    setDuration, 
+    setIsExporting, 
+    setExportProgress, 
+    setExportOperation
+  );
 
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showFixes, setShowFixes] = useState(true);
@@ -2513,6 +2526,16 @@ export default function App() {
         onDurationChange={setQuickImportDuration}
         onImport={handleQuickImport}
       />
+
+      {mkvImportData && (
+        <MkvTrackSelectorModal 
+          mediaInfo={mkvImportData.mediaInfo}
+          videoPath={mkvImportData.videoPath}
+          videoName={mkvImportData.videoName}
+          onConfirm={handleMkvConfirm}
+          onCancel={handleMkvCancel}
+        />
+      )}
 
       <ModalsManager />
 

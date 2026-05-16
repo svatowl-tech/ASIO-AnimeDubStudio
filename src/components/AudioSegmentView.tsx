@@ -154,9 +154,15 @@ export const AudioSegmentView = React.memo(({
 
         onSnapLine(snapLineTime);
         
-        const targetEl = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
-        const trackContainer = targetEl?.closest('.timeline-track');
-        const targetTrackId = trackContainer?.getAttribute('data-track-id') || undefined;
+        let targetTrackId: string | undefined = undefined;
+        const trackContainers = document.querySelectorAll('.timeline-track');
+        trackContainers.forEach(container => {
+          const rect = container.getBoundingClientRect();
+          if (moveEvent.clientY >= rect.top && moveEvent.clientY <= rect.bottom && 
+              moveEvent.clientX >= rect.left && moveEvent.clientX <= rect.right) {
+            targetTrackId = container.getAttribute('data-track-id') || undefined;
+          }
+        });
 
         if (moveEvent.ctrlKey && !hasDuplicated && onDuplicate) {
           hasDuplicated = true;
@@ -214,7 +220,7 @@ export const AudioSegmentView = React.memo(({
       }}
       onContextMenu={handleContextMenu}
       className={cn(
-        "absolute h-full flex items-center overflow-hidden transition-all group cursor-move",
+        "absolute h-full flex items-center overflow-hidden transition-all group cursor-move pointer-events-auto",
         "bg-indigo-500/40 border-x border-indigo-500/60 z-10 shadow-[0_0_10px_rgba(99,102,241,0.2)]",
         isSelected && "ring-2 ring-white ring-inset"
       )}
