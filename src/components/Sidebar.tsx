@@ -39,12 +39,23 @@ const Sidebar: React.FC<SidebarProps> = ({
     const exactIndex = subs.findIndex(s => currentTime >= s.start && currentTime <= s.end);
     if (exactIndex !== -1) return exactIndex;
     
-    // 2. Fallback: Find the last subtitle that started before or at currentTime
-    for (let i = subs.length - 1; i >= 0; i--) {
-      if (subs[i].start <= currentTime) return i;
+    // 2. Otherwise find the subtitle with the minimum distance to currentTime
+    let minDistance = Infinity;
+    let nearestIndex = 0;
+    for (let i = 0; i < subs.length; i++) {
+      const s = subs[i];
+      let dist = 0;
+      if (currentTime < s.start) {
+        dist = s.start - currentTime;
+      } else if (currentTime > s.end) {
+        dist = currentTime - s.end;
+      }
+      if (dist < minDistance) {
+        minDistance = dist;
+        nearestIndex = i;
+      }
     }
-    
-    return 0;
+    return nearestIndex;
   }, [project, currentTime]);
 
   const { handleManualInteraction } = useSyncScriptScroll(currentTime, project?.subtitles || [], sidebarRef);
@@ -172,10 +183,13 @@ const Sidebar: React.FC<SidebarProps> = ({
                   id={`sub-${line.id}`}
                   className={cn(
                     "p-3 rounded-xl border transition-all cursor-pointer flex flex-col min-h-[80px]",
-                    line.role === selectedRole 
-                      ? "bg-blue-500/10 border-blue-500/30" 
-                      : "bg-zinc-800/20 border-white/5 opacity-50",
-                    isActive && "ring-2 ring-blue-500 ring-offset-2 ring-offset-zinc-950 shadow-lg shadow-blue-500/20"
+                    line.needsFix
+                      ? "bg-rose-500/10 border-rose-500/50 shadow-[0_0_15px_rgba(244,63,94,0.1)]"
+                      : line.role === selectedRole 
+                        ? "bg-blue-500/10 border-blue-500/30" 
+                        : "bg-zinc-800/20 border-white/5 opacity-50",
+                    isActive && !line.needsFix && "ring-2 ring-blue-500 ring-offset-2 ring-offset-zinc-950 shadow-lg shadow-blue-500/20",
+                    isActive && line.needsFix && "ring-2 ring-rose-500 ring-offset-2 ring-offset-zinc-950 shadow-lg shadow-rose-500/30"
                   )}
                   onClick={() => {
                     const preroll = project?.audioSettings?.prerollSeconds ?? 3;
@@ -192,6 +206,13 @@ const Sidebar: React.FC<SidebarProps> = ({
                       fontSize: line.text.length < 40 ? '14px' : line.text.length < 80 ? '12px' : line.text.length < 150 ? '10px' : '8px',
                       lineHeight: line.text.length < 40 ? '1.4' : line.text.length < 80 ? '1.3' : line.text.length < 150 ? '1.2' : '1.1'
                     }}>{line.text}</p>
+                    
+                    {line.needsFix && line.fixComment && (
+                      <div className="mt-2 text-[10px] text-rose-300 bg-rose-500/10 p-2 rounded border border-rose-500/20">
+                        <span className="font-bold uppercase tracking-widest text-[8px] opacity-70 block mb-0.5">Правка от куратора:</span>
+                        {line.fixComment}
+                      </div>
+                    )}
                   </div>
                 </div>
               );

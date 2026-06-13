@@ -9,34 +9,38 @@ import { logger } from '../lib/logger';
 
 export const AudioSegmentView = React.memo(({ 
   seg, 
+  trackId,
   zoom, 
   audioOffsetMs, 
   timelineVisibleRange,
-  onUpdate,
-  onDelete,
+  onUpdateSegment,
+  onDeleteSegment,
   snapTime,
   onSnapLine,
-  onSplit,
-  onDuplicate,
+  onSplitSegment,
+  onDuplicateSegment,
   isSelected,
-  onSelect,
-  onGlue,
+  onSelectSegment,
+  onGlueSegments,
+  currentTimeRef,
   autoFadeIn = 0,
   autoFadeOut = 0
 }: { 
   seg: AudioSegment, 
+  trackId: string,
   zoom: number, 
   audioOffsetMs: number,
   timelineVisibleRange?: { start: number, end: number },
-  onUpdate: (id: string, updates: Partial<AudioSegment>, targetTrackId?: string) => void,
-  onDelete?: (id: string) => void,
+  onUpdateSegment: (trackId: string, segmentId: string, updates: Partial<AudioSegment>, targetTrackId?: string) => void,
+  onDeleteSegment?: (trackId: string, segmentId: string) => void,
   snapTime: (time: number, excludeId?: string) => { time: number, snapped: boolean },
   onSnapLine: (time: number | null) => void,
-  onSplit?: (id: string) => void,
-  onDuplicate?: (id: string, newStartTime: number) => void,
+  onSplitSegment?: (trackId: string, segmentId: string, time: number) => void,
+  onDuplicateSegment?: (trackId: string, segmentId: string, newStartTime: number) => void,
   isSelected?: boolean,
-  onSelect?: (e: React.MouseEvent) => void,
-  onGlue?: () => void,
+  onSelectSegment?: (segmentId: string, multi: boolean) => void,
+  onGlueSegments?: () => void,
+  currentTimeRef?: React.MutableRefObject<number>,
   autoFadeIn?: number,
   autoFadeOut?: number,
   key?: string | number
@@ -76,7 +80,7 @@ export const AudioSegmentView = React.memo(({
 
       if (currentMode === 'left') {
         const rawStartTime = Math.max(0, initialStartTime + deltaT);
-        const { time: snappedStartTime, snapped } = snapTime(rawStartTime, seg.id);
+        const { time: snappedStartTime, snapped } = moveEvent.shiftKey ? { time: rawStartTime, snapped: false } : snapTime(rawStartTime, seg.id);
         onSnapLine(snapped ? snappedStartTime : null);
         
         let actualDeltaT = snappedStartTime - initialStartTime;
@@ -95,7 +99,7 @@ export const AudioSegmentView = React.memo(({
         // Ensure we don't trim past the file end, with 2ms tolerance for float precision
         if (Math.abs(actualDeltaT) > 0.001) {
           if (newFileOffset + newDuration <= (seg.fileDuration || seg.duration) + 0.002) {
-            onUpdate(seg.id, { 
+            onUpdateSegment(trackId, seg.id, { 
               startTime: finalStartTime, 
               duration: newDuration, 
               fileOffset: newFileOffset 
@@ -104,7 +108,7 @@ export const AudioSegmentView = React.memo(({
         }
       } else if (side === 'right') {
         const rawEndTime = initialStartTime + initialDuration + deltaT;
-        const { time: snappedEndTime, snapped } = snapTime(rawEndTime, seg.id);
+        const { time: snappedEndTime, snapped } = moveEvent.shiftKey ? { time: rawEndTime, snapped: false } : snapTime(rawEndTime, seg.id);
         onSnapLine(snapped ? snappedEndTime : null);
         
         let actualDeltaT = snappedEndTime - (initialStartTime + initialDuration);
@@ -118,20 +122,20 @@ export const AudioSegmentView = React.memo(({
         // Ensure we don't trim past the file end, with 2ms tolerance for float precision
         if (Math.abs(actualDeltaT) > 0.001) {
           if (initialFileOffset + newDuration <= (seg.fileDuration || seg.duration) + 0.002) {
-            onUpdate(seg.id, { duration: newDuration });
+            onUpdateSegment(trackId, seg.id, { duration: newDuration });
           }
         }
       } else if (currentMode === 'slip') {
         const newFileOffset = Math.max(0, initialFileOffset - deltaT);
         if (newFileOffset + initialDuration <= seg.fileDuration) {
-          onUpdate(seg.id, { fileOffset: newFileOffset });
+          onUpdateSegment(trackId, seg.id, { fileOffset: newFileOffset });
         }
       } else if (currentMode === 'drag') {
         const rawStart = Math.max(0, initialStartTime + deltaT);
         const rawEnd = rawStart + initialDuration;
         
-        const snapStart = snapTime(rawStart, seg.id);
-        const snapEnd = snapTime(rawEnd, seg.id);
+        const snapStart = moveEvent.shiftKey ? { time: rawStart, snapped: false } : snapTime(rawStart, seg.id);
+        const snapEnd = moveEvent.shiftKey ? { time: rawEnd, snapped: false } : snapTime(rawEnd, seg.id);
         
         let finalStart = rawStart;
         let snapLineTime = null;
@@ -164,11 +168,11 @@ export const AudioSegmentView = React.memo(({
           }
         });
 
-        if (moveEvent.ctrlKey && !hasDuplicated && onDuplicate) {
+        if (moveEvent.ctrlKey && !hasDuplicated && onDuplicateSegment) {
           hasDuplicated = true;
-          onDuplicate(seg.id, finalStart);
+          onDuplicateSegment(trackId, seg.id, finalStart);
         } else if (!hasDuplicated) {
-          onUpdate(seg.id, { startTime: finalStart }, targetTrackId);
+          onUpdateSegment(trackId, seg.id, { startTime: finalStart }, targetTrackId);
         }
       }
     };
@@ -196,10 +200,10 @@ export const AudioSegmentView = React.memo(({
       let newFade = initialFade;
       if (type === 'in') {
         newFade = Math.max(0, Math.min(seg.duration, initialFade + deltaT));
-        onUpdate(seg.id, { fadeIn: newFade });
+        onUpdateSegment(trackId, seg.id, { fadeIn: newFade });
       } else {
         newFade = Math.max(0, Math.min(seg.duration, initialFade - deltaT));
-        onUpdate(seg.id, { fadeOut: newFade });
+        onUpdateSegment(trackId, seg.id, { fadeOut: newFade });
       }
     };
 
@@ -212,10 +216,27 @@ export const AudioSegmentView = React.memo(({
     window.addEventListener('mouseup', handleMouseUp);
   };
 
+  if (timelineVisibleRange) {
+    const startOffset = seg.startTime + (audioOffsetMs / 1000);
+    const endOffset = startOffset + seg.duration;
+    // Buffer of 5 seconds to prevent flickering on scroll/seek
+    if (endOffset < timelineVisibleRange.start - 5 || startOffset > timelineVisibleRange.end + 5) {
+      return (
+        <div 
+          className="absolute h-full pointer-events-none opacity-0"
+          style={{ 
+            left: `${startOffset * zoom}px`, 
+            width: `${seg.duration * zoom}px` 
+          }}
+        />
+      );
+    }
+  }
+
   return (
     <div 
       onMouseDown={(e) => {
-        if (onSelect) onSelect(e);
+        if (onSelectSegment) onSelectSegment(seg.id, e.shiftKey);
         handleMouseDown(e, 'drag');
       }}
       onContextMenu={handleContextMenu}
@@ -284,7 +305,7 @@ export const AudioSegmentView = React.memo(({
                 <input 
                   type="range" min="0" max="2" step="0.05"
                   value={seg.gain}
-                  onChange={(e) => onUpdate(seg.id, { gain: parseFloat(e.target.value) })}
+                  onChange={(e) => onUpdateSegment(trackId, seg.id, { gain: parseFloat(e.target.value) })}
                   className="h-24 appearance-none bg-zinc-800 rounded-full w-1 accent-indigo-500 cursor-pointer"
                   style={{ writingMode: 'vertical-lr' }}
                 />
@@ -360,15 +381,15 @@ export const AudioSegmentView = React.memo(({
             {
               label: "Нормализовать громкость",
               icon: <Maximize className="w-3.5 h-3.5 text-emerald-400" />,
-              onClick: () => onUpdate(seg.id, { gain: 1.0 })
+              onClick: () => onUpdateSegment(trackId, seg.id, { gain: 1.0 })
             },
             {
               label: "Разделить (в плейхеде)",
               icon: <Scissors className="w-3.5 h-3.5 text-zinc-400" />,
-              disabled: !onSplit,
+              disabled: !onSplitSegment || !currentTimeRef,
               onClick: () => {
-                if (onSplit) {
-                  onSplit(seg.id);
+                if (onSplitSegment && currentTimeRef) {
+                  onSplitSegment(trackId, seg.id, currentTimeRef.current);
                 }
               }
             },
@@ -377,19 +398,19 @@ export const AudioSegmentView = React.memo(({
               icon: <Edit3 className="w-3.5 h-3.5 text-zinc-400" />,
               onClick: () => {
                 const newText = prompt("Введите комментарий к дублю:", seg.text || "");
-                if (newText !== null) onUpdate(seg.id, { text: newText });
+                if (newText !== null) onUpdateSegment(trackId, seg.id, { text: newText });
               }
             },
-            ...(onGlue ? [{
+            ...(onGlueSegments ? [{
               label: "Склеить выделенные (Glue)",
               icon: <Volume2 className="w-3.5 h-3.5 text-indigo-400" />,
-              onClick: () => onGlue()
+              onClick: () => onGlueSegments()
             }] : []),
             {
               label: "Удалить сегмент",
               icon: <Trash2 className="w-3.5 h-3.5 text-rose-400" />,
               variant: 'danger',
-              onClick: () => onDelete?.(seg.id)
+              onClick: () => onDeleteSegment?.(trackId, seg.id)
             }
           ]}
         />

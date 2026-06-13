@@ -14,8 +14,10 @@ interface TopHeaderProps {
   handleMergeBackstage: () => void;
   handleToggleBackstage: () => void;
   setShowQuickImport: (v: boolean) => void;
+  setShowFixImport: (v: boolean) => void;
   handleBulkImport: () => void;
-  isElectron: boolean;
+  handleGameDubbingImport?: () => void;
+  isDesktop: boolean;
   handleExport: (format: 'WAV' | 'MP3' | 'FLAC') => void;
   handleBatchExport: () => void;
   handleMuxVideo: () => void;
@@ -96,8 +98,10 @@ export const TopHeader: React.FC<TopHeaderProps> = (props) => {
       handleMergeBackstage={props.handleMergeBackstage}
       handleToggleBackstage={props.handleToggleBackstage}
       setShowQuickImport={props.setShowQuickImport}
+      setShowFixImport={props.setShowFixImport}
       handleBulkImport={props.handleBulkImport}
-      isElectron={props.isElectron}
+      handleGameDubbingImport={props.handleGameDubbingImport}
+      isDesktop={props.isDesktop}
       handleExport={props.handleExport}
       handleBatchExport={props.handleBatchExport}
       handleMuxVideo={props.handleMuxVideo}

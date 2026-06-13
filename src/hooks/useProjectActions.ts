@@ -6,7 +6,7 @@ import { playbackEngine } from '../services/playbackEngine';
 interface UseProjectActionsOptions {
   project: Project | null;
   setProject: React.Dispatch<React.SetStateAction<Project | null>>;
-  saveSnapshot: () => void;
+  saveSnapshot: (targetId?: string) => void;
   selectedSegmentIds: string[];
   setSelectedSegmentIds: (ids: string[]) => void;
   isPlayingRef: React.MutableRefObject<boolean>;

@@ -11,11 +11,21 @@ export function useTimelineHistory(
   const isUndoRedoActionRef = useRef<boolean>(false);
 
   // Take a snapshot manually before an action
-  const saveSnapshot = useCallback(() => {
+  const saveSnapshot = useCallback((targetId?: string) => {
     if (!project) return;
     setHistory(prev => {
       const currentHistory = prev.slice(0, historyIndex + 1);
-      const newHistory = [...currentHistory, JSON.parse(JSON.stringify(project.tracks))];
+      
+      let newTracksSnapshot;
+      if (targetId) {
+        newTracksSnapshot = project.tracks.map(t => 
+          t.id === targetId ? { ...t, segments: [...t.segments] } : t
+        );
+      } else {
+        newTracksSnapshot = project.tracks.map(t => ({ ...t, segments: [...t.segments] }));
+      }
+      
+      const newHistory = [...currentHistory, newTracksSnapshot];
       setHistoryIndex(newHistory.length - 1);
       return newHistory;
     });
@@ -25,7 +35,7 @@ export function useTimelineHistory(
     if (historyIndex > 0 && project) {
       isUndoRedoActionRef.current = true;
       const previousTracks = history[historyIndex - 1];
-      setProject(prev => prev ? { ...prev, tracks: JSON.parse(JSON.stringify(previousTracks)) } : prev);
+      setProject(prev => prev ? { ...prev, tracks: previousTracks } : prev);
       playbackEngine.reconcile(previousTracks);
       setHistoryIndex(prev => prev - 1);
     } else if (historyIndex === 0 && project && history.length > 0) {
@@ -35,7 +45,7 @@ export function useTimelineHistory(
       // We can't undo beyond the first snapshot unless we take an initial one on load.
       isUndoRedoActionRef.current = true;
       const previousTracks = history[0];
-      setProject(prev => prev ? { ...prev, tracks: JSON.parse(JSON.stringify(previousTracks)) } : prev);
+      setProject(prev => prev ? { ...prev, tracks: previousTracks } : prev);
       playbackEngine.reconcile(previousTracks);
     }
   }, [historyIndex, history, project, setProject]);
@@ -44,7 +54,7 @@ export function useTimelineHistory(
     if (historyIndex < history.length - 1 && project) {
       isUndoRedoActionRef.current = true;
       const nextTracks = history[historyIndex + 1];
-      setProject(prev => prev ? { ...prev, tracks: JSON.parse(JSON.stringify(nextTracks)) } : prev);
+      setProject(prev => prev ? { ...prev, tracks: nextTracks } : prev);
       playbackEngine.reconcile(nextTracks);
       setHistoryIndex(prev => prev + 1);
     }

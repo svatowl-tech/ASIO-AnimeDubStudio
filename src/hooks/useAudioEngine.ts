@@ -10,7 +10,8 @@ export const useAudioEngine = (
   videoRef: RefObject<HTMLVideoElement | null>,
   currentTimeRef: MutableRefObject<number>,
   isPlayingRef: MutableRefObject<boolean>,
-  togglePlay: () => Promise<void>
+  togglePlay: () => Promise<void>,
+  webcamRef?: RefObject<HTMLVideoElement | null>
 ) => {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingStream, setRecordingStream] = useState<MediaStream | null>(null);
@@ -27,8 +28,10 @@ export const useAudioEngine = (
   const isDiscardingRef = useRef(false);
   const isManualBackstageRecordingRef = useRef(false);
   const isRecordingRef = useRef(false);
+  const isStartingRecordingRef = useRef(false);
   const isRecordingAsioRef = useRef(false);
   const recordingSegmentIdRef = useRef<string | null>(null);
+  const backstageVideoPathsRef = useRef<Record<string, string>>({});
 
   const isMounted = useRef(true);
   useEffect(() => {
@@ -68,9 +71,34 @@ export const useAudioEngine = (
     }
 
     try {
-      const videoStream = await navigator.mediaDevices.getUserMedia({ 
-        video: project?.audioSettings?.webcamDeviceId ? { deviceId: { exact: project.audioSettings.webcamDeviceId } } : true 
-      });
+      const targetWidth = project?.audioSettings?.webcamResolutionX || 1920;
+      const targetHeight = project?.audioSettings?.webcamResolutionY || 1080;
+
+      let videoStream: MediaStream | null = null;
+      let isClonedStream = false;
+
+      // 1. Prioritize existing active preview stream in webcamRef to prevent device locking
+      if (webcamRef?.current?.srcObject) {
+        videoStream = webcamRef.current.srcObject as MediaStream;
+        isClonedStream = true;
+        logger.info("[AudioEngine] startBackstageRecording: cloning from existing webcamRef stream");
+      } else {
+        logger.info("[AudioEngine] startBackstageRecording: webcamRef stream not available, requesting getUserMedia");
+        videoStream = await navigator.mediaDevices.getUserMedia({ 
+          video: project?.audioSettings?.webcamDeviceId 
+            ? { 
+                deviceId: { exact: project.audioSettings.webcamDeviceId },
+                width: { ideal: targetWidth },
+                height: { ideal: targetHeight },
+                frameRate: { ideal: 30 }
+              } 
+            : { 
+                width: { ideal: targetWidth },
+                height: { ideal: targetHeight },
+                frameRate: { ideal: 30 }
+              }
+        });
+      }
 
       let audioTrack = processedAudioTrack;
       const backstageAudioId = project?.audioSettings?.backstageAudioDeviceId;
@@ -86,59 +114,102 @@ export const useAudioEngine = (
         audioTrack = stream.getAudioTracks()[0];
       }
       
-      const tracks = [...videoStream.getVideoTracks()];
+      // Clone all tracks so we don't accidentally stop original preview streams
+      const tracks = [...videoStream.getVideoTracks().map(t => t.clone())];
       if (audioTrack) {
-        tracks.unshift(audioTrack);
+        tracks.unshift(audioTrack.clone());
       }
       const combinedStream = new MediaStream(tracks);
       
-      const backstageRecorder = new MediaRecorder(combinedStream, { mimeType: 'video/webm' });
+      const getMimeType = () => {
+        const types = [
+          'video/webm;codecs=vp9,opus',
+          'video/webm;codecs=vp8,opus',
+          'video/webm'
+        ];
+        return types.find(t => MediaRecorder.isTypeSupported(t)) || 'video/webm';
+      };
+
+      const backstageRecorder = new MediaRecorder(combinedStream, { 
+        mimeType: getMimeType(),
+        videoBitsPerSecond: project?.audioSettings?.webcamBitrate || 5000000,
+        audioBitsPerSecond: 128000
+      });
       backstageRecorderRef.current = backstageRecorder;
       backstageChunksRef.current = [];
       backstageRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) backstageChunksRef.current.push(e.data);
       };
       backstageRecorder.onstop = async () => {
+        if (!backstageChunksRef.current.length || isDiscardingRef.current) {
+          // Cleanup cloned tracks even if no data chunks were generated
+          combinedStream.getTracks().forEach(t => t.stop());
+          return;
+        }
         const videoBlob = new Blob(backstageChunksRef.current, { type: 'video/webm' });
-        const backstagePath = project?.projectPath || null;
-        if (backstagePath && window.electronAPI && isMounted.current) {
-          const arrayBuffer = await videoBlob.arrayBuffer();
-          const saveRes = await window.electronAPI.saveTake({
-            projectPath: backstagePath,
-            role: 'backstage',
-            startTime: recordingStartTimeRef.current,
-            audioData: new Uint8Array(arrayBuffer)
-          });
-          
-          if (saveRes.success && saveRes.data && isMounted.current) {
-            const videoPath = saveRes.data.filePath;
-            // Link to segment
-            setProject(prev => {
-              if (!prev) return null;
-              return {
-                ...prev,
-                tracks: prev.tracks.map(t => ({
-                  ...t,
-                  segments: t.segments.map(s => s.id === segmentId ? { ...s, backstageVideoPath: videoPath } : s)
-                }))
-              };
+        
+        // If the blob is too small (e.g., < 1000 bytes max, meaning it's likely just headers), ignore it
+        if (videoBlob.size < 1000) {
+          console.warn("[useAudioEngine] Backstage video blob too small/empty, skipping save");
+          combinedStream.getTracks().forEach(t => t.stop());
+          return;
+        }
+
+        const backstagePath = project?.projectPath;
+        
+        if (backstagePath && window.electronAPI) {
+          try {
+            const arrayBuffer = await videoBlob.arrayBuffer();
+            const saveRes = await window.electronAPI.saveTake({
+              projectPath: backstagePath,
+              role: 'backstage',
+              startTime: recordingStartTimeRef.current,
+              audioData: new Uint8Array(arrayBuffer)
             });
+            
+            if (saveRes.success && saveRes.data && isMounted.current) {
+              const videoPath = saveRes.data.filePath;
+              // Save in ref in case audio recorder hasn't punched it into project yet
+              backstageVideoPathsRef.current[segmentId] = videoPath;
+
+              // Also link to segment if it already exists
+              setProject(prev => {
+                if (!prev) return null;
+                return {
+                  ...prev,
+                  tracks: prev.tracks.map(t => ({
+                    ...t,
+                    segments: t.segments.map(s => s.id === segmentId ? { ...s, backstageVideoPath: videoPath } : s)
+                  }))
+                };
+              });
+            }
+          } catch (e) {
+            logger.error("Failed to save backstage take:", e);
           }
         }
-        // Cleanup video tracks
-        videoStream.getTracks().forEach(t => t.stop());
+        
+        // Stop ONLY the cloned tracks in combinedStream, leaving original preview tracks intact!
+        combinedStream.getTracks().forEach(t => t.stop());
+        
+        // If we opened a temporary un-cloned videoStream (not via webcamRef), stop its tracks too
+        if (!isClonedStream && videoStream) {
+          videoStream.getTracks().forEach(t => t.stop());
+        }
       };
       
-      backstageRecorder.start();
+      backstageRecorder.start(1000);
     } catch (err) {
       logger.error("Failed to start backstage recording", err);
       setIsManualBackstageRecording(false);
       isManualBackstageRecordingRef.current = false;
     }
-  }, [project, setProject]);
+  }, [project, setProject, webcamRef]);
 
   const startRecording = useCallback(async () => {
-    if (isRecordingRef.current) return;
+    if (isRecordingRef.current || isStartingRecordingRef.current) return;
+    
+    isStartingRecordingRef.current = true;
     logger.info("Starting recording process...");
     
     const segmentId = Math.random().toString(36).substr(2, 9);
@@ -206,6 +277,11 @@ export const useAudioEngine = (
 
         if (res.success) {
           isRecordingAsioRef.current = true;
+          // Trigger WebRTC frontal backstage recording if enabled (parallel mode)
+          // This avoids reliance purely on backend FFMPEG webcam fetching which often fails.
+          if (backstageRecord && project?.audioSettings?.backstageMode !== 'manual') {
+            startBackstageRecording(segmentId);
+          }
           setIsBackstageRecording(backstageRecord);
           // Emulate start for the rest of state
           recordingStartTimeRef.current = startTime;
@@ -351,6 +427,27 @@ export const useAudioEngine = (
             
             if (filePath && isMounted.current) {
               const offsetSec = (project.audioOffsetMs || 0) / 1000;
+              
+              // Resolve matching original file name for batch export
+              let matchedOriginalFileName: string | undefined;
+              if (activeLine) {
+                const origSegmentId = activeLine.id.startsWith('sub-') ? activeLine.id.substring(4) : activeLine.id;
+                const originalTrack = project.tracks.find(t => t.name === 'Оригинал');
+                const origSeg = originalTrack?.segments.find(s => s.id === origSegmentId);
+                if (origSeg) {
+                  matchedOriginalFileName = origSeg.originalFileName;
+                } else {
+                  // Fallback: find by overlapping time
+                  const timeSeg = originalTrack?.segments.find(s => 
+                    recordingStartTimeRef.current >= s.startTime - 0.5 && 
+                    recordingStartTimeRef.current <= s.startTime + s.duration + 0.5
+                  );
+                  if (timeSeg) {
+                    matchedOriginalFileName = timeSeg.originalFileName;
+                  }
+                }
+              }
+
               const newSegment: AudioSegment = {
                 id: segmentId,
                 startTime: Math.max(0, recordingStartTimeRef.current - offsetSec),
@@ -359,10 +456,12 @@ export const useAudioEngine = (
                 fileDuration: recordedDuration,
                 blobUrl: URL.createObjectURL(audioBlob),
                 filePath,
+                backstageVideoPath: backstageVideoPathsRef.current[segmentId],
                 waveform: finalWaveform,
                 gain: 1,
                 playbackRate: 1,
-                text: activeLine?.text
+                text: activeLine?.text,
+                originalFileName: matchedOriginalFileName
               };
             
             setProject(prev => {
@@ -419,13 +518,21 @@ export const useAudioEngine = (
       setIsRecording(false);
       isRecordingRef.current = false;
       if (isPlayingRef.current) togglePlay();
+    } finally {
+      isStartingRecordingRef.current = false;
     }
   }, [project, setProject, videoRef, currentTimeRef, isPlayingRef, togglePlay, isBackstageRecording, startBackstageRecording]);
 
   const stopRecording = useCallback(async () => {
     if (isRecordingRef.current) {
+      setIsBackstageRecording(false);
+      
+      // Stop webcam FIRST to avoid capturing trailing seconds while ASIO flushes to disk
+      if (backstageRecorderRef.current && backstageRecorderRef.current.state === 'recording') {
+        backstageRecorderRef.current.stop();
+      }
+
       if (isRecordingAsioRef.current && window.electronAPI) {
-        setIsBackstageRecording(false);
         const res = await window.electronAPI.stopAsioRecording();
         if (!isMounted.current) return;
         
@@ -438,15 +545,16 @@ export const useAudioEngine = (
           );
 
           const offsetSec = (project.audioOffsetMs || 0) / 1000;
+          const segmentId = recordingSegmentIdRef.current || Math.random().toString(36).substr(2, 9);
           const newSegment: AudioSegment = {
-            id: recordingSegmentIdRef.current || Math.random().toString(36).substr(2, 9),
+            id: segmentId,
             startTime: Math.max(0, recordingStartTimeRef.current - offsetSec),
             duration: metadata.duration,
             fileOffset: 0,
             fileDuration: metadata.duration,
             blobUrl: getSafeFileUrl(filePath),
             filePath,
-            backstageVideoPath: videoPath,
+            backstageVideoPath: backstageVideoPathsRef.current[segmentId] || videoPath,
             waveform: Array.from(metadata.peaks || []),
             gain: 1,
             playbackRate: 1,
@@ -487,9 +595,6 @@ export const useAudioEngine = (
         mediaRecorderRef.current.stop();
       }
       
-      if (backstageRecorderRef.current && backstageRecorderRef.current.state === 'recording') {
-        backstageRecorderRef.current.stop();
-      }
       setIsRecording(false);
       isRecordingRef.current = false;
       if (isPlayingRef.current) togglePlay();
@@ -499,6 +604,8 @@ export const useAudioEngine = (
   const discardRecording = useCallback(async () => {
     if (isRecordingRef.current) {
       isDiscardingRef.current = true;
+      setIsBackstageRecording(false);
+      
       if (isRecordingAsioRef.current && window.electronAPI) {
         await window.electronAPI.stopAsioRecording();
         if (!isMounted.current) return;
@@ -507,7 +614,8 @@ export const useAudioEngine = (
         mediaRecorderRef.current.stop();
       }
       
-      if (backstageRecorderRef.current && backstageRecorderRef.current.state === 'recording') {
+      backstageChunksRef.current = [];
+      if (backstageRecorderRef.current && backstageRecorderRef.current.state !== 'inactive') {
         backstageRecorderRef.current.stop();
       }
       setIsRecording(false);
@@ -568,6 +676,7 @@ export const useAudioEngine = (
     handleToggleRecord,
     handleToggleBackstage,
     handleDeleteLastTake,
-    isRecordingRef
+    isRecordingRef,
+    isStartingRecordingRef
   };
 };

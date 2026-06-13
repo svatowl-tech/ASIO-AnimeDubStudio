@@ -27,20 +27,34 @@ export class FixService {
       }
 
       // Check for Timestamp + Comment pattern
-      // Matches [MM:SS] or MM:SS
-      const fixMatch = trimmedLine.match(/(?:\[?(\d{1,2}):(\d{2})\]?)\s*(?:-|:)?\s*(.*)/);
+      // Matches: "  • [15:04] comment", "3:42 — comment", "14:00-14:12 - comment", etc.
+      const fixMatch = trimmedLine.match(/^(?:[\s•\-\—\*\.]*?)\[?(\d{1,2}):(\d{2})(?:\s*(?:-|—)\s*\d{1,2}:\d{2})?\]?\s*(?:-|—|:)?\s*(.*)$/i);
       if (fixMatch) {
         const minutes = parseInt(fixMatch[1], 10);
         const seconds = parseInt(fixMatch[2], 10);
         const timestamp = minutes * 60 + seconds;
-        const comment = fixMatch[3].trim();
+        let comment = fixMatch[3].trim();
+        
+        // Remove leading dash if still present (e.g., if it didn't match the separator)
+        if (comment.startsWith('-') || comment.startsWith('—')) {
+            comment = comment.substring(1).trim();
+        }
 
-        // Try to find matching segment
-        const segment = subtitles.find(s => timestamp >= s.start && timestamp <= s.end);
+        // Find the closest segment, preferring segments that encompass the timestamp
+        let closestSegment = subtitles.find(s => timestamp >= s.start && timestamp <= s.end);
+        
+        // If no exact match inside time segment, find the closest one by absolute difference to start time
+        if (!closestSegment && subtitles.length > 0) {
+            closestSegment = subtitles.reduce((prev, curr) => {
+                const prevDiff = Math.min(Math.abs(prev.start - timestamp), Math.abs(prev.end - timestamp));
+                const currDiff = Math.min(Math.abs(curr.start - timestamp), Math.abs(curr.end - timestamp));
+                return currDiff < prevDiff ? curr : prev;
+            });
+        }
 
         fixes.push({
           id: Math.random().toString(36).substr(2, 9),
-          segmentId: segment?.id,
+          segmentId: closestSegment?.id,
           timestamp,
           actor: currentActor,
           comment,

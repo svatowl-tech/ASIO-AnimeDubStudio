@@ -564,3 +564,31 @@ pub async fn mux_video(
     
     Ok(output_path)
 }
+
+#[tauri::command]
+pub async fn create_blank_video(
+    duration: f64,
+    output_path: String,
+) -> Result<String, String> {
+    let output = std::process::Command::new("ffmpeg")
+        .args(&[
+            "-y",
+            "-f", "lavfi",
+            "-i", "color=c=black:s=1280x720:r=24",
+            "-f", "lavfi",
+            "-i", "anullsrc=cl=mono:r=48000",
+            "-t", &duration.to_string(),
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            &output_path
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err(format!("FFmpeg failed to create blank video: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+
+    Ok(output_path)
+}

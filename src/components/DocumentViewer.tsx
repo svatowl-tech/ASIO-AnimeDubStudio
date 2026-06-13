@@ -129,11 +129,14 @@ export const DocumentViewer = ({
               onClick={() => onSeek(line.start)}
               className={cn(
                 "group relative p-6 rounded-2xl transition-all duration-500 cursor-pointer border",
-                isActive 
-                  ? "bg-indigo-500/10 border-indigo-500/30 shadow-[0_0_40px_rgba(99,102,241,0.05)]" 
-                  : isPast 
-                    ? "opacity-40 border-transparent hover:opacity-60" 
-                    : "border-transparent hover:bg-white/5"
+                line.needsFix
+                  ? "bg-rose-500/10 border-rose-500/30 shadow-[0_0_40px_rgba(244,63,94,0.05)]"
+                  : isActive 
+                    ? "bg-indigo-500/10 border-indigo-500/30 shadow-[0_0_40px_rgba(99,102,241,0.05)]" 
+                    : isPast 
+                      ? "opacity-40 border-transparent hover:opacity-60" 
+                      : "border-transparent hover:bg-white/5",
+                isActive && line.needsFix && "ring-2 ring-rose-500 ring-offset-2 ring-offset-zinc-950"
               )}
             >
               <div className="flex items-center justify-between mb-3">
@@ -164,6 +167,13 @@ export const DocumentViewer = ({
               >
                 {line.text}
               </p>
+              
+              {line.needsFix && line.fixComment && (
+                <div className="mt-4 p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-200">
+                  <span className="block text-[10px] font-bold uppercase tracking-widest opacity-60 mb-1">Правка от куратора</span>
+                  <span className="text-sm">{line.fixComment}</span>
+                </div>
+              )}
               
               {/* Progress Bar for Active Line */}
               {isActive && (

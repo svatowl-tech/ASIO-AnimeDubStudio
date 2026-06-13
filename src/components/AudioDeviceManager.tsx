@@ -140,7 +140,7 @@ export const AudioDeviceManager = ({
       <div>
         <label className="text-[10px] font-bold text-zinc-500 mb-2 block uppercase tracking-widest">Веб-камера (Звук)</label>
         <select 
-          value={settings.backstageAudioDeviceId}
+          value={settings.backstageAudioDeviceId || 'default'}
           onChange={(e) => onSettingsChange({ ...settings, backstageAudioDeviceId: e.target.value })}
           className="w-full bg-zinc-800 border border-white/10 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none transition-all"
         >
@@ -150,6 +150,59 @@ export const AudioDeviceManager = ({
             <option key={d.deviceId} value={d.deviceId}>{d.label || `Микрофон ${d.deviceId.slice(0, 5)}`}</option>
           ))}
         </select>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <label className="text-[10px] font-bold text-zinc-500 mb-2 block uppercase tracking-widest">Разрешение веб-камеры</label>
+          <select 
+            value={settings.webcamResolutionY || 1080}
+            onChange={(e) => {
+              const y = parseInt(e.target.value);
+              const x = y === 2160 ? 3840 : (y === 1080 ? 1920 : 1280);
+              onSettingsChange({ ...settings, webcamResolutionY: y, webcamResolutionX: x })
+            }}
+            className="w-full bg-zinc-800 border border-white/10 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+          >
+            <option value={720}>720p (HD)</option>
+            <option value={1080}>1080p (Full HD)</option>
+            <option value={2160}>4K (UHD)</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-[10px] font-bold text-zinc-500 mb-2 block uppercase tracking-widest">Битрейт вебкамеры</label>
+          <select 
+            value={settings.webcamBitrate || 5000000}
+            onChange={(e) => onSettingsChange({ ...settings, webcamBitrate: parseInt(e.target.value) })}
+            className="w-full bg-zinc-800 border border-white/10 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+          >
+            <option value={2500000}>2.5 Mbps (Низкий)</option>
+            <option value={5000000}>5 Mbps (Средний)</option>
+            <option value={10000000}>10 Mbps (Высокий)</option>
+            <option value={20000000}>20 Mbps (Максимум)</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="pt-2 border-t border-white/5 mt-2">
+        <label className="text-[10px] font-bold text-zinc-500 mb-3 block uppercase tracking-widest">Рендер Бекстейджа</label>
+        <div className="flex items-center gap-4 bg-zinc-900/50 p-3 rounded-xl border border-white/5">
+          <div className="flex items-center gap-2 cursor-pointer" onClick={() => onSettingsChange({ ...settings, webcamExportOverlay: settings.webcamExportOverlay === false ? true : false })}>
+            <div className={cn(
+              "w-8 h-4 rounded-full transition-all relative",
+              settings.webcamExportOverlay !== false ? "bg-indigo-600" : "bg-zinc-700"
+            )}>
+              <div className={cn(
+                "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all shadow-sm",
+                settings.webcamExportOverlay !== false ? "left-4.5" : "left-0.5"
+              )} />
+            </div>
+            <span className="text-[10px] font-bold text-zinc-300">Пайплайн Overlay</span>
+          </div>
+        </div>
+        <p className="text-[9px] text-zinc-500 mt-2 px-1">
+          При включении, бекстейдж будет экспортироваться с наложением на основное видео (как PiP). При выключении - будет экспортироваться только само видео с веб-камеры со звуком.
+        </p>
       </div>
 
       <div className="grid grid-cols-2 gap-4 pt-2">
@@ -221,6 +274,27 @@ export const AudioDeviceManager = ({
         </div>
         <p className="text-[9px] text-zinc-500 mt-2 px-1">
           Noise Gate автоматически отключает микрофон, когда вы не говорите, убирая шум кликов и окружения.
+        </p>
+      </div>
+
+      <div className="pt-2 border-t border-white/5 mt-2">
+        <label className="text-[10px] font-bold text-zinc-500 mb-3 block uppercase tracking-widest">Воспроизведение оригинала</label>
+        <div className="flex items-center gap-4 bg-zinc-900/50 p-3 rounded-xl border border-white/5">
+          <div className="flex items-center gap-2 cursor-pointer" onClick={() => onSettingsChange({ ...settings, playOriginalTrackSegments: !settings.playOriginalTrackSegments })}>
+            <div className={cn(
+              "w-8 h-4 rounded-full transition-all relative",
+              settings.playOriginalTrackSegments ? "bg-indigo-600" : "bg-zinc-700"
+            )}>
+              <div className={cn(
+                "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all shadow-sm",
+                settings.playOriginalTrackSegments ? "left-4.5" : "left-0.5"
+              )} />
+            </div>
+            <span className="text-[10px] font-bold text-zinc-300">Проигрывать нарезку</span>
+          </div>
+        </div>
+        <p className="text-[9px] text-zinc-500 mt-2 px-1">
+          По умолчанию воспроизведение видеофайла отдает оригинальный звук. Включение этой опции заставит плеер напрямую проигрывать аудио реплики на треке «Оригинал» (для проектов без единого мастер-видео/звукового файла).
         </p>
       </div>
     </div>

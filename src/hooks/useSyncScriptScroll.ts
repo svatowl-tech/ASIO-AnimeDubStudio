@@ -15,10 +15,24 @@ export const useSyncScriptScroll = (
     setTimeout(() => {
       if (!containerRef.current || !subtitles || subtitles.length === 0) return;
 
-      // Find active or nearest previous subtitle
+      // Find active or nearest subtitle
       let activeSub = subtitles.find(s => currentTime >= s.start && currentTime <= s.end);
       if (!activeSub) {
-        activeSub = [...subtitles].reverse().find(s => currentTime >= s.start);
+        let minDistance = Infinity;
+        let nearestSub = undefined;
+        for (const s of subtitles) {
+          let dist = 0;
+          if (currentTime < s.start) {
+            dist = s.start - currentTime;
+          } else if (currentTime > s.end) {
+            dist = currentTime - s.end;
+          }
+          if (dist < minDistance) {
+            minDistance = dist;
+            nearestSub = s;
+          }
+        }
+        activeSub = nearestSub;
       }
       
       if (!activeSub) return;

@@ -1,6 +1,5 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect } from 'react';
 import { Project } from '../types';
-import { cn } from '../lib/utils';
 import { useTimelineData } from '../contexts/TimelineContext';
 
 interface TimelineMinimapProps {
@@ -10,13 +9,42 @@ interface TimelineMinimapProps {
   visibleRange: { start: number, end: number };
 }
 
-export const TimelineMinimap: React.FC<TimelineMinimapProps> = ({
+const MinimapPlayhead: React.FC<{ duration: number; visibleRange: { start: number, end: number } }> = ({ duration, visibleRange }) => {
+  const { currentTime } = useTimelineData();
+  
+  const viewportLeft = duration > 0 ? (visibleRange.start / duration) * 100 : 0;
+  const viewportWidth = duration > 0 ? ((visibleRange.end - visibleRange.start) / duration) * 100 : 100;
+  const playheadPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+
+  return (
+    <>
+      <div 
+        className="absolute top-0 bottom-0 w-full pointer-events-none"
+        style={{ transform: `translateX(${viewportLeft}%)` }}
+      >
+        <div 
+          className="absolute top-0 bottom-0 border-x border-white/20 bg-white/5"
+          style={{ width: `${viewportWidth}%` }}
+        />
+      </div>
+
+      <div 
+        className="absolute top-0 bottom-0 w-full pointer-events-none z-10"
+        style={{ transform: `translateX(${playheadPercent}%)` }}
+      >
+        <div className="absolute top-0 bottom-0 w-[2px] bg-rose-500 -ml-[1px]" />
+        <div className="absolute top-0 left-0 -ml-[3px] w-2 h-2 bg-rose-500 rounded-full" />
+      </div>
+    </>
+  );
+};
+
+export const TimelineMinimap = React.memo(({
   project,
   duration,
   onSeek,
   visibleRange
-}) => {
-  const { currentTime } = useTimelineData();
+}: TimelineMinimapProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -61,12 +89,7 @@ export const TimelineMinimap: React.FC<TimelineMinimapProps> = ({
       });
     });
 
-    // Draw "now" line
-    const nowX = (currentTime / duration) * width;
-    ctx.fillStyle = '#f43f5e';
-    ctx.fillRect(nowX - 1, 0, 2, height);
-
-  }, [project, duration, currentTime]);
+  }, [project, duration]);
 
   const handleInteraction = (e: React.MouseEvent | React.TouchEvent) => {
     if (!containerRef.current || duration <= 0) return;
@@ -77,12 +100,9 @@ export const TimelineMinimap: React.FC<TimelineMinimapProps> = ({
     onSeek(time);
   };
 
-  const viewportLeft = (visibleRange.start / duration) * 100;
-  const viewportWidth = ((visibleRange.end - visibleRange.start) / duration) * 100;
-
   return (
     <div 
-      className="h-full border-b border-zinc-800 bg-zinc-950 relative cursor-pointer group select-none flex-1 w-full"
+      className="h-full border-b border-zinc-800 bg-zinc-950 relative cursor-pointer group select-none flex-1 w-full overflow-hidden"
       ref={containerRef}
       onMouseDown={(e) => {
         if (e.button === 0) handleInteraction(e);
@@ -97,22 +117,12 @@ export const TimelineMinimap: React.FC<TimelineMinimapProps> = ({
         className="w-full h-full opacity-60 group-hover:opacity-100 transition-opacity"
       />
       
-      {/* Viewport Overlay */}
-      <div 
-        className="absolute top-0 bottom-0 border-x border-white/20 bg-white/5 pointer-events-none"
-        style={{ 
-          left: `${viewportLeft}%`, 
-          width: `${viewportWidth}%` 
-        }}
-      />
-
-      {/* Playhead Handle */}
-      <div 
-        className="absolute top-0 bottom-0 w-[2px] bg-rose-500 z-10 pointer-events-none"
-        style={{ left: `${(currentTime / duration) * 100}%` }}
-      >
-        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-2 h-2 bg-rose-500 rounded-full" />
-      </div>
+      <MinimapPlayhead duration={duration} visibleRange={visibleRange} />
     </div>
   );
-};
+}, (prev, next) => {
+  return prev.project === next.project &&
+         prev.duration === next.duration &&
+         prev.visibleRange.start === next.visibleRange.start &&
+         prev.visibleRange.end === next.visibleRange.end;
+});

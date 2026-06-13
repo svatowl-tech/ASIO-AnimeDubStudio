@@ -947,13 +947,20 @@ export const tauriAPI = {
     }
   },
 
-  concatBackstageVideos: async (args: { videoPaths: string[], outputPath: string }): Promise<BridgeResponse<string>> => {
+  exportBackstageVideo: async (args: { mainVideoPath: string, backstageVideoPath: string, finalAudioPath: string, outputPath: string, webcamExportOverlay?: boolean }): Promise<BridgeResponse<string>> => {
     if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
     try {
-        const result = await invoke<string>('concat_backstage_videos', { 
-            videoPaths: args.videoPaths, 
-            outputPath: args.outputPath 
-        });
+        const result = await invoke<string>('export_backstage_video', args);
+        return { success: true, data: result };
+    } catch(err) {
+        return { success: false, error: String(err) };
+    }
+  },
+
+  concatBackstageVideos: async (args: { videoPaths: string[], outputPath: string, backstageMode?: string, isBackstageEnabled?: boolean }): Promise<BridgeResponse<string>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        const result = await invoke<string>('concat_backstage_videos', args);
         return { success: true, data: result };
     } catch(err) {
         return { success: false, error: String(err) };
@@ -987,6 +994,16 @@ export const tauriAPI = {
         return { success: true, data: result };
     } catch(err) {
         return { success: false, error: typeof err === 'object' ? JSON.stringify(err) : String(err) };
+    }
+  },
+
+  createBlankVideo: async (duration: number, outputPath: string): Promise<BridgeResponse<string>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        const result = await invoke<string>('create_blank_video', { duration, outputPath });
+        return { success: true, data: result };
+    } catch(err) {
+        return { success: false, error: String(err) };
     }
   },
 };

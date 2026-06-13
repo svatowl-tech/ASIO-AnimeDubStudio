@@ -4,6 +4,8 @@ export interface SubtitleLine {
   end: number;   // seconds
   text: string;
   role: string;
+  needsFix?: boolean;
+  fixComment?: string;
 }
 
 export interface AudioSettings {
@@ -26,6 +28,10 @@ export interface AudioSettings {
   isDestructive: boolean; // Whether to save processed audio
   webcamDeviceId?: string;
   backstageAudioDeviceId?: string;
+  webcamResolutionX?: number;
+  webcamResolutionY?: number;
+  webcamBitrate?: number; // in bits per second
+  webcamExportOverlay?: boolean; // Whether to export with overlay or just raw backstage video
   backstageFolderPath?: string;
   backstageMode: 'parallel' | 'manual';
   isBackstageEnabled: boolean;
@@ -35,6 +41,7 @@ export interface AudioSettings {
     flacCompression: number;
     sampleRate: number;
   };
+  playOriginalTrackSegments?: boolean;
 }
 
 export interface HotkeyAction {
@@ -192,7 +199,11 @@ declare global {
       saveFile: (options: { title: string, defaultPath: string, filters: { name: string, extensions: string[] }[] }) => Promise<BridgeResponse<string>>;
       openFolder: () => Promise<BridgeResponse<string>>;
       getAudioFiles: (folderPath: string) => Promise<BridgeResponse<{ path: string, name: string, duration: number, peaks: number[] }[]>>;
-      batchExport: (options: { projectPath: string, segments: { filePath: string, originalFileName: string }[], outDir?: string }) => Promise<BridgeResponse<string[]>>;
+      batchExport: (options: { 
+        outDir: string; 
+        origSegments: { startTime: number; duration: number; originalFileName: string }[];
+        dubSegments: { filePath: string; startTime: number; duration: number; fileOffset: number; gain: number; playbackRate: number }[];
+      }) => Promise<BridgeResponse<string[]>>;
       exportAudioBook: (options: any) => Promise<BridgeResponse<{ success: boolean, path?: string }>>;
       exportAllStems: (args: { projectId: string, projectName: string, outputPath: string }) => Promise<BridgeResponse<string>>;
       exportStems: (options: { projectData: any, outputDir: string, bitDepth?: string }) => Promise<BridgeResponse<string[]>>;
@@ -207,12 +218,14 @@ declare global {
       findFileByHash: (searchRoot: string, targetHash: string) => Promise<BridgeResponse<string | null>>;
       relinkSegmentFile: (segmentId: string, newPath: string) => Promise<BridgeResponse<void>>;
       cleanupOrphanedFiles: (files: string[]) => Promise<BridgeResponse<void>>;
-      concatBackstageVideos: (data: { videoPaths: string[], outputPath: string }) => Promise<BridgeResponse<string>>;
+      concatBackstageVideos: (data: { videoPaths: string[], outputPath: string, backstageMode?: string, isBackstageEnabled?: boolean }) => Promise<BridgeResponse<string>>;
+      exportBackstageVideo: (data: { mainVideoPath: string, backstageVideoPath: string, finalAudioPath: string, outputPath: string, webcamExportOverlay?: boolean }) => Promise<BridgeResponse<string>>;
       moveProject: (oldPath: string, newPath: string) => Promise<BridgeResponse<boolean>>;
       openPath: (path: string) => Promise<BridgeResponse<void>>;
       forceStopAll: () => Promise<BridgeResponse<void>>;
       getMediaInfo: (path: string) => Promise<BridgeResponse<string>>;
       extractMkvAssets: (data: { inputPath: string, videoOutput: string, subOutput?: string, audioIndex: number, subIndex?: number, duration?: number }) => Promise<BridgeResponse<string>>;
+      createBlankVideo: (duration: number, outputPath: string) => Promise<BridgeResponse<string>>;
     };
   }
 }

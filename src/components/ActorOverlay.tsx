@@ -32,7 +32,8 @@ export const ActorOverlay = ({
   activeRole = '',
   project,
   onSettingsChange,
-  onSeek
+  onSeek,
+  isWebcamSimulated
 }: { 
   currentLine?: SubtitleLine, 
   nextLine?: SubtitleLine,
@@ -60,7 +61,8 @@ export const ActorOverlay = ({
   activeRole?: string,
   project?: Project,
   onSettingsChange?: (settings: any) => void,
-  onSeek?: (time: number) => void
+  onSeek?: (time: number) => void,
+  isWebcamSimulated?: boolean
 }) => {
   return (
     <div className="absolute inset-0 pointer-events-none z-40 overflow-hidden">
@@ -129,6 +131,8 @@ export const ActorOverlay = ({
             onClipping={onClipping}
             project={project}
             onSettingsChange={onSettingsChange!}
+            isTimelineRecording={isRecording}
+            isWebcamSimulated={isWebcamSimulated}
           />
         )}
       </AnimatePresence>

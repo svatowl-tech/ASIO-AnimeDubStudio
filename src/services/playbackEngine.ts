@@ -22,6 +22,7 @@ export class PlaybackEngine {
   private boundReferenceElement: HTMLMediaElement | null = null;
   private audioOffsetMs = 0; 
   private currentTracks: any[] = [];
+  private playOriginalTrackSegments = false;
   private playingMetadata: Map<string, {
     videoStartTime: number;
     ctxStartTime: number;
@@ -29,9 +30,15 @@ export class PlaybackEngine {
     basePlaybackRate: number;
     seg: any;
     track: any;
+    monoNode?: GainNode;
   }> = new Map();
 
   constructor() {}
+
+  public setPlayOriginalTrackSegments(play: boolean) {
+    this.playOriginalTrackSegments = play;
+    console.log(`[PlaybackEngine] Play original track segments direct set to: ${play}`);
+  }
 
   public setAudioOffset(offsetMs: number) {
     this.audioOffsetMs = offsetMs;
@@ -91,17 +98,22 @@ export class PlaybackEngine {
   }
 
   public bindVideoElement(video: HTMLMediaElement) {
-    if (this.boundVideoElement === video) return;
+    if (this.boundVideoElement === video && this.videoSource) return;
     const ctx = this.getContext();
     console.log("[PlaybackEngine] Binding video element for audio routing...");
     
     try {
-      if (this.videoSource) {
+      if (this.videoSource && this.boundVideoElement !== video) {
         console.log("[PlaybackEngine] Disconnecting previous video source");
         this.videoSource.disconnect();
       }
+      
+      const isNewVideo = this.boundVideoElement !== video;
       this.boundVideoElement = video;
-      this.videoSource = ctx.createMediaElementSource(video);
+      
+      if (!this.videoSource || isNewVideo) {
+         this.videoSource = ctx.createMediaElementSource(video);
+      }
       
       if (!this.videoGain) {
         this.videoGain = ctx.createGain();
@@ -115,7 +127,7 @@ export class PlaybackEngine {
       
       this.videoSource.connect(this.videoGain);
       // Ensure the master bus graph is consistent
-      if (this.videoGain.numberOfOutputs === 0 || true) {
+      if (this.videoGain.numberOfOutputs === 0) {
          try { this.videoGain.disconnect(); } catch(e){}
          this.videoGain.connect(this.videoDelay);
       }
@@ -127,16 +139,22 @@ export class PlaybackEngine {
   }
 
   public bindReferenceAudio(audio: HTMLMediaElement) {
-    if (this.boundReferenceElement === audio) return;
+    if (this.boundReferenceElement === audio && this.referenceSource) return;
     const ctx = this.getContext();
     console.log("[PlaybackEngine] Binding reference audio for routing...");
     
     try {
-      if (this.referenceSource) {
+      if (this.referenceSource && this.boundReferenceElement !== audio) {
         this.referenceSource.disconnect();
       }
+      
+      const isNewAudio = this.boundReferenceElement !== audio;
       this.boundReferenceElement = audio;
-      this.referenceSource = ctx.createMediaElementSource(audio);
+      
+      if (!this.referenceSource || isNewAudio) {
+        this.referenceSource = ctx.createMediaElementSource(audio);
+      }
+      
       if (!this.referenceGain) {
         this.referenceGain = ctx.createGain();
         this.referenceGain.gain.value = 0.0;
@@ -149,6 +167,7 @@ export class PlaybackEngine {
          try { this.referenceGain.disconnect(); } catch(e) {}
          this.referenceGain.connect(this.videoDelay);
       } else {
+         try { this.referenceGain.disconnect(); } catch(e) {}
          this.referenceGain.connect(ctx.destination);
       }
       
@@ -168,8 +187,32 @@ export class PlaybackEngine {
     }
     
     if (this.bufferCache.size > 200) {
-      console.log("[PlaybackEngine] Cache size exceeded 200, clearing to save memory");
-      this.clearCache();
+      console.log("[PlaybackEngine] Cache size exceeded 200, pruning cache to save memory");
+      
+      const activeUrls = new Set<string>();
+      activeUrls.add(url);
+
+      const currentVideoTime = this.boundVideoElement ? this.boundVideoElement.currentTime : 0;
+      
+      this.playingMetadata.forEach((meta) => {
+        const activeUrl = (meta.seg as any).url || meta.seg.blobUrl || (meta.seg.filePath ? getSafeFileUrl(meta.seg.filePath) : null);
+        if (activeUrl) activeUrls.add(activeUrl);
+      });
+
+      this.currentTracks.forEach(track => {
+        track.segments.forEach((seg: any) => {
+           if (seg.startTime <= currentVideoTime + 5 && seg.startTime + seg.duration >= currentVideoTime) {
+               const activeUrl = seg.url || seg.blobUrl || (seg.filePath ? getSafeFileUrl(seg.filePath) : null);
+               if (activeUrl) activeUrls.add(activeUrl);
+           }
+        });
+      });
+
+      for (const [cacheUrl] of this.bufferCache) {
+        if (!activeUrls.has(cacheUrl)) {
+          this.bufferCache.delete(cacheUrl);
+        }
+      }
     }
 
     const loadPromise = (async () => {
@@ -262,6 +305,7 @@ export class PlaybackEngine {
       const videoEnd = meta.seg.startTime + meta.seg.duration;
       if (videoTime > videoEnd + 0.1) {
         try { source.stop(); source.disconnect(); } catch(e) {}
+        if (meta.monoNode) { try { meta.monoNode.disconnect(); } catch(e) {} }
         this.sources.delete(segId);
         const gain = this.gainNodes.get(segId);
         if (gain) {
@@ -315,6 +359,7 @@ export class PlaybackEngine {
     
     if (source) {
       const gain = this.gainNodes.get(seg.id);
+      const meta = this.playingMetadata.get(seg.id);
       
       // Implement micro-fade out (crossfade support)
       const fadeOutTime = 0.01; // 10ms
@@ -325,6 +370,7 @@ export class PlaybackEngine {
       // Cleanup after fade out
       setTimeout(() => {
         try { source.stop(); source.disconnect(); } catch(e) {}
+        if (meta?.monoNode) { try { meta.monoNode.disconnect(); } catch(e) {} }
         if (gain) { try { gain.disconnect(); } catch(e) {} }
       }, fadeOutTime * 1000 + 50);
 
@@ -354,6 +400,7 @@ export class PlaybackEngine {
       const meta = this.playingMetadata.get(segId);
       if (meta && liveVideoTime > meta.seg.startTime + meta.seg.duration + 0.1) {
         try { source.stop(); source.disconnect(); } catch(e) {}
+        if (meta.monoNode) { try { meta.monoNode.disconnect(); } catch(e) {} }
         this.sources.delete(segId);
         const gain = this.gainNodes.get(segId);
         if (gain) {
@@ -398,7 +445,8 @@ export class PlaybackEngine {
 
     for (const track of activeTracks) {
       const lowerName = track.name?.toLowerCase() || '';
-      if (lowerName.includes('оригинал') || lowerName.includes('original') || track.id === 'reference-track' || lowerName.includes('reference')) {
+      const isOriginalOrRef = lowerName.includes('оригинал') || lowerName.includes('original') || track.id === 'reference-track' || lowerName.includes('reference');
+      if (isOriginalOrRef && !this.playOriginalTrackSegments) {
         continue;
       }
 
@@ -419,31 +467,35 @@ export class PlaybackEngine {
             // However, the requirements say 'use time in the beginning of tick'.
             
             // Get the most precise current time and rate directly from the source if possible
-            const currentVideoTime = this.boundVideoElement ? this.boundVideoElement.currentTime : liveVideoTime;
+            const freshCtxTime = ctx.currentTime;
+            const freshVideoTime = this.boundVideoElement ? this.boundVideoElement.currentTime : liveVideoTime;
             const currentVideoRate = this.boundVideoElement ? this.boundVideoElement.playbackRate : playbackRate;
 
+            if (freshVideoTime > seg.startTime + seg.duration) {
+              return; // Segment is already in the past
+            }
+
             const schedulingDelay = 0.02; // 20ms pre-roll for smooth start
-            const schedNow = ctx.currentTime;
             
             let when: number;
             let bufferOffset: number;
             let timeOffsetInSegment: number;
 
             // Capture the exact video time for metadata synchronization
-            const audioStartVideoTime = currentVideoTime + (schedulingDelay * currentVideoRate);
+            const audioStartVideoTime = freshVideoTime + (schedulingDelay * currentVideoRate);
 
-            if (currentVideoTime > seg.startTime) {
+            if (freshVideoTime > seg.startTime) {
               // 1. Starting from the middle of the segment
-              timeOffsetInSegment = currentVideoTime - seg.startTime;
+              timeOffsetInSegment = freshVideoTime - seg.startTime;
               // Add fixed pre-roll as requested
-              when = schedNow + schedulingDelay;
+              when = freshCtxTime + schedulingDelay;
               // User requested NOT to add schedulingDelay to buffer offset to prevent "jumping"
               bufferOffset = (seg.fileOffset || 0) + timeOffsetInSegment;
             } else {
               // 2. Future segment
               timeOffsetInSegment = 0;
-              const timeUntilStart = (seg.startTime - currentVideoTime) / currentVideoRate;
-              when = schedNow + timeUntilStart;
+              const timeUntilStart = (seg.startTime - freshVideoTime) / currentVideoRate;
+              when = freshCtxTime + timeUntilStart;
               bufferOffset = seg.fileOffset || 0;
             }
 
@@ -473,6 +525,7 @@ export class PlaybackEngine {
 
             source.connect(gainNode);
             
+            let currentMonoNode: GainNode | undefined;
             const lowerTrackName = track.name?.toLowerCase() || '';
             if (lowerTrackName.includes('озвучк') || lowerTrackName.includes('dub') || buffer.numberOfChannels === 1) {
               const monoNode = ctx.createGain();
@@ -481,9 +534,15 @@ export class PlaybackEngine {
               source.disconnect(gainNode);
               source.connect(monoNode);
               monoNode.connect(gainNode);
+              currentMonoNode = monoNode;
             }
 
-            gainNode.connect(this.dubbingGain || ctx.destination);
+            const isOriginalOrRefTrack = lowerTrackName.includes('оригинал') || lowerTrackName.includes('original') || track.id === 'reference-track' || lowerTrackName.includes('reference');
+            if (isOriginalOrRefTrack) {
+              gainNode.connect(this.videoGain || ctx.destination);
+            } else {
+              gainNode.connect(this.dubbingGain || ctx.destination);
+            }
             source.start(when, Math.max(0, bufferOffset), Math.max(0, duration));
             
             // Micro-fade out at end
@@ -501,7 +560,8 @@ export class PlaybackEngine {
               fileOffset: bufferOffset,
               basePlaybackRate: baseRate,
               seg,
-              track
+              track,
+              monoNode: currentMonoNode
             });
           });
         }
@@ -513,14 +573,19 @@ export class PlaybackEngine {
     this.isPlaying = false;
     this.currentSessionId = Date.now();
     this.scheduledSegments.clear();
-    this.playingMetadata.clear();
     this.currentTracks = [];
     
-    this.sources.forEach(source => {
+    this.sources.forEach((source, segId) => {
       try {
         source.stop();
         source.disconnect();
       } catch (e) {}
+      const meta = this.playingMetadata.get(segId);
+      if (meta && meta.monoNode) {
+        try {
+          meta.monoNode.disconnect();
+        } catch (e) {}
+      }
     });
     this.sources.clear();
     this.gainNodes.forEach(gain => {
@@ -529,6 +594,7 @@ export class PlaybackEngine {
       } catch (e) {}
     });
     this.gainNodes.clear();
+    this.playingMetadata.clear();
   }
 
   /**

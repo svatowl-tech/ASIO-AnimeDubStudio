@@ -7,6 +7,7 @@ interface UseTimelineHotkeysProps {
   selectedSegmentIds: string[];
   currentTimeRef: React.MutableRefObject<number>;
   isRecordingRef: React.MutableRefObject<boolean>;
+  isStartingRecordingRef?: React.MutableRefObject<boolean>;
   togglePlay: () => void;
   stopRecording?: () => void;
   discardRecording?: () => void;
@@ -27,6 +28,7 @@ export function useTimelineHotkeys({
   selectedSegmentIds,
   currentTimeRef,
   isRecordingRef,
+  isStartingRecordingRef,
   togglePlay,
   stopRecording,
   discardRecording,
@@ -100,6 +102,9 @@ export function useTimelineHotkeys({
         }
         e.preventDefault();
         e.stopPropagation();
+        
+        // Wait if recording is in the middle of starting!
+        if (isStartingRecordingRef?.current) return;
         
         if (isRecordingRef && isRecordingRef.current && stopRecording) {
             stopRecording();

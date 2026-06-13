@@ -486,43 +486,178 @@ pub async fn quick_preview_export(
     Ok(dest.to_str().unwrap().to_string())
 }
 
-#[derive(Deserialize)]
-pub struct BatchSegment {
-    #[serde(rename = "filePath")]
-    pub file_path: String,
+#[derive(Deserialize, Debug, Clone)]
+pub struct BatchOrigSegment {
+    #[serde(rename = "startTime")]
+    pub start_time: f64,
+    pub duration: f64,
     #[serde(rename = "originalFileName")]
     pub original_file_name: String,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+pub struct BatchDubSegment {
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+    #[serde(rename = "startTime")]
+    pub start_time: f64,
+    pub duration: f64,
+    #[serde(rename = "fileOffset")]
+    pub file_offset: f64,
+    pub gain: f64,
+    #[serde(rename = "playbackRate")]
+    pub playback_rate: f64,
+}
+
 #[tauri::command]
 pub async fn batch_export(
-    _app_handle: AppHandle,
-    _project_path: String,
+    app_handle: AppHandle,
     out_dir: String,
-    segments: Vec<BatchSegment>,
+    orig_segments: Vec<BatchOrigSegment>,
+    dub_segments: Vec<BatchDubSegment>,
 ) -> Result<Vec<String>, String> {
     let export_dir = Path::new(&out_dir);
     if !export_dir.exists() {
         fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
     }
 
+    let total_tasks = orig_segments.len();
+    if total_tasks == 0 {
+        return Ok(Vec::new());
+    }
+
     let mut exported_paths = Vec::new();
 
-    for seg in segments {
-        let src = Path::new(&seg.file_path);
-        if !src.exists() {
-            continue;
-        }
+    // Spawn parallel processes using a bounded semaphore
+    let max_concurrent = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
 
-        // Use originalFileName, ensure it has .wav
-        let mut final_name = seg.original_file_name.clone();
-        if !final_name.to_lowercase().ends_with(".wav") {
-            final_name.push_str(".wav");
-        }
+    let mut handles = Vec::new();
 
-        let dest = export_dir.join(&final_name);
-        fs::copy(src, &dest).map_err(|e| format!("Failed to copy {}: {}", seg.file_path, e))?;
-        exported_paths.push(dest.to_str().unwrap().to_string());
+    for orig_seg in orig_segments {
+        let sem_clone = Arc::clone(&semaphore);
+        let out_dir_clone = export_dir.to_path_buf();
+        let dubs_clone = dub_segments.clone();
+
+        let handle = tokio::spawn(async move {
+            let _permit = sem_clone.acquire().await.map_err(|e| e.to_string())?;
+
+            let mut final_name = orig_seg.original_file_name.clone();
+            // Clean filename and ensure wav extension
+            if !final_name.to_lowercase().ends_with(".wav") {
+                final_name.push_str(".wav");
+            }
+            let out_file = out_dir_clone.join(&final_name);
+
+            let t_start = orig_seg.start_time;
+            let t_end = t_start + orig_seg.duration;
+
+            // 1. Filter overlapping dubs
+            let mut overlaps = Vec::new();
+            for dub in dubs_clone {
+                let dub_end = dub.start_time + dub.duration;
+                if dub.start_time < t_end && dub_end > t_start {
+                    overlaps.push(dub);
+                }
+            }
+
+            // 2. Build and run FFmpeg command for this replica
+            let mut cmd = Command::new("ffmpeg");
+            cmd.arg("-y");
+
+            // Base silence input
+            cmd.arg("-f").arg("lavfi")
+               .arg("-i").arg(format!("anullsrc=r=48000:cl=mono:d={:.4}", orig_seg.duration));
+
+            // Overlapping segments
+            for dub in &overlaps {
+                cmd.arg("-i").arg(&dub.file_path);
+            }
+
+            // Build filter_complex
+            let mut filter = "[0:a]asetpts=PTS-STARTPTS[a0];".to_string();
+
+            for (j, dub) in overlaps.iter().enumerate() {
+                let in_idx = j + 1; // 0 is silence
+                let overlap_start = t_start.max(dub.start_time);
+                let overlap_end = t_end.min(dub.start_time + dub.duration);
+                let overlap_dur = overlap_end - overlap_start;
+
+                if overlap_dur <= 0.0 {
+                    continue;
+                }
+
+                // Calculate trimming params inside the audio file
+                let file_offset_delta = (overlap_start - dub.start_time) * dub.playback_rate;
+                let trim_start = dub.file_offset + file_offset_delta;
+                let trim_duration = overlap_dur * dub.playback_rate;
+
+                let delay_ms = ((overlap_start - t_start) * 1000.0).round() as i64;
+
+                filter.push_str(&format!(
+                    "[{}:a]atrim=start={:.4}:duration={:.4},asetpts=PTS-STARTPTS",
+                    in_idx, trim_start, trim_duration
+                ));
+
+                if (dub.playback_rate - 1.0).abs() > 0.001 {
+                    filter.push_str(&format!(",atempo={:.4}", dub.playback_rate));
+                }
+
+                filter.push_str(&format!(
+                    ",volume={:.4},adelay={}|{}[a{}];",
+                    dub.gain, delay_ms, delay_ms, in_idx
+                ));
+            }
+
+            for j in 0..=overlaps.len() {
+                filter.push_str(&format!("[a{}]", j));
+            }
+            filter.push_str(&format!(
+                "amix=inputs={}:duration=longest:dropout_transition=0:normalize=0",
+                overlaps.len() + 1
+            ));
+
+            cmd.arg("-filter_complex").arg(filter);
+            cmd.arg("-t").arg(format!("{:.4}", orig_seg.duration));
+            cmd.arg("-c:a").arg("pcm_s16le");
+            cmd.arg(out_file.to_str().unwrap());
+
+            let output = cmd.output().await.map_err(|e| format!("FFmpeg execution failed: {}", e))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("FFmpeg error during {} render: {}", final_name, stderr));
+            }
+
+            Ok::<String, String>(out_file.to_str().unwrap().to_string())
+        });
+
+        handles.push(handle);
+    }
+
+    let mut errors = Vec::new();
+    let mut completed = 0;
+
+    for h in handles {
+        match h.await {
+            Ok(Ok(path)) => {
+                exported_paths.push(path);
+            },
+            Ok(Err(e)) => {
+                errors.push(e);
+            },
+            Err(e) => {
+                errors.push(e.to_string());
+            }
+        }
+        completed += 1;
+        let pct = (completed as f64 / total_tasks as f64) * 100.0;
+        let _ = app_handle.emit("export-progress", pct);
+    }
+
+    if !errors.is_empty() {
+        return Err(format!("Some replicas failed to render:\n{}", errors.join("\n")));
     }
 
     Ok(exported_paths)
@@ -626,4 +761,60 @@ pub async fn export_audio_book(
     let _ = fs::remove_dir_all(&temp_dir);
 
     Ok(final_output_path)
+}
+
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
+
+#[tauri::command]
+pub async fn export_backstage_video(
+    app_handle: AppHandle,
+    main_video_path: String,
+    backstage_video_path: String,
+    final_audio_path: String,
+    output_path: String,
+) -> Result<String, String> {
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(&[
+        "-y",
+        "-i", &main_video_path,
+        "-i", &backstage_video_path,
+        "-i", &final_audio_path,
+        "-filter_complex", "[1:v]scale=320:-1[bg]; [0:v][bg]overlay=W-w-10:H-h-10[out_v]",
+        "-map", "[out_v]",
+        "-map", "2:a",
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        &output_path,
+    ]);
+
+    cmd.stdout(Stdio::piped())
+       .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
+    
+    if let Some(stderr) = child.stderr.take() {
+        let mut reader = BufReader::new(stderr).lines();
+        let re = regex::Regex::new(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})").unwrap();
+
+        let app_handle_clone = app_handle.clone();
+        tokio::spawn(async move {
+            while let Ok(Some(line)) = reader.next_line().await {
+                if let Some(caps) = re.captures(&line) {
+                    let _ = app_handle_clone.emit("export-progress", serde_json::json!({
+                        "operation": "Exporting Backstage Video",
+                        "time": caps[0].to_string()
+                    }));
+                }
+            }
+        });
+    }
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    
+    if !status.success() {
+        return Err("FFmpeg execution failed".to_string());
+    }
+
+    Ok(output_path)
 }

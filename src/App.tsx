@@ -51,6 +51,7 @@ import VUMeter from './components/VUMeter';
 import AudioDeviceManager from './components/AudioDeviceManager';
 import ExportModal from './components/ExportModal';
 import QuickImportModal from './components/QuickImportModal';
+import FixImportModal from './components/FixImportModal';
 import PreRollCountdown from './components/PreRollCountdown';
 import Teleprompter from './components/Teleprompter';
 import { Project, SubtitleLine, AudioTrack, AudioSegment, Fix, Marker, TrackProcessing } from './types';
@@ -68,6 +69,8 @@ import { splitSegmentAtTime } from './lib/timelineUtils';
 
 // Extracted Components
 import ActorOverlay from './components/ActorOverlay';
+import PopoutWindow from './components/PopoutWindow';
+import StudioDashboard from './components/StudioDashboard';
 import AdvancedTimeline from './components/AdvancedTimeline';
 import DocumentViewer from './components/DocumentViewer';
 import VirtualizedWaveform from './components/VirtualizedWaveform';
@@ -96,6 +99,7 @@ import StyledExportOverlay from './components/layout/ExportOverlay';
 import { useAudioEngine } from './hooks/useAudioEngine';
 import { useProjectImport } from './hooks/useProjectImport';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { openStudioWindow, closeStudioWindow } from './lib/windowHelpers';
 
 export default function App() {
   const { 
@@ -140,6 +144,7 @@ export default function App() {
   };
 
   const [duration, setDuration] = useState(0);
+  const [isWebcamSimulated, setIsWebcamSimulated] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const referenceAudioRef = useRef<HTMLAudioElement>(null);
@@ -184,8 +189,9 @@ export default function App() {
     handleToggleRecord,
     handleToggleBackstage,
     handleDeleteLastTake,
-    isRecordingRef
-  } = useAudioEngine(project, setProject, videoRef, currentTimeRef, isPlayingRef, togglePlay);
+    isRecordingRef,
+    isStartingRecordingRef
+  } = useAudioEngine(project, setProject, videoRef, currentTimeRef, isPlayingRef, togglePlay, webcamRef);
 
   const { saveSnapshot, undo, redo, canUndo, canRedo } = useTimelineHistory(project, setProject);
 
@@ -232,12 +238,224 @@ export default function App() {
     setExportOperation
   );
 
+  const [isDesktop, setIsDesktop] = useState(!!(window as any).__TAURI_INTERNALS__);
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showFixes, setShowFixes] = useState(true);
   const [showQuickImport, setShowQuickImport] = useState(false);
   const [processingTrackId, setProcessingTrackId] = useState<string | null>(null);
   const [quickImportText, setQuickImportText] = useState('');
   const [quickImportDuration, setQuickImportDuration] = useState(5);
+  
+  const [showFixImport, setShowFixImport] = useState(false);
+  const [isPopoutOpen, setIsPopoutOpen] = useState(false);
+  const [externalWindow, setExternalWindow] = useState<Window | null>(null);
+  const [popupBlocked, setPopupBlocked] = useState(false);
+  const [fixImportText, setFixImportText] = useState('');
+
+  // Exit app handler for Tauri main window
+  useEffect(() => {
+    const handleUnload = () => {
+      // Close browser popups
+      if (externalWindow && externalWindow !== window && typeof (externalWindow as any).close === 'function') {
+        try { (externalWindow as any).close(); } catch(e) {}
+      }
+    };
+    
+    let unlistenTauriClose: any = null;
+    if (isDesktop && !!(window as any).__TAURI_INTERNALS__) {
+      import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+        const mainWindow = getCurrentWindow();
+        mainWindow.onCloseRequested(async (event) => {
+          event.preventDefault();
+          try {
+            const { closeStudioWindow } = await import('./lib/windowHelpers');
+            await closeStudioWindow();
+          } catch(e) {
+            console.error("Cleanup error", e);
+          } finally {
+            // Now force destroy the main window which terminates the app if it's the last window
+            mainWindow.destroy().catch(() => {});
+          }
+        }).then(unlisten => unlistenTauriClose = unlisten);
+      });
+    }
+    
+    window.addEventListener('beforeunload', handleUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      if (unlistenTauriClose) unlistenTauriClose();
+    };
+  }, [externalWindow, isDesktop]);
+
+  const handleTogglePopout = async () => {
+    if (isPopoutOpen) {
+      if (externalWindow && externalWindow !== window && typeof (externalWindow as any).close === 'function') {
+        try {
+          (externalWindow as any).close();
+        } catch (e) {
+          console.warn('Error closing popout window:', e);
+        }
+      }
+      if (isDesktop) {
+        await closeStudioWindow();
+      }
+      setExternalWindow(null);
+      setIsPopoutOpen(false);
+      setPopupBlocked(false);
+    } else {
+      // 1. If we're inside an iframe (like AI Studio preview),
+      // directly use Studio Mode (fullscreen overlay) because popups and PiP might be fully blocked
+      if (window.top !== window.self) {
+        setExternalWindow(window);
+        setIsPopoutOpen(true);
+        setPopupBlocked(false);
+        return;
+      }
+      
+      // 2. Native Desktop popup
+      if (isDesktop) {
+        const success = await openStudioWindow();
+        if (success) {
+          setIsPopoutOpen(true);
+          setPopupBlocked(false);
+          // Set external window to 'pseudo' truthy to satisfy conditional rendering logic
+          setExternalWindow('DESKTOP_POPOUT' as any);
+        } else {
+          setPopupBlocked(true);
+        }
+        return;
+      }
+
+      // 2. Try Document Picture in Picture (Chrome 116+, shares JS Context perfectly)
+      if ("documentPictureInPicture" in window) {
+        try {
+          const pipWindow = await (window as any).documentPictureInPicture.requestWindow({
+            width: 1280,
+            height: 720,
+          });
+          setExternalWindow(pipWindow);
+          setIsPopoutOpen(true);
+          setPopupBlocked(false);
+          return;
+        } catch (e) {
+          console.warn("Document PiP failed:", e);
+          // Fallback to error
+        }
+      }
+
+      // 3. Try window.open popup
+      const newWin = window.open(
+        '',
+        'DubStudioProDualScreenWindow',
+        'width=1280,height=720,menubar=no,toolbar=no,location=no,status=no,resizable=yes'
+      );
+      
+      if (!newWin) {
+        console.warn('Window.open returned null. Popups are blocked.');
+        setPopupBlocked(true);
+        setIsPopoutOpen(false);
+        setExternalWindow(null);
+      } else {
+        setPopupBlocked(false);
+        setExternalWindow(newWin);
+        setIsPopoutOpen(true);
+      }
+    }
+  };
+
+  const handleFixImport = () => {
+    if (!project || !project.subtitles) return;
+    const fixes = FixService.parseRawFixes(fixImportText, project.subtitles);
+    
+    let updatedSubtitles = [...project.subtitles];
+    
+    // Helper to recognize Russian and English keywords for skipped or missing lines
+    const isSkipOrMissingOrOverride = (comment: string): boolean => {
+      const normalized = comment.toLowerCase();
+      const ruKeywords = [
+        'пропуск', 'пропустил', 'пропустила', 'пропущена', 'пропущено',
+        'твое', 'твоё', 'твоя реплика', 'твоя фраза', 'возьми фразу', 'возьми себе',
+        'озвучь тут', 'озвучить тут', 'озвучь', 'добавь', 'добавить реплику', 'добавить',
+        'хардсаб', 'хардсаба', 'хардсабах', 'нет в сабах', 'нет реплики', 'нет фразы',
+        'пропущен', 'пропущенная'
+      ];
+      const enKeywords = [
+        'skip', 'skipped', 'missing', 'missed', 'add sub', 'add subtitle',
+        'your phrase', 'your line', 'yours', 'add replica', 'not in subs', 'hardsub'
+      ];
+      return ruKeywords.some(kw => normalized.includes(kw)) || enKeywords.some(kw => normalized.includes(kw));
+    };
+
+    fixes.forEach(fix => {
+      // Find the closest subtitle line to double check
+      let matchingSub = updatedSubtitles.find(s => s.id === fix.segmentId);
+      if (!matchingSub && fix.timestamp !== undefined) {
+        // Fallback search in updatedSubtitles
+        matchingSub = updatedSubtitles.find(s => fix.timestamp >= s.start && fix.timestamp <= s.end);
+      }
+
+      const commentIsSkip = isSkipOrMissingOrOverride(fix.comment);
+      const isTooFar = matchingSub ? (Math.abs(matchingSub.start - fix.timestamp) > 4.0 && Math.abs(matchingSub.end - fix.timestamp) > 4.0) : true;
+      const isWrongActor = matchingSub && fix.actor && fix.actor !== 'Unknown' && matchingSub.role !== fix.actor;
+
+      if (commentIsSkip || isTooFar || (isWrongActor && commentIsSkip)) {
+        if (isWrongActor && matchingSub && !isTooFar) {
+          // Duplicate the existing sub for the correct actor so they can record in this time alignment
+          const newSubId = `sub_fix_${Math.random().toString(36).substr(2, 9)}`;
+          const duplicatedSub = {
+            id: newSubId,
+            start: matchingSub.start,
+            end: matchingSub.end,
+            text: `[ФИКС: Перенос от ${matchingSub.role}] ${matchingSub.text}`,
+            role: fix.actor,
+            needsFix: true,
+            fixComment: fix.comment
+          };
+          updatedSubtitles.push(duplicatedSub);
+          fix.segmentId = newSubId;
+        } else {
+          // Create a brand new subtitle line for the missing part
+          const newSubId = `sub_fix_${Math.random().toString(36).substr(2, 9)}`;
+          const newSub = {
+            id: newSubId,
+            start: fix.timestamp,
+            end: fix.timestamp + 3.0,
+            text: `[Пропущенная реплика] ${fix.comment}`,
+            role: fix.actor && fix.actor !== 'Unknown' ? fix.actor : (project.selectedRole || 'Default'),
+            needsFix: true,
+            fixComment: fix.comment
+          };
+          updatedSubtitles.push(newSub);
+          fix.segmentId = newSubId;
+        }
+      } else if (fix.segmentId) {
+        // Normal fix mapping on exact/closest sub
+        updatedSubtitles = updatedSubtitles.map(s => {
+          if (s.id === fix.segmentId) {
+            return {
+              ...s,
+              needsFix: true,
+              fixComment: fix.comment
+            };
+          }
+          return s;
+        });
+      }
+    });
+
+    // Make sure subtitles remain sorted by start time so chronological UI orders work perfectly
+    updatedSubtitles.sort((a, b) => a.start - b.start);
+
+    setProject({
+      ...project,
+      subtitles: updatedSubtitles,
+      fixes: fixes
+    });
+    
+    setShowFixImport(false);
+    setFixImportText('');
+  };
+
   const showWebcam = !!project?.audioSettings?.isBackstageEnabled;
   const [videoType, setVideoType] = useState<string | null>(null);
   const [showCalibration, setShowCalibration] = useState(false);
@@ -245,13 +463,13 @@ export default function App() {
   const [settingsRevision, setSettingsRevision] = useState(0);
   const [teleprompterPosition, setTeleprompterPosition] = useState({ x: 0, y: 0 });
   const [teleprompterSize, setTeleprompterSize] = useState({ width: 800, height: 200 });
-  const [isElectron, setIsElectron] = useState(!!(window as any).__TAURI_INTERNALS__);
+
 
   useEffect(() => {
     const check = () => {
       // Check for Tauri internals explicitly to avoid false positives from the legacy wrapper
       const isEl = !!(window as any).__TAURI_INTERNALS__;
-      if (isEl !== isElectron) setIsElectron(isEl);
+      if (isEl !== isDesktop) setIsDesktop(isEl);
     };
     check();
     const interval = setInterval(check, 1000);
@@ -304,7 +522,7 @@ export default function App() {
     }
     
     return () => clearInterval(interval);
-  }, [isElectron]);
+  }, [isDesktop]);
   const [preRollCountdown, setPreRollCountdown] = useState<number | null>(null);
   const [sidebarScrollTop, setSidebarScrollTop] = useState(0);
   const [teleprompterFontSize, setTeleprompterFontSize] = useState(32);
@@ -347,8 +565,9 @@ export default function App() {
     }
     if (project) {
       playbackEngine.setAudioOffset(project.audioOffsetMs || 0);
+      playbackEngine.setPlayOriginalTrackSegments(!!project.audioSettings?.playOriginalTrackSegments);
     }
-  }, [project?.id, project?.audioOffsetMs]);
+  }, [project?.id, project?.audioOffsetMs, project?.audioSettings?.playOriginalTrackSegments]);
 
   useEffect(() => {
     return () => {
@@ -616,7 +835,7 @@ export default function App() {
   }, [setProject, createDefaultProject]);
 
   useEffect(() => {
-    logger.info("Application mounted. Electron API available:", !!window.electronAPI);
+    logger.info("Application mounted. Desktop API available:", !!window.electronAPI);
     
     // Add DevTools shortcut
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -634,7 +853,7 @@ export default function App() {
     // Listen for Tauri native file drop events to get full paths
     let unlisten: any;
     let isCancelled = false;
-    if (isElectron && window.electronAPI) {
+    if (isDesktop && window.electronAPI) {
       const setupDrop = async () => {
         try {
           const u = await getCurrentWindow().onDragDropEvent((event) => {
@@ -666,7 +885,7 @@ export default function App() {
       if (typeof unlisten === 'function') unlisten();
       playbackEngine.stop();
     };
-  }, [handleNativeDrop, isElectron]);
+  }, [handleNativeDrop, isDesktop]);
 
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
@@ -756,9 +975,19 @@ export default function App() {
            projectRoot = `${fileDir}/${baseName}_Project`.replace(/\\/g, '/');
         }
 
+        const isVideo = file.type.startsWith('video/') || ['.mp4', '.mkv', '.webm', '.mov', '.avi'].some(ext => file.name.toLowerCase().endsWith(ext));
         setProject(prev => {
           const baseProject = prev || createDefaultProject(file.name.replace(/\.[^/.]+$/, ""), projectRoot);
-          return { ...baseProject, videoUrl: url, videoPath: filePath, projectPath: projectRoot };
+          return { 
+            ...baseProject, 
+            videoUrl: url, 
+            videoPath: filePath, 
+            projectPath: projectRoot,
+            audioSettings: {
+              ...(baseProject.audioSettings || getGlobalAudioSettings()),
+              playOriginalTrackSegments: !isVideo
+            }
+          };
         });
         
         if (window.electronAPI && filePath && projectRoot) {
@@ -794,6 +1023,10 @@ export default function App() {
                     audioOffsetMs: p.audioOffsetMs || 0,
                     originalPeaks: extractedPeaks,
                     referenceAudioPath: refPath,
+                    audioSettings: {
+                      ...(p.audioSettings || getGlobalAudioSettings()),
+                      playOriginalTrackSegments: !isVideo
+                    },
                     tracks: updatedTracks.map(t => {
                       if (t.name === 'Оригинал') {
                         return {
@@ -868,16 +1101,16 @@ export default function App() {
   } as any);
 
   useEffect(() => {
-    if (isElectron && (window as any).electronAPI) {
+    if (isDesktop && (window as any).electronAPI) {
       (window as any).electronAPI.requestPermissions().catch(err => {
         console.error('Failed to request media permissions:', err);
       });
     }
-  }, [isElectron]);
+  }, [isDesktop]);
 
   // --- App Startup Check ---
   useEffect(() => {
-    if (isElectron && window.electronAPI) {
+    if (isDesktop && window.electronAPI) {
       window.electronAPI.checkCrashes().then(async (res) => {
         if (res.success && res.data && res.data.length > 0) {
           logger.info(`Found ${res.data.length} interrupted recordings. Attempting recovery...`);
@@ -1048,7 +1281,9 @@ export default function App() {
       logger.info(`Concatenating backstage videos to ${tempVideoPath}`);
       const concatRes = await window.electronAPI.concatBackstageVideos({
         videoPaths,
-        outputPath: tempVideoPath
+        outputPath: tempVideoPath,
+        backstageMode: project.audioSettings?.backstageMode,
+        isBackstageEnabled: project.audioSettings?.isBackstageEnabled
       });
 
       if (!concatRes.success) {
@@ -1077,20 +1312,40 @@ export default function App() {
       }
 
       // 3. Mux video from (1) and audio from (2)
-      setExportOperation("Muxing video with project audio...");
-      logger.info(`Muxing joined video with audio to ${finalOutputPath}`);
-      const muxRes = await window.electronAPI.muxVideo({
-        videoPath: tempVideoPath,
-        audioPath: tempAudioPath,
-        outputPath: finalOutputPath
-      });
-
-      if (muxRes.success) {
-        alert(`Бекстейдж успешно создан с проектным звуком: ${finalOutputPath}`);
-        logger.info("Backstage merge successful.");
+      if (project.videoPath && project.audioSettings?.webcamExportOverlay !== false) {
+        setExportOperation("Applying backstage overlay on main video...");
+        logger.info(`Applying backstage overlay onto ${project.videoPath} to ${finalOutputPath}`);
+        const overlayRes = await window.electronAPI.exportBackstageVideo({
+          mainVideoPath: project.videoPath,
+          backstageVideoPath: tempVideoPath,
+          finalAudioPath: tempAudioPath,
+          outputPath: finalOutputPath,
+          webcamExportOverlay: project.audioSettings?.webcamExportOverlay
+        });
+        
+        if (overlayRes.success) {
+          alert(`Бекстейдж успешно создан с проектным звуком: ${finalOutputPath}`);
+          logger.info("Backstage merge successful.");
+        } else {
+          alert(`Ошибка при финальном сведении: ${overlayRes.error}`);
+          logger.error("Backstage overlay failed:", overlayRes.error);
+        }
       } else {
-        alert(`Ошибка при финальном сведении: ${muxRes.error}`);
-        logger.error("Backstage mux failed:", muxRes.error);
+        setExportOperation("Muxing video with project audio...");
+        logger.info(`Muxing joined video with audio to ${finalOutputPath}`);
+        const muxRes = await window.electronAPI.muxVideo({
+          videoPath: tempVideoPath,
+          audioPath: tempAudioPath,
+          outputPath: finalOutputPath
+        });
+
+        if (muxRes.success) {
+          alert(`Бекстейдж успешно создан с проектным звуком: ${finalOutputPath}`);
+          logger.info("Backstage merge successful.");
+        } else {
+          alert(`Ошибка при финальном сведении: ${muxRes.error}`);
+          logger.error("Backstage mux failed:", muxRes.error);
+        }
       }
     } catch (err) {
       alert(`Ошибка: ${err instanceof Error ? err.message : String(err)}`);
@@ -1126,7 +1381,11 @@ export default function App() {
     
     setProject({
       ...currentProject,
-      referenceAudioPath: fileData.path
+      referenceAudioPath: fileData.path,
+      audioSettings: {
+        ...(currentProject.audioSettings || getGlobalAudioSettings()),
+        playOriginalTrackSegments: true
+      }
     });
   };
 
@@ -1158,7 +1417,8 @@ export default function App() {
             compressorRatio: 4,
             highPassFrequency: 80,
             isDestructive: false,
-            backstageMode: 'parallel'
+            backstageMode: 'parallel',
+            playOriginalTrackSegments: true
           }
         } as Project;
 
@@ -1168,7 +1428,11 @@ export default function App() {
           subtitles: [...(baseProject.subtitles || []), ...subtitles],
           roles: Array.from(new Set([...(baseProject.roles || []), "Original", "Dub"])),
           selectedRole: "Dub",
-          projectPath: folderPath // Use folder as project path for now
+          projectPath: folderPath, // Use folder as project path for now
+          audioSettings: {
+            ...(baseProject.audioSettings || getGlobalAudioSettings()),
+            playOriginalTrackSegments: true
+          }
         };
       });
       setDuration(duration);
@@ -1178,49 +1442,211 @@ export default function App() {
     }
   };
 
-  const handleBatchExport = async () => {
-    if (!project || !project.projectPath || !window.electronAPI) return;
+  const handleGameDubbingImport = async () => {
+    if (!window.electronAPI) return;
+    
+    // 1. Choose folder of WAV files
+    const folderPathRes = await window.electronAPI.openFolder();
+    if (!folderPathRes.success || !folderPathRes.data) return;
+    const folderPath = folderPathRes.data;
 
-    const dubTrack = project.tracks.find(t => t.name === 'Dubs');
-    if (!dubTrack) return;
-
-    const segmentsToExport = dubTrack.segments
-      .filter(s => s.filePath && s.originalFileName)
-      .map(s => ({
-        filePath: s.filePath!,
-        originalFileName: s.originalFileName!
-      }));
-
-    if (segmentsToExport.length === 0) {
-      alert("Не найдено фрагментов для экспорта (у фрагментов должно быть имя оригинала).");
+    // 2. Choose text document
+    const fileRes = await window.electronAPI.openFile({
+      title: 'Выберите текстовый файл перевода',
+      filters: [{ name: 'Text', extensions: ['txt'] }]
+    });
+    if (!fileRes.success || !fileRes.data) return;
+    const fileData = fileRes.data;
+    if (!fileData.content) {
+      alert("Выбранный файл перевода пуст.");
       return;
     }
 
+    try {
+      const { tracks, duration, subtitles } = await BulkImportService.importGameDubbing(folderPath, fileData.content);
+      
+      // Auto-generate a blank master video of the exact project duration to neutralize non-video playback limits
+      const blankVideoName = "blank_master_video.mp4";
+      const blankVideoPath = `${folderPath}/${blankVideoName}`.replace(/\\/g, '/');
+      
+      try {
+        const videoRes = await window.electronAPI.createBlankVideo(duration, blankVideoPath);
+        if (!videoRes.success) {
+          console.warn("Failed to create blank video file:", videoRes.error);
+        }
+      } catch (err) {
+        console.warn("Error creating blank video file:", err);
+      }
+
+      setProject(prev => {
+        const baseProject = prev || {
+          id: Math.random().toString(36).substr(2, 9),
+          name: "Game Dubbing Project",
+          latencyOffset: 0,
+          audioOffsetMs: 0,
+          tracks: [],
+          subtitles: [],
+          roles: [],
+          audioSettings: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 48000,
+            bitDepth: 24,
+            noiseGateThreshold: -40,
+            compressorThreshold: -20,
+            compressorRatio: 4,
+            highPassFrequency: 80,
+            isDestructive: false,
+            backstageMode: 'parallel',
+            playOriginalTrackSegments: true
+          }
+        } as Project;
+
+        return {
+          ...baseProject,
+          tracks: [...(baseProject.tracks || []), ...tracks],
+          subtitles: [...(baseProject.subtitles || []), ...subtitles],
+          roles: Array.from(new Set([...(baseProject.roles || []), "Original", "Dub"])),
+          selectedRole: "Dub",
+          projectPath: folderPath,
+          videoPath: blankVideoName,
+          videoUrl: undefined,
+          audioSettings: {
+            ...(baseProject.audioSettings || getGlobalAudioSettings()),
+            playOriginalTrackSegments: true
+          }
+        };
+      });
+      setDuration(duration);
+      alert("Проект игровой озвучки успешно импортирован с автогенерацией пустого видеофайла!");
+    } catch (error) {
+      console.error("Game dubbing import failed:", error);
+      alert("Ошибка при импорте игровой озвучки: " + (error instanceof Error ? error.message : String(error)));
+    }
+  };
+
+  const handleBatchExport = async () => {
+    if (!project || !project.projectPath || !window.electronAPI) return;
+
+    // 1. Identify original reference track
+    const origTrack = project.tracks.find(t => t.name === 'Оригинал' || t.name === 'Original');
+    if (!origTrack) {
+      alert("Не найден оригинальный трек ('Оригинал') для определения временных интервалов и имен игровых реплик.");
+      return;
+    }
+
+    // Accidental split mitigation: group segments on the reference track by duplicate `originalFileName`.
+    const origGroupedMap = new Map<string, typeof origTrack.segments>();
+    for (const s of origTrack.segments) {
+      if (s.originalFileName) {
+        let list = origGroupedMap.get(s.originalFileName);
+        if (!list) {
+          list = [];
+          origGroupedMap.set(s.originalFileName, list);
+        }
+        list.push(s);
+      }
+    }
+
+    const origSegments = [];
+    for (const [fileName, segs] of origGroupedMap.entries()) {
+      // Sort segments of this original file chronologically just in case
+      segs.sort((a, b) => a.startTime - b.startTime);
+
+      const minStartTime = Math.min(...segs.map(s => s.startTime));
+      const maxEndTime = Math.max(...segs.map(s => s.startTime + s.duration));
+      
+      const spanDuration = maxEndTime - minStartTime;
+
+      // Extract original file duration from the properties of the imported segment pieces
+      const fileDuration = segs.find(s => s.fileDuration !== undefined && s.fileDuration > 0)?.fileDuration || 0;
+
+      // Search matching subtitle line duration
+      const matchingSub = project.subtitles.find(sub => 
+        (sub.role === 'Original' || sub.role === 'original') && 
+        Math.abs(sub.start - minStartTime) < 0.2
+      );
+      const subDuration = matchingSub ? (matchingSub.end - matchingSub.start) : 0;
+
+      // Determine authoritative duration using precise priority
+      let finalDuration = fileDuration;
+      let durationSource = "оригинальному файлу";
+
+      if (finalDuration <= 0) {
+        finalDuration = subDuration;
+        durationSource = "субтитрам";
+      }
+      if (finalDuration <= 0) {
+        finalDuration = spanDuration;
+        durationSource = "таймлайну (длине выделения)";
+      }
+
+      logger.info(`Пакетный экспорт [${fileName}]: реплика начинается с ${minStartTime.toFixed(4)}с. Длины: по таймлайну=${spanDuration.toFixed(4)}с, по файлу=${fileDuration.toFixed(4)}с, по сабам=${subDuration.toFixed(4)}с. Итоговая длина: ${finalDuration.toFixed(4)}с (выбрано по ${durationSource}).`);
+
+      origSegments.push({
+        startTime: minStartTime,
+        duration: finalDuration,
+        originalFileName: fileName
+      });
+    }
+
+    if (origSegments.length === 0) {
+      alert("Не найдено оригинальных сегментов реплик с информацией об имени файла на треке 'Оригинал'.");
+      return;
+    }
+
+    // 2. Collect all active recorded dub segments across other tracks
+    const dubTracks = project.tracks.filter(t => t.id !== origTrack.id && !t.isMuted);
+    const dubSegmentsList = [];
+
+    for (const track of dubTracks) {
+      for (const segment of track.segments) {
+        if (segment.filePath) {
+          dubSegmentsList.push({
+            filePath: segment.filePath,
+            startTime: segment.startTime,
+            duration: segment.duration,
+            fileOffset: segment.fileOffset || 0,
+            gain: segment.gain ?? 1,
+            playbackRate: segment.playbackRate ?? 1
+          });
+        }
+      }
+    }
+
+    if (dubSegmentsList.length === 0) {
+      const confirmSilence = window.confirm("На дорожках дубляжа не обнаружено записанных фрагментов. Экспортировать пустые аудиофайлы (тишину) оригинальной длины с исходными именами?");
+      if (!confirmSilence) return;
+    }
+
+    // 3. Ask destination folder
     const folderRes = await window.electronAPI.openFolder();
     if (!folderRes.success || !folderRes.data) return;
     const outDir = folderRes.data;
 
     setIsExporting(true);
     setExportProgress(0);
-    setExportOperation(`Batch exporting ${segmentsToExport.length} files...`);
+    setExportOperation(`Сборка и рендеринг ${origSegments.length} реплик...`);
 
     try {
-      logger.info(`Starting batch export of ${segmentsToExport.length} files to ${outDir}`);
+      logger.info(`Starting batch render-export of ${origSegments.length} replicas to ${outDir}`);
       const exportedFilesRes = await window.electronAPI.batchExport({
-        projectPath: project.projectPath,
-        segments: segmentsToExport,
-        outDir
+        outDir,
+        origSegments,
+        dubSegments: dubSegmentsList,
       });
+
       if (exportedFilesRes.success && exportedFilesRes.data) {
-        alert(`Успешно экспортировано ${exportedFilesRes.data.length} файлов в: ${outDir}`);
-        logger.info("Batch export successful.");
+        alert(`Успешно рендерировано и экспортировано ${exportedFilesRes.data.length} файлов в папку: ${outDir}\nВсе файлы соответствуют точной длине и именам оригиналов!`);
+        logger.info("Batch render export successful.");
       } else {
-        alert(`Ошибка пакетного экспорта: ${exportedFilesRes.error}`);
-        logger.error("Batch export failed:", exportedFilesRes.error);
+        alert(`Ошибка пакетного рендеринга/экспорта: ${exportedFilesRes.error}`);
+        logger.error("Batch render export failed:", exportedFilesRes.error);
       }
     } catch (error) {
-      console.error("Batch export failed:", error);
-      alert("Ошибка при пакетном экспорте.");
+      console.error("Batch render export failed:", error);
+      alert("Ошибка при пакетном экспорте и рендеринге.");
     } finally {
       setIsExporting(false);
       setExportOperation('');
@@ -1498,7 +1924,7 @@ export default function App() {
   };
 
   const triggerVideoPicker = async () => {
-    if (isElectron && (window as any).electronAPI) {
+    if (isDesktop && (window as any).electronAPI) {
       const res = await (window as any).electronAPI.openVideo();
       if (res.success && res.data) {
         // Simulate a file object with path
@@ -1553,12 +1979,111 @@ export default function App() {
   useEffect(() => {
     let activeStream: MediaStream | null = null;
     let isCancelled = false;
+    let mockCleanup: (() => void) | null = null;
+
+    const createMockWebcamStream = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 640;
+      canvas.height = 360;
+      const ctx = canvas.getContext('2d');
+      let animationId = 0;
+      
+      const draw = () => {
+        if (!ctx) return;
+        
+        const gradient = ctx.createRadialGradient(320, 180, 50, 320, 180, 300);
+        gradient.addColorStop(0, '#1e1b4b'); 
+        gradient.addColorStop(1, '#090514'); 
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 640, 360);
+        
+        ctx.strokeStyle = 'rgba(99, 102, 241, 0.08)';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < 640; i += 40) {
+          ctx.beginPath();
+          ctx.moveTo(i, 0);
+          ctx.lineTo(i, 360);
+          ctx.stroke();
+        }
+        for (let j = 0; j < 360; j += 40) {
+          ctx.beginPath();
+          ctx.moveTo(0, j);
+          ctx.lineTo(640, j);
+          ctx.stroke();
+        }
+        
+        const time = Date.now() * 0.0025;
+        const pulse = Math.sin(time) * 8 + 70;
+        
+        ctx.strokeStyle = 'rgba(99, 102, 241, 0.25)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(320, 150, pulse, 0, Math.PI * 2);
+        ctx.stroke();
+        
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+        ctx.beginPath();
+        ctx.arc(320, 140, 32, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(320, 230, 60, 40, 0, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
+        ctx.beginPath();
+        ctx.arc(320, 140, 4, 0, Math.PI * 2);
+        ctx.fill();
+        
+        const blink = Math.floor(Date.now() / 500) % 2 === 0;
+        ctx.fillStyle = blink ? '#ef4444' : '#7f1d1d';
+        ctx.beginPath();
+        ctx.arc(40, 40, 5, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.font = 'bold 10px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('LIVE (SIMULATED)', 53, 43);
+        
+        ctx.fillStyle = '#818cf8';
+        ctx.font = 'bold 13px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('[ ДЕМО-РЕЖИМ ВЕБ-КАМЕРЫ ]', 320, 290);
+        
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+        ctx.font = '10px sans-serif';
+        ctx.fillText('Доступ к оборудованию заблокирован либо ограничен', 320, 312);
+        ctx.fillText('Используется виртуальный поток для тестирования записи', 320, 328);
+        
+        animationId = requestAnimationFrame(draw);
+      };
+      
+      draw();
+      
+      const stream = (canvas as any).captureStream ? (canvas as any).captureStream(30) : null;
+      return {
+        stream: stream || new MediaStream(),
+        cleanup: () => cancelAnimationFrame(animationId)
+      };
+    };
 
     if (showWebcam || project?.audioSettings?.isBackstageEnabled) {
-      const constraints = { 
+      const targetWidth = project?.audioSettings?.webcamResolutionX || 1920;
+      const targetHeight = project?.audioSettings?.webcamResolutionY || 1080;
+      
+      const constraints: MediaStreamConstraints = { 
         video: project?.audioSettings?.webcamDeviceId 
-          ? { deviceId: { ideal: project.audioSettings.webcamDeviceId } } 
-          : true,
+          ? { 
+              deviceId: { ideal: project.audioSettings.webcamDeviceId },
+              width: { ideal: targetWidth },
+              height: { ideal: targetHeight },
+              frameRate: { ideal: 30 }
+            } 
+          : { 
+              width: { ideal: targetWidth },
+              height: { ideal: targetHeight },
+              frameRate: { ideal: 30 }
+            },
         audio: false
       };
       
@@ -1574,6 +2099,7 @@ export default function App() {
 
           console.log(`[Webcam] Webcam stream acquired. Video tracks:`, stream.getVideoTracks().map(t => t.label));
           activeStream = stream;
+          setIsWebcamSimulated(false);
           if (webcamRef.current) {
             webcamRef.current.srcObject = stream;
             webcamRef.current.onloadedmetadata = () => {
@@ -1592,12 +2118,16 @@ export default function App() {
           if (isCancelled) return;
           console.warn("[Webcam] Primary webcam access failed, trying fallback:", err);
           try {
-            const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: true });
+            const fallbackStream = await navigator.mediaDevices.getUserMedia({ 
+              video: true,
+              audio: false
+            });
             if (isCancelled) {
               fallbackStream.getTracks().forEach(t => t.stop());
               return;
             }
             activeStream = fallbackStream;
+            setIsWebcamSimulated(false);
             if (webcamRef.current) {
               webcamRef.current.srcObject = fallbackStream;
               try {
@@ -1611,8 +2141,29 @@ export default function App() {
           } catch (fallbackErr) {
             if (isCancelled) return;
             console.error("[Webcam] Webcam access completely failed:", fallbackErr);
-            if (project?.audioSettings?.isBackstageEnabled) {
-              handleToggleBackstage();
+            
+            // Fallback to custom simulated stream
+            console.log("[Webcam] Starting simulated webcam stream fallback.");
+            try {
+              const mock = createMockWebcamStream();
+              activeStream = mock.stream;
+              mockCleanup = mock.cleanup;
+              setIsWebcamSimulated(true);
+              if (webcamRef.current) {
+                webcamRef.current.srcObject = mock.stream;
+                try {
+                  await webcamRef.current.play();
+                } catch (e: any) {
+                  if (e.name !== 'AbortError') {
+                    console.error("[Webcam] Simulated webcam play failed:", e);
+                  }
+                }
+              }
+            } catch (simErr) {
+              console.error("[Webcam] Simulated webcam generation failed:", simErr);
+              if (project?.audioSettings?.isBackstageEnabled) {
+                handleToggleBackstage();
+              }
             }
           }
         }
@@ -1626,11 +2177,15 @@ export default function App() {
       if (activeStream) {
         activeStream.getTracks().forEach(track => track.stop());
       }
+      if (mockCleanup) {
+        mockCleanup();
+      }
+      setIsWebcamSimulated(false);
       if (webcamRef.current) {
         webcamRef.current.srcObject = null;
       }
     };
-  }, [showWebcam, project?.audioSettings?.isBackstageEnabled, project?.audioSettings?.webcamDeviceId, handleToggleBackstage]);
+  }, [showWebcam, project?.audioSettings?.isBackstageEnabled, project?.audioSettings?.webcamDeviceId, handleToggleBackstage, isPopoutOpen]);
 
 
   useTimelineHotkeys({
@@ -1638,6 +2193,7 @@ export default function App() {
     selectedSegmentIds,
     currentTimeRef,
     isRecordingRef,
+    isStartingRecordingRef,
     togglePlay,
     stopRecording,
     discardRecording,
@@ -1717,9 +2273,28 @@ export default function App() {
       return;
     }
     
+    let videoName = '';
+    if (project.videoPath) {
+      const base = project.videoPath.split(/[/\\]/).pop() || '';
+      const extIdx = base.lastIndexOf('.');
+      videoName = extIdx !== -1 ? base.substring(0, extIdx) : base;
+    } else if (project.videoUrl) {
+      const base = project.videoUrl.split('/').pop()?.split('?')[0] || '';
+      const extIdx = base.lastIndexOf('.');
+      videoName = extIdx !== -1 ? base.substring(0, extIdx) : base;
+    }
+    if (!videoName) {
+      videoName = project.name || 'project';
+    }
+
+    const activeRole = project.selectedRole || 'Default';
+    const hasLoadedFixes = !!(project.fixes && project.fixes.length > 0);
+    const filePrefix = hasLoadedFixes ? 'fix_' : '';
+    const exportFileName = `${filePrefix}${activeRole}_${videoName}.${safeFormat.toLowerCase()}`;
+
     const saveFileRes = await window.electronAPI.saveFile({
       title: 'Export Audio',
-      defaultPath: `${project.name}_export.${safeFormat.toLowerCase()}`,
+      defaultPath: exportFileName,
       filters: [{ name: safeFormat, extensions: [safeFormat.toLowerCase()] }]
     });
 
@@ -1859,9 +2434,28 @@ export default function App() {
       return;
     }
 
+    let videoName = '';
+    if (project.videoPath) {
+      const base = project.videoPath.split(/[/\\]/).pop() || '';
+      const extIdx = base.lastIndexOf('.');
+      videoName = extIdx !== -1 ? base.substring(0, extIdx) : base;
+    } else if (project.videoUrl) {
+      const base = project.videoUrl.split('/').pop()?.split('?')[0] || '';
+      const extIdx = base.lastIndexOf('.');
+      videoName = extIdx !== -1 ? base.substring(0, extIdx) : base;
+    }
+    if (!videoName) {
+      videoName = project.name || 'project';
+    }
+
+    const activeRole = project.selectedRole || 'Default';
+    const hasLoadedFixes = !!(project.fixes && project.fixes.length > 0);
+    const filePrefix = hasLoadedFixes ? 'fix_' : '';
+    const exportFileName = `${filePrefix}${activeRole}_${videoName}_final.mp4`;
+
     const saveRes = await window.electronAPI.saveFile({
         title: 'Экспорт финального видео (Mix)',
-        defaultPath: `${project.name}_final.mp4`,
+        defaultPath: exportFileName,
         filters: [{ name: 'Video', extensions: ['mp4'] }]
     });
 
@@ -1939,7 +2533,7 @@ export default function App() {
         playbackEngine.bindReferenceAudio(referenceAudioRef.current);
       }
     }
-  }, [project, videoRef, referenceAudioRef]);
+  }, [project, videoRef, referenceAudioRef, isPopoutOpen]);
 
   const handleQuickPreview = async (segmentId: string) => {
     if (!project || !project.projectPath) {
@@ -1977,6 +2571,179 @@ export default function App() {
   const currentLine = project?.subtitles.find(l => currentTime >= l.start - 0.5 && currentTime <= l.end);
   const nextLine = project?.subtitles.find(l => l.start > currentTime);
 
+  const studioSyncDataRef = useRef({
+    project, currentTime, currentLine, nextLine, showWebcam, isRecording,
+    teleprompterMode, teleprompterFontSize, teleprompterLineHeight, teleprompterPacing,
+    teleprompterPosition, teleprompterSize, isManualBackstageRecording, isBackstageRecording
+  });
+
+  useEffect(() => {
+    studioSyncDataRef.current = {
+      project, currentTime, currentLine, nextLine, showWebcam, isRecording,
+      teleprompterMode, teleprompterFontSize, teleprompterLineHeight, teleprompterPacing,
+      teleprompterPosition, teleprompterSize, isManualBackstageRecording, isBackstageRecording
+    };
+  });
+
+  useEffect(() => {
+    if (isPopoutOpen) {
+      let interval: any;
+      let lastDataSync = 0;
+      let lastTauriTimeSync = 0;
+      let lastDataHash = "";
+      const channel = new BroadcastChannel('studio-mode');
+      
+      let tauriEmit: any = null;
+      if (isDesktop && !!(window as any).__TAURI_INTERNALS__) {
+        import('@tauri-apps/api/event').then(({ emit }) => {
+          tauriEmit = emit;
+        }).catch(() => {});
+      }
+      
+      let isTimeSyncPending = false;
+      
+      const sendDataSync = (force: boolean = false) => {
+        const state = studioSyncDataRef.current;
+        let resolvedVideoPath = state.project?.videoPath;
+        if (resolvedVideoPath && state.project?.projectPath && !resolvedVideoPath.startsWith('http') && !resolvedVideoPath.startsWith('blob:')) {
+          if (!resolvedVideoPath.startsWith('/') && !resolvedVideoPath.match(/^[a-zA-Z]:/)) {
+            // It's a relative path or just a filename
+            const cleanPath = resolvedVideoPath.startsWith('./') ? resolvedVideoPath.slice(2) : resolvedVideoPath;
+            resolvedVideoPath = `${state.project.projectPath}/${cleanPath}`.replace(/\\/g, '/');
+          }
+        }
+        
+        const minimalProject = state.project ? {
+          videoUrl: state.project.videoUrl,
+          videoPath: state.project.videoPath,
+          projectPath: state.project.projectPath,
+          selectedRole: state.project.selectedRole,
+          audioSettings: state.project.audioSettings
+        } : null;
+        
+        const dataPayload = {
+            videoSrc: resolvedVideoPath ? getSafeFileUrl(resolvedVideoPath) : state.project?.videoUrl,
+            showWebcam: state.showWebcam || !!state.project?.audioSettings?.isBackstageEnabled,
+            subtitles: state.project?.subtitles,
+            teleprompterMode: state.teleprompterMode,
+            teleprompterFontSize: state.teleprompterFontSize,
+            teleprompterLineHeight: state.teleprompterLineHeight,
+            teleprompterPacing: state.teleprompterPacing,
+            teleprompterPosition: state.teleprompterPosition,
+            teleprompterSize: state.teleprompterSize,
+            isAudiobook: !!state.project?.documentContent,
+            activeRole: state.project?.selectedRole || '',
+            project: minimalProject,
+        };
+        
+        try {
+          const newHash = JSON.stringify(dataPayload);
+          if (force || newHash !== lastDataHash) {
+            lastDataHash = newHash;
+            channel.postMessage({ type: 'SYNC_DATA', payload: dataPayload });
+            
+            if (tauriEmit) {
+              tauriEmit('studio-sync-data', dataPayload).catch(() => {});
+            }
+          }
+        } catch (e) {
+          console.warn("Failed to stringify data payload for sync", e);
+        }
+      };
+
+      const syncState = () => {
+        const state = studioSyncDataRef.current;
+        const now = Date.now();
+        const timePayload = {
+            currentTime: state.currentTime,
+            isPlaying: isPlayingRef.current,
+            isRecording: state.isRecording,
+            isBackstageRecording: state.project?.audioSettings?.backstageMode === 'manual' ? state.isManualBackstageRecording : (state.isRecording && state.isBackstageRecording),
+            currentLine: state.currentLine,
+            nextLine: state.nextLine,
+        };
+
+        channel.postMessage({ type: 'SYNC_TIME', payload: timePayload });
+        
+        // Throttled high-performance fallback over Tauri events (only every 150ms and simplified payloads)
+        if (tauriEmit && !isTimeSyncPending && now - lastTauriTimeSync > 150) {
+          lastTauriTimeSync = now;
+          isTimeSyncPending = true;
+          
+          const simpleTimePayload = {
+            currentTime: state.currentTime,
+            isPlaying: isPlayingRef.current,
+            isRecording: state.isRecording,
+            isBackstageRecording: state.project?.audioSettings?.backstageMode === 'manual' ? state.isManualBackstageRecording : (state.isRecording && state.isBackstageRecording),
+            currentLine: state.currentLine ? { id: state.currentLine.id, start: state.currentLine.start, end: state.currentLine.end, text: state.currentLine.text, role: state.currentLine.role } : null,
+            nextLine: state.nextLine ? { id: state.nextLine.id, start: state.nextLine.start, end: state.nextLine.end, text: state.nextLine.text, role: state.nextLine.role } : null,
+          };
+
+          tauriEmit('studio-sync-time', simpleTimePayload)
+            .catch(() => {})
+            .finally(() => { isTimeSyncPending = false; });
+        }
+        
+        if (now - lastDataSync > 500) {
+          lastDataSync = now;
+          sendDataSync(false);
+        }
+      };
+
+      interval = setInterval(syncState, 1000 / 30); // 30fps sync
+
+      channel.onmessage = (e) => {
+        if (e.data.type === 'STUDIO_PING') {
+          // Connection acknowledged - force send the full data immediately
+          sendDataSync(true);
+        } else if (e.data.type === 'STUDIO_CLOSED') {
+          setIsPopoutOpen(false);
+          setExternalWindow(null);
+        } else if (e.data.type === 'UPDATE_TELEPROMPTER_SETTINGS') {
+          const { fontSize, lineHeight, pacing, mode, size, position } = e.data.payload;
+          if (fontSize !== undefined) setTeleprompterFontSize(fontSize);
+          if (lineHeight !== undefined) setTeleprompterLineHeight(lineHeight);
+          if (pacing !== undefined) setTeleprompterPacing(pacing);
+          if (mode !== undefined) setTeleprompterMode(mode);
+          if (size !== undefined) setTeleprompterSize(size);
+          if (position !== undefined) setTeleprompterPosition(position);
+        }
+      };
+
+      let unlistenTauri: any = null;
+      let unlistenTauri2: any = null;
+      let unlistenTauriSettings: any = null;
+      if (isDesktop && !!(window as any).__TAURI_INTERNALS__) {
+        import('@tauri-apps/api/event').then(({ listen }) => {
+          listen('studio-ping', () => {
+            sendDataSync(true);
+          }).then(u => unlistenTauri2 = u);
+          listen('studio-closed', () => {
+            setIsPopoutOpen(false);
+            setExternalWindow(null);
+          }).then(unlisten => unlistenTauri = unlisten);
+          listen('update-teleprompter-settings', (event: any) => {
+            const { fontSize, lineHeight, pacing, mode, size, position } = event.payload;
+            if (fontSize !== undefined) setTeleprompterFontSize(fontSize);
+            if (lineHeight !== undefined) setTeleprompterLineHeight(lineHeight);
+            if (pacing !== undefined) setTeleprompterPacing(pacing);
+            if (mode !== undefined) setTeleprompterMode(mode);
+            if (size !== undefined) setTeleprompterSize(size);
+            if (position !== undefined) setTeleprompterPosition(position);
+          }).then(u => unlistenTauriSettings = u);
+        });
+      }
+
+      return () => {
+        clearInterval(interval);
+        channel.close();
+        if (unlistenTauri) unlistenTauri();
+        if (unlistenTauri2) unlistenTauri2();
+        if (unlistenTauriSettings) unlistenTauriSettings();
+      };
+    }
+  }, [isPopoutOpen]);
+
   const projectContextValue = {
     project, setProject, recentProjects, handleNewProject, handleOpenProject, handleSaveProject, onLoadProject,
     undo, redo, canUndo, canRedo
@@ -1987,6 +2754,14 @@ export default function App() {
     setCurrentTime, setDuration, setIsPlaying, setZoomLevel, setTimelineHeight, setIsAutoHeight, setSidebarWidth,
     setIsRippleEnabled, setSelectedSegmentIds, setIsLooping, setLoopRange, togglePlay, handleSeek
   };
+
+  let resolvedMainVideoPath = project?.videoPath;
+  if (resolvedMainVideoPath && project?.projectPath && !resolvedMainVideoPath.startsWith('http') && !resolvedMainVideoPath.startsWith('blob:')) {
+    if (!resolvedMainVideoPath.startsWith('/') && !resolvedMainVideoPath.match(/^[a-zA-Z]:/)) {
+      const cleanPath = resolvedMainVideoPath.startsWith('./') ? resolvedMainVideoPath.slice(2) : resolvedMainVideoPath;
+      resolvedMainVideoPath = `${project.projectPath}/${cleanPath}`.replace(/\\/g, '/');
+    }
+  }
 
   return (
     <ProjectProvider value={projectContextValue}>
@@ -2028,8 +2803,10 @@ export default function App() {
         handleMergeBackstage={handleMergeBackstage}
         handleToggleBackstage={handleToggleBackstage}
         setShowQuickImport={setShowQuickImport}
+        setShowFixImport={setShowFixImport}
         handleBulkImport={handleBulkImport}
-        isElectron={isElectron}
+        handleGameDubbingImport={handleGameDubbingImport}
+        isDesktop={isDesktop}
         handleExport={(format) => {
           setPendingExportFormat(format);
           setIsExportModalOpen(true);
@@ -2081,6 +2858,45 @@ export default function App() {
                   <p className="text-sm text-zinc-600">Перетащите видео или субтитры, чтобы начать</p>
                 </div>
               </div>
+            ) : popupBlocked ? (
+              <div className="flex flex-col items-center justify-center p-8 text-center bg-zinc-900 border border-amber-500/30 rounded-2xl max-w-lg mx-auto shadow-2xl relative overflow-hidden backdrop-blur-sm">
+                <div className="absolute top-0 left-0 w-full h-1 bg-amber-500" />
+                <div className="w-20 h-20 bg-amber-500/10 rounded-full flex items-center justify-center border border-amber-500/20 mb-6">
+                  <Monitor className="w-10 h-10 text-amber-400" />
+                </div>
+                <h3 className="text-xl font-bold text-white mb-2 uppercase tracking-wide font-sans">Второе окно не поддерживается</h3>
+                <p className="text-sm text-zinc-400 max-w-sm mb-6 leading-relaxed">
+                  Ваша текущая среда (Desktop) не поддерживает создание дополнительных всплывающих окон. Вместо этого вы можете использовать «Студийный режим» (развернуть интерфейс на весь экран).
+                </p>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setPopupBlocked(false)}
+                    className="px-5 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white rounded-xl text-xs font-black transition-all active:scale-95 border border-zinc-700 font-sans uppercase"
+                  >
+                    Понятно
+                  </button>
+                  <button
+                    onClick={() => {
+                      setPopupBlocked(false);
+                      // Fallback to overlay mode (we just set an internal state)
+                      setExternalWindow(window);
+                      setIsPopoutOpen(true);
+                    }}
+                    className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-black transition-all active:scale-95 shadow-md shadow-indigo-600/30 flex items-center gap-1.5 font-sans uppercase"
+                  >
+                    Студийный режим
+                  </button>
+                </div>
+              </div>
+            ) : isPopoutOpen ? (
+              <StudioDashboard
+                project={project}
+                currentTime={currentTime}
+                currentLine={currentLine}
+                isPlaying={isPlaying}
+                isRecording={isRecording}
+                onToggleBackstage={handleToggleBackstage}
+              />
             ) : (
               <video 
                 key={project.videoPath || project.videoUrl || 'default'}
@@ -2104,7 +2920,7 @@ export default function App() {
                     playbackEngine.stop();
                   }
                 }}
-                src={project.videoPath ? getSafeFileUrl(project.videoPath.startsWith('./') && project.projectPath ? `${project.projectPath}/${project.videoPath.slice(2)}` : project.videoPath) : project.videoUrl ? project.videoUrl : undefined}
+                src={resolvedMainVideoPath ? getSafeFileUrl(resolvedMainVideoPath) : project.videoUrl ? project.videoUrl : undefined}
                 onLoadedMetadata={(e) => {
                   let newDuration = e.currentTarget.duration;
                   logger.info("Video metadata loaded. Duration:", newDuration);
@@ -2206,7 +3022,7 @@ export default function App() {
               />
             )}
             
-            {project && (
+            {!isPopoutOpen && project && (
               <ActorOverlay 
                 currentLine={currentLine} 
                 nextLine={nextLine} 
@@ -2215,6 +3031,7 @@ export default function App() {
                 webcamRef={webcamRef}
                 isRecording={isRecording}
                 recordingStream={recordingStream}
+                isWebcamSimulated={isWebcamSimulated}
                 onClipping={(clipping) => {
                   if (isRecording) setClippingDetected(clipping);
                 }}
@@ -2239,6 +3056,168 @@ export default function App() {
                 onSeek={handleSeek}
               />
             )}
+
+            {isPopoutOpen && externalWindow && project && (() => {
+              const content = (
+                <div className="w-full h-full relative flex items-center justify-center bg-black overflow-hidden select-none">
+                  {/* Fullscreen popup content */}
+                  {(project.videoPath || project.videoUrl) && (
+                    <video 
+                      ref={videoRef}
+                      className="w-full h-full object-contain shadow-2xl"
+                      playsInline
+                      crossOrigin="anonymous"
+                      preload="metadata"
+                      onKeyDown={(e) => e.preventDefault()}
+                      onPlay={() => {
+                        if (!isPlayingRef.current) {
+                          setIsPlaying(true);
+                          if (projectRef.current) {
+                            playbackEngine.play(projectRef.current.tracks, videoRef.current?.currentTime || 0);
+                          }
+                        }
+                      }}
+                      onPause={() => {
+                        if (isPlayingRef.current) {
+                          setIsPlaying(false);
+                          playbackEngine.stop();
+                        }
+                      }}
+                      src={resolvedMainVideoPath ? getSafeFileUrl(resolvedMainVideoPath) : project.videoUrl ? project.videoUrl : undefined}
+                      onLoadedMetadata={(e) => {
+                        let newDuration = e.currentTarget.duration;
+                        if (newDuration !== Infinity && newDuration > 0) {
+                          setDuration(newDuration);
+                        }
+                      }}
+                      onDurationChange={(e) => {
+                        const newDuration = e.currentTarget.duration;
+                        if (newDuration !== Infinity && newDuration > 0) {
+                          setDuration(newDuration);
+                        }
+                      }}
+                      onError={(e) => {
+                        const video = e.currentTarget;
+                        const error = video.error;
+                        setVideoError(`Ошибка воспроизведения видео во втором окне: ${error?.message || error?.code}`);
+                      }}
+                    />
+                  )}
+                  
+                  {/* Actor overlay including teleprompter and webcam over the video, fully responsive */}
+                  <ActorOverlay 
+                    currentLine={currentLine} 
+                    nextLine={nextLine} 
+                    currentTime={currentTime}
+                    showWebcam={showWebcam || !!project.audioSettings?.isBackstageEnabled}
+                    webcamRef={webcamRef}
+                    isRecording={isRecording}
+                    recordingStream={recordingStream}
+                    isWebcamSimulated={isWebcamSimulated}
+                    onClipping={(clipping) => {
+                      if (isRecording) setClippingDetected(clipping);
+                    }}
+                    subtitles={project.subtitles}
+                    teleprompterMode={teleprompterMode}
+                    teleprompterFontSize={teleprompterFontSize}
+                    teleprompterLineHeight={teleprompterLineHeight}
+                    teleprompterPacing={teleprompterPacing}
+                    setTeleprompterFontSize={setTeleprompterFontSize}
+                    setTeleprompterLineHeight={setTeleprompterLineHeight}
+                    setTeleprompterPacing={setTeleprompterPacing}
+                    setTeleprompterMode={setTeleprompterMode}
+                    teleprompterPosition={teleprompterPosition}
+                    setTeleprompterPosition={setTeleprompterPosition}
+                    teleprompterSize={teleprompterSize}
+                    setTeleprompterSize={setTeleprompterSize}
+                    isAudiobook={!!project.documentContent}
+                    isBackstageRecording={project?.audioSettings?.backstageMode === 'manual' ? isManualBackstageRecording : (isRecording && isBackstageRecording)}
+                    activeRole={project.selectedRole || ''}
+                    project={project}
+                    onSettingsChange={(newSettings) => setProject({ ...project, audioSettings: newSettings })}
+                    onSeek={handleSeek}
+                  />
+
+                  {/* Dynamic popup visual helpers */}
+                  <div className="absolute top-4 left-4 z-[100] pointer-events-auto flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        let doc = window.document;
+                        if (externalWindow && externalWindow !== window) {
+                          doc = externalWindow.document;
+                        }
+                        const elem = doc.documentElement;
+                        if (!doc.fullscreenElement) {
+                          elem.requestFullscreen().catch((err) => {
+                            console.error(`Fullscreen error: ${err.message}`);
+                          });
+                        } else {
+                          doc.exitFullscreen();
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-zinc-900/80 hover:bg-zinc-800 text-white border border-white/10 text-[10px] font-black transition-all flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer uppercase tracking-tight"
+                      title="Развернуть во весь экран"
+                    >
+                      <Monitor className="w-3.5 h-3.5" />
+                      Во весь экран
+                    </button>
+                    <button
+                      onClick={handleTogglePopout}
+                      className="px-3 py-1.5 rounded-lg bg-rose-950/80 hover:bg-rose-900/80 text-rose-200 border border-rose-500/30 text-[10px] font-black transition-all flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer uppercase tracking-tight"
+                      title="Закрыть второе окно"
+                    >
+                      Вернуть на базу
+                    </button>
+                  </div>
+                </div>
+              );
+
+              if (externalWindow === window) {
+                return (
+                  <div className="fixed inset-0 w-full h-full z-[99999] bg-black">
+                    {content}
+                  </div>
+                );
+              }
+              
+              if ((externalWindow as any) === 'DESKTOP_POPOUT') {
+                return (
+                  <div className="hidden">
+                    <video 
+                      ref={videoRef}
+                      src={resolvedMainVideoPath ? getSafeFileUrl(resolvedMainVideoPath) : project.videoUrl ? project.videoUrl : undefined}
+                      crossOrigin="anonymous"
+                      onLoadedMetadata={(e) => {
+                        let newDuration = e.currentTarget.duration;
+                        if (newDuration !== Infinity && newDuration > 0) {
+                          setDuration(newDuration);
+                        }
+                      }}
+                      onPlay={() => {
+                        if (!isPlayingRef.current) {
+                          setIsPlaying(true);
+                          if (projectRef.current) {
+                            playbackEngine.play(projectRef.current.tracks, videoRef.current?.currentTime || 0);
+                          }
+                        }
+                      }}
+                      onPause={() => {
+                        if (isPlayingRef.current) {
+                          setIsPlaying(false);
+                          playbackEngine.stop();
+                        }
+                      }}
+                    />
+                  </div>
+                );
+              }
+
+              return (
+                <PopoutWindow externalWindow={externalWindow} onClose={() => { setIsPopoutOpen(false); setExternalWindow(null); }}>
+                  {content}
+                </PopoutWindow>
+              );
+            })()}
 
             {showCalibration && project && (
               <LatencyCalibration 
@@ -2372,7 +3351,16 @@ export default function App() {
                     <VideoIcon className="w-5 h-5" />
                   </button>
                   <button className="p-2 hover:bg-white/10 rounded-lg transition-colors" title="Настройки громкости"><Volume2 className="w-5 h-5" /></button>
-                  <button className="p-2 hover:bg-white/10 rounded-lg transition-colors" title="Настройки монитора"><Monitor className="w-5 h-5" /></button>
+                  <button 
+                    onClick={handleTogglePopout}
+                    className={cn(
+                      "p-2 rounded-lg transition-colors",
+                      isPopoutOpen ? "bg-indigo-600 text-white animate-pulse" : "hover:bg-white/10 text-zinc-400"
+                    )} 
+                    title="Студийный режим / Второй экран"
+                  >
+                    <Monitor className="w-5 h-5" />
+                  </button>
                 </div>
               </div>
             </div>
@@ -2464,6 +3452,19 @@ export default function App() {
                       }
                     });
                   }}
+                  onSelectBatchSegments={(segmentIds, multi) => {
+                    setSelectedSegmentIds(prev => {
+                      if (multi) {
+                         const currentSet = new Set(prev);
+                         segmentIds.forEach(id => {
+                           if (currentSet.has(id)) currentSet.delete(id);
+                           else currentSet.add(id);
+                         });
+                         return Array.from(currentSet);
+                      }
+                      return segmentIds;
+                    });
+                  }}
                   onClearSelection={() => setSelectedSegmentIds([])}
                   onGlueSegments={handleGlueSegments}
                   onUpdateTrack={(trackId, updates) => {
@@ -2525,6 +3526,14 @@ export default function App() {
         duration={quickImportDuration}
         onDurationChange={setQuickImportDuration}
         onImport={handleQuickImport}
+      />
+
+      <FixImportModal 
+        show={showFixImport}
+        onClose={() => setShowFixImport(false)}
+        text={fixImportText}
+        onTextChange={setFixImportText}
+        onImport={handleFixImport}
       />
 
       {mkvImportData && (

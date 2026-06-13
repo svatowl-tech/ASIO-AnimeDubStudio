@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Volume2, VolumeX, Headphones, Edit3, Trash2, Eraser, RotateCcw, Settings2 } from 'lucide-react';
 import { cn, safeConfirm } from '../lib/utils';
 import { AudioTrack, TrackProcessing } from '../types';
@@ -19,6 +19,7 @@ export const TrackHeader = ({
   onUpdateProcessing,
   onHeightChange,
   onSelectSegment,
+  onSelectBatchSegments,
   onOpenProcessing,
   onArm
 }: { 
@@ -36,6 +37,7 @@ export const TrackHeader = ({
   onUpdateProcessing?: (id: string, settings: TrackProcessing) => void,
   onHeightChange?: (id: string, height: number) => void,
   onSelectSegment?: (segmentId: string, multi: boolean) => void,
+  onSelectBatchSegments?: (segmentIds: string[], multi?: boolean) => void,
   onOpenProcessing?: (id: string) => void,
   key?: string | number
 }) => {
@@ -54,6 +56,8 @@ export const TrackHeader = ({
     setContextMenu({ x: e.clientX, y: e.clientY });
   };
 
+  const headerRef = useRef<HTMLDivElement>(null);
+
   const handleResizeMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
     const startY = e.clientY;
@@ -62,14 +66,27 @@ export const TrackHeader = ({
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const deltaY = moveEvent.clientY - startY;
       const newHeight = Math.max(64, initialHeight + deltaY); // Min height 64px
-      if (onHeightChange) {
-        onHeightChange(track.id, newHeight);
+      
+      if (headerRef.current) {
+        headerRef.current.style.height = `${newHeight}px`;
+      }
+      
+      const trackRow = document.querySelector(`[data-track-id="${track.id}"]`) as HTMLElement;
+      if (trackRow) {
+        trackRow.style.height = `${newHeight}px`;
       }
     };
 
-    const handleMouseUp = () => {
+    const handleMouseUp = (upEvent: MouseEvent) => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
+      
+      const deltaY = upEvent.clientY - startY;
+      const newHeight = Math.max(64, initialHeight + deltaY);
+      
+      if (onHeightChange) {
+        onHeightChange(track.id, newHeight);
+      }
     };
 
     window.addEventListener('mousemove', handleMouseMove);
@@ -78,9 +95,14 @@ export const TrackHeader = ({
 
   return (
     <div 
+      ref={headerRef}
       onContextMenu={handleContextMenu}
-      onDoubleClick={() => {
-        track.segments.forEach(seg => onSelectSegment?.(seg.id, true));
+      onDoubleClick={(e) => {
+        if (onSelectBatchSegments) {
+          onSelectBatchSegments(track.segments.map(seg => seg.id), e.shiftKey);
+        } else if (onSelectSegment) {
+          track.segments.forEach(seg => onSelectSegment(seg.id, true));
+        }
       }}
       className="border-b border-zinc-800 bg-zinc-900/50 p-4 flex flex-col gap-3 group relative"
       style={{ height: track.height || 80 }}

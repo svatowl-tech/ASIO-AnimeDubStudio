@@ -68,12 +68,6 @@ export const TimelineAutoScroller = ({ timelineRef, isPlaying, zoom }: any) => {
       if (isPlaying) {
         // Simple assignment during playback for a clean "page turn" or to follow along instantly
         el.scrollLeft = Math.max(0, currentX - clientWidth * 0.1);
-      } else {
-        // Smooth snap to center if seeking or clicking around while paused
-        el.scrollTo({
-          left: Math.max(0, currentX - clientWidth * 0.4),
-          behavior: 'smooth'
-        });
       }
     }
   }, [currentTime, isPlaying, zoom, timelineRef]);
@@ -188,19 +182,11 @@ const TrackRow = React.memo(({
   timelineVisibleRange
 }: TrackRowProps) => {
   const segmentsWithFades = React.useMemo(() => {
-    let segmentsToRender = track.segments;
+    // 1. Sort all segments first
+    const sortedSegs = [...track.segments].sort((a: AudioSegment, b: AudioSegment) => a.startTime - b.startTime);
     
-    if (timelineVisibleRange) {
-      segmentsToRender = segmentsToRender.filter((s: AudioSegment) => 
-        s.startTime < timelineVisibleRange.end && (s.startTime + s.duration) > timelineVisibleRange.start
-      );
-    }
-
-    const sortedSegs = [...segmentsToRender]
-      .sort((a: AudioSegment, b: AudioSegment) => a.startTime - b.startTime);
-    
-    return segmentsToRender.map((segment: AudioSegment) => {
-      const idxInSorted = sortedSegs.findIndex((s: AudioSegment) => s.id === segment.id);
+    // 2. Calculate fades linearly over sorted array
+    const allSegmentsWithFades = sortedSegs.map((segment: AudioSegment, idxInSorted: number) => {
       const prevSeg = idxInSorted > 0 ? sortedSegs[idxInSorted - 1] : null;
       const nextSeg = idxInSorted < sortedSegs.length - 1 ? sortedSegs[idxInSorted + 1] : null;
 
@@ -216,6 +202,13 @@ const TrackRow = React.memo(({
 
       return { segment, autoFadeIn, autoFadeOut };
     });
+
+    // 3. Filter by visible range
+    if (!timelineVisibleRange) return allSegmentsWithFades;
+
+    return allSegmentsWithFades.filter(({ segment }) => 
+      segment.startTime < timelineVisibleRange.end && (segment.startTime + segment.duration) > timelineVisibleRange.start
+    );
   }, [track.segments, timelineVisibleRange]);
 
   return (
@@ -228,22 +221,20 @@ const TrackRow = React.memo(({
         <AudioSegmentView 
           key={segment.id}
           seg={segment}
+          trackId={track.id}
           zoom={zoom}
           audioOffsetMs={project.audioOffsetMs}
           timelineVisibleRange={timelineVisibleRange}
-          onUpdate={(id, updates, targetTrackId) => onUpdateSegment(track.id, id, updates, targetTrackId)}
-          onDelete={(id) => onDeleteSegment?.(track.id, id)}
+          onUpdateSegment={onUpdateSegment}
+          onDeleteSegment={onDeleteSegment}
           snapTime={snapTime}
           onSnapLine={setSnapLine}
-          onSplit={onSplitSegment ? (id) => onSplitSegment(track.id, id, currentTimeRef.current) : undefined}
-          onDuplicate={onDuplicateSegment ? (id, newStart) => onDuplicateSegment(track.id, id, newStart) : undefined}
+          onSplitSegment={onSplitSegment}
+          onDuplicateSegment={onDuplicateSegment}
           isSelected={selectedSegmentIds.includes(segment.id)}
-          onSelect={(e) => {
-            if (segment.id && onSelectSegment) {
-              onSelectSegment(segment.id, e.shiftKey);
-            }
-          }}
-          onGlue={(selectedSegmentIds.length > 1 && selectedSegmentIds.includes(segment.id)) ? onGlueSegments : undefined}
+          onSelectSegment={onSelectSegment}
+          onGlueSegments={(selectedSegmentIds.length > 1 && selectedSegmentIds.includes(segment.id)) ? onGlueSegments : undefined}
+          currentTimeRef={currentTimeRef}
           autoFadeIn={autoFadeIn}
           autoFadeOut={autoFadeOut}
         />
@@ -279,6 +270,7 @@ export const AdvancedTimeline = ({
   onToggleRipple,
   selectedSegmentIds = [],
   onSelectSegment,
+  onSelectBatchSegments,
   onClearSelection,
   onGlueSegments,
   recordingPeaks,
@@ -312,6 +304,7 @@ export const AdvancedTimeline = ({
   onToggleRipple?: () => void,
   selectedSegmentIds?: string[],
   onSelectSegment?: (segmentId: string, multi: boolean) => void,
+  onSelectBatchSegments?: (segmentIds: string[], multi?: boolean) => void,
   onClearSelection?: () => void,
   onGlueSegments?: () => void,
   recordingPeaks?: number[],
@@ -319,11 +312,11 @@ export const AdvancedTimeline = ({
   onOpenProcessing?: (id: string) => void,
   currentTimeRef: React.MutableRefObject<number>
 }) => {
-  const handleSeek = (time: number) => {
+  const handleSeek = (time: number, autoScroll: boolean = true) => {
     onSeek(time);
     
-    // Force scroll to center the new position
-    if (timelineRef.current) {
+    // Force scroll to center the new position only if autoScroll is enabled
+    if (autoScroll && timelineRef.current) {
       const scrollTarget = (time * zoom) - (timelineRef.current.clientWidth / 2);
       timelineRef.current.scrollTo({
         left: Math.max(0, scrollTarget),
@@ -334,6 +327,7 @@ export const AdvancedTimeline = ({
 
   if (!project) return null;
 
+  const { currentTime } = useTimelineData();
   const timelineRef = useRef<HTMLDivElement>(null);
   const trackHeadersRef = useRef<HTMLDivElement>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
@@ -345,6 +339,40 @@ export const AdvancedTimeline = ({
 
   const [isSnapEnabled, setIsSnapEnabled] = useState(true);
   const [snapLine, setSnapLine] = useState<number | null>(null);
+  const lastScrubTimeRef = useRef<number | null>(null);
+
+  // Find all unique, sorted fix timestamps (unsatisfied fixes)
+  const sortedFixTimes = React.useMemo(() => {
+    const fixTimes: number[] = [];
+    if (project.subtitles) {
+      project.subtitles.forEach(sub => {
+        if (sub.needsFix) {
+          fixTimes.push(sub.start);
+        }
+      });
+    }
+    if (project.fixes) {
+      project.fixes.forEach(fix => {
+        if (!fix.isResolved) {
+          fixTimes.push(fix.timestamp);
+        }
+      });
+    }
+    return Array.from(new Set(fixTimes)).sort((a, b) => a - b);
+  }, [project.fixes, project.subtitles]);
+
+  const handleJumpToNextFix = () => {
+    if (sortedFixTimes.length === 0) return;
+    const buffer = 0.1; // 100ms
+    let nextFixTime = sortedFixTimes.find(t => t > currentTime + buffer);
+    if (nextFixTime === undefined) {
+      nextFixTime = sortedFixTimes[0];
+    }
+    handleSeek(nextFixTime, true);
+    setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('syncScroll'));
+    }, 50);
+  };
 
   const sortedTracks = React.useMemo(() => {
     return [...project.tracks].sort((a, b) => {
@@ -403,10 +431,10 @@ export const AdvancedTimeline = ({
       }
     }
 
-    const gridStep = zoom > 50 ? 0.1 : 1.0;
+    const gridStep = zoom > 300 ? 0.01 : zoom > 100 ? 0.05 : zoom > 50 ? 0.1 : 0.5;
     const gridPt = Math.round(time / gridStep) * gridStep;
     const gridDiff = Math.abs(time - gridPt);
-    if (gridDiff < minDiff) {
+    if (gridDiff < minDiff && gridDiff < (10 / zoom)) {
       minDiff = gridDiff;
       closestTime = gridPt;
       snapped = true;
@@ -428,16 +456,17 @@ export const AdvancedTimeline = ({
   const [timelineVisibleRange, setTimelineVisibleRange] = useState({ start: 0, end: 30 });
   const prevZoomRef = useRef(zoom);
 
-  const updateVisibleRange = () => {
+  const updateVisibleRange = React.useCallback(() => {
     if (!timelineRef.current) return;
     const scrollLeft = timelineRef.current.scrollLeft;
     const clientWidth = timelineRef.current.clientWidth;
     const start = scrollLeft / zoom;
     const end = (scrollLeft + clientWidth) / zoom;
     setTimelineVisibleRange({ start, end });
-  };
+  }, [zoom]);
 
-  useEffect(() => {
+  React.useLayoutEffect(() => {
+    let shouldUpdate = true;
     if (timelineRef.current && prevZoomRef.current !== zoom) {
       // Calculate the time at the center of the current view
       const scrollLeft = timelineRef.current.scrollLeft;
@@ -449,13 +478,28 @@ export const AdvancedTimeline = ({
       timelineRef.current.scrollLeft = Math.max(0, newScrollLeft);
       
       prevZoomRef.current = zoom;
+      updateVisibleRange();
+      shouldUpdate = false;
     }
-    updateVisibleRange();
-  }, [zoom, duration]);
+    
+    if (shouldUpdate) {
+      updateVisibleRange();
+    }
+  }, [zoom, project, updateVisibleRange]);
+
+  React.useLayoutEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      updateVisibleRange();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [updateVisibleRange]);
 
   /* Auto-scroll moved to component */
 
-  const handleTimelineInteraction = (e: React.MouseEvent | React.TouchEvent) => {
+  const handleTimelineInteraction = (e: React.MouseEvent | React.TouchEvent, isMouseMove: boolean = false) => {
     if (!timelineRef.current) return;
     const rect = timelineRef.current.getBoundingClientRect();
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
@@ -474,7 +518,18 @@ export const AdvancedTimeline = ({
       }
     } else {
       const { time: snappedTime, snapped } = snapTime(time);
-      handleSeek(Math.max(0, Math.min(duration, snappedTime)));
+      const targetTime = Math.max(0, Math.min(duration, snappedTime));
+      
+      if (isMouseMove) {
+        if (lastScrubTimeRef.current !== null) {
+          if (Math.abs(lastScrubTimeRef.current - targetTime) < 0.01) return;
+        }
+        lastScrubTimeRef.current = targetTime;
+        handleSeek(targetTime, false);
+      } else {
+        lastScrubTimeRef.current = targetTime;
+        handleSeek(targetTime, false);
+      }
       setSnapLine(snapped ? snappedTime : null);
     }
   };
@@ -527,7 +582,7 @@ export const AdvancedTimeline = ({
       if (!isSyncingLeft) {
         isSyncingRight = true;
         headerEl.scrollTop = timelineEl.scrollTop;
-        updateVisibleRange();
+        if (updateVisibleRange) updateVisibleRange();
       }
       isSyncingLeft = false;
     };
@@ -547,7 +602,7 @@ export const AdvancedTimeline = ({
       timelineEl.removeEventListener('scroll', handleTimelineScroll);
       headerEl.removeEventListener('scroll', handleHeaderScroll);
     };
-  }, []);
+  }, [updateVisibleRange]);
 
   const handleDoubleClick = (e: React.MouseEvent) => {
     const rect = timelineRef.current?.getBoundingClientRect();
@@ -618,6 +673,23 @@ export const AdvancedTimeline = ({
             )}
           </div>
 
+          {sortedFixTimes.length > 0 && (
+            <button
+              onClick={handleJumpToNextFix}
+              className="flex items-center gap-1.5 px-3 h-10 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 text-xs font-bold transition-all shadow-md active:scale-95 shrink-0"
+              title="Перейти к следующему исправлению (фиксу)"
+            >
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+              </span>
+              <span>К СЛЕД. ФИКСУ</span>
+              <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-[10px] text-rose-300 font-black">
+                {sortedFixTimes.length}
+              </span>
+            </button>
+          )}
+
           <div className="flex flex-col items-center justify-center bg-black/60 px-4 py-1 rounded border border-white/5 min-w-[140px]">
             <span className="text-[10px] font-black text-zinc-500 uppercase tracking-tighter leading-none mb-1">Текущее время</span>
             <CurrentTimeDisplay />
@@ -664,6 +736,7 @@ export const AdvancedTimeline = ({
                 onUpdateProcessing={(id, processing) => onUpdateTrack(id, { processing })}
                 onHeightChange={(id, height) => onUpdateTrack(id, { height })}
                 onSelectSegment={onSelectSegment}
+                onSelectBatchSegments={onSelectBatchSegments}
                 onOpenProcessing={onOpenProcessing}
               />
             ))}
@@ -693,8 +766,6 @@ export const AdvancedTimeline = ({
               const clickX = e.clientX - rect.left;
               const time = (clickX + scrollLeft) / zoom;
               
-              onSeek(Math.max(0, Math.min(duration, time)));
-              
               if (e.shiftKey && e.clientY - rect.top > 40) {
                 // Marquee selection with Shift
                 onClearSelection?.();
@@ -704,13 +775,13 @@ export const AdvancedTimeline = ({
               } else {
                 // Normal scrubbing
                 setIsScrubbing(true);
-                handleTimelineInteraction(e);
+                handleTimelineInteraction(e, false);
               }
             }
           }}
           onMouseMove={(e) => {
             if (isScrubbing || isSelectingRange) {
-              handleTimelineInteraction(e);
+              handleTimelineInteraction(e, true);
             } else if (isMarqueeSelecting && marqueeStart) {
               const rect = timelineRef.current?.getBoundingClientRect();
               if (rect) {
@@ -747,9 +818,13 @@ export const AdvancedTimeline = ({
                 currentY += (track.height || 80);
               });
               
-              if (onSelectSegment && newSelectedIds.length > 0) {
-                onClearSelection?.();
-                newSelectedIds.forEach(id => onSelectSegment(id, true));
+              if (newSelectedIds.length > 0) {
+                if (onSelectBatchSegments) {
+                  onSelectBatchSegments(newSelectedIds);
+                } else if (onSelectSegment) {
+                  onClearSelection?.();
+                  newSelectedIds.forEach(id => onSelectSegment(id, true));
+                }
               }
             }
 
@@ -790,7 +865,7 @@ export const AdvancedTimeline = ({
                     }
                   } else {
                     setIsScrubbing(true);
-                    handleTimelineInteraction(e);
+                    handleTimelineInteraction(e, false);
                   }
                 }
               }}

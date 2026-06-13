@@ -11,6 +11,8 @@ interface BackstageCameraProps {
   project: any;
   onSettingsChange: (settings: any) => void;
   onRunStressTest?: () => void;
+  isTimelineRecording?: boolean;
+  isWebcamSimulated?: boolean;
 }
 
 export const BackstageCamera: React.FC<BackstageCameraProps> = ({
@@ -18,7 +20,9 @@ export const BackstageCamera: React.FC<BackstageCameraProps> = ({
   recordingStream,
   onClipping,
   project,
-  onSettingsChange
+  onSettingsChange,
+  isTimelineRecording,
+  isWebcamSimulated
 }) => {
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -37,33 +41,61 @@ export const BackstageCamera: React.FC<BackstageCameraProps> = ({
 
     const setupStream = async () => {
       try {
-        const videoStream = webcamRef.current?.srcObject as MediaStream;
-        if (!videoStream) return;
+        const streamToRecord = (webcamRef.current?.srcObject as MediaStream) || recordingStream;
+        if (!streamToRecord) return;
         
-        const tracks = [...videoStream.getVideoTracks()];
+        const tracks = [...streamToRecord.getTracks()];
         const backstageAudioId = project?.audioSettings?.backstageAudioDeviceId;
 
         if (backstageAudioId !== "none") {
            const audioConstraint = backstageAudioId && backstageAudioId !== 'default' 
-             ? { deviceId: { exact: backstageAudioId } } 
-             : project?.audioSettings?.deviceId ? { deviceId: { exact: project.audioSettings.deviceId } } : true;
+             ? { deviceId: { ideal: backstageAudioId } } 
+             : project?.audioSettings?.deviceId ? { deviceId: { ideal: project.audioSettings.deviceId } } : true;
              
-           localAudioStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint });
-           if (localAudioStream) {
-              const audioTracks = localAudioStream.getAudioTracks();
-              if (audioTracks.length > 0) tracks.push(audioTracks[0]);
+           try {
+             localAudioStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint });
+             if (localAudioStream) {
+                const audioTracks = localAudioStream.getAudioTracks();
+                if (audioTracks.length > 0) {
+                  // Пытаемся заменить существующие аудиодорожки, если они есть
+                  const existingAudio = tracks.findIndex(t => t.kind === 'audio');
+                  if (existingAudio !== -1) {
+                    tracks[existingAudio] = audioTracks[0];
+                  } else {
+                    tracks.push(audioTracks[0]);
+                  }
+                }
+             }
+           } catch (audioErr) {
+             console.warn("Failed to get separate backstage audio, continuing with existing tracks:", audioErr);
            }
         }
         
+        const getMimeType = () => {
+          const types = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'];
+          return types.find(t => MediaRecorder.isTypeSupported(t)) || 'video/webm';
+        };
+
         const combinedStream = new MediaStream(tracks);
-        recorder = new MediaRecorder(combinedStream, { mimeType: 'video/webm' });
+        recorder = new MediaRecorder(combinedStream, { 
+          mimeType: getMimeType(),
+          videoBitsPerSecond: project?.audioSettings?.webcamBitrate || 5000000,
+          audioBitsPerSecond: 128000
+        });
         continuousRecorderRef.current = recorder;
         
         recorder.ondataavailable = (e) => {
           if (e.data.size > 0) {
             continuousChunksRef.current.push({ blob: e.data, time: Date.now() });
-            const cutoff = Date.now() - 60000;
-            continuousChunksRef.current = continuousChunksRef.current.filter(c => c.time >= cutoff);
+            
+            // Оставляем только чанки за последние 30 секунд
+            const thirtySecondsAgo = Date.now() - 30000;
+            continuousChunksRef.current = continuousChunksRef.current.filter(c => c.time > thirtySecondsAgo);
+            
+            // Жесткий лимит на количество чанков (например, 35) чтобы не переполнять память
+            if (continuousChunksRef.current.length > 35) {
+              continuousChunksRef.current = continuousChunksRef.current.slice(-35);
+            }
           }
         };
         
@@ -88,28 +120,48 @@ export const BackstageCamera: React.FC<BackstageCameraProps> = ({
     });
   };
 
-  const startManual = async () => {
-    if (autoMode || !webcamRef.current?.srcObject) return;
+  const startManual = async (force: boolean = false) => {
+    if ((!force && autoMode) || !webcamRef.current?.srcObject) return;
     
     try {
-      const videoStream = webcamRef.current.srcObject as MediaStream;
-      const tracks = [...videoStream.getVideoTracks()];
+      const streamToRecord = (webcamRef.current.srcObject as MediaStream) || recordingStream;
+      const tracks = [...streamToRecord.getTracks()];
       const backstageAudioId = project?.audioSettings?.backstageAudioDeviceId;
 
       if (backstageAudioId !== "none") {
          const audioConstraint = backstageAudioId && backstageAudioId !== 'default' 
-           ? { deviceId: { exact: backstageAudioId } } 
-           : project?.audioSettings?.deviceId ? { deviceId: { exact: project.audioSettings.deviceId } } : true;
+           ? { deviceId: { ideal: backstageAudioId } } 
+           : project?.audioSettings?.deviceId ? { deviceId: { ideal: project.audioSettings.deviceId } } : true;
            
-         const localAudioStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint });
-         if (localAudioStream) {
-            const audioTracks = localAudioStream.getAudioTracks();
-            if (audioTracks.length > 0) tracks.push(audioTracks[0]);
+         try {
+           const localAudioStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint });
+           if (localAudioStream) {
+              const audioTracks = localAudioStream.getAudioTracks();
+              if (audioTracks.length > 0) {
+                const existingAudio = tracks.findIndex(t => t.kind === 'audio');
+                if (existingAudio !== -1) {
+                  tracks[existingAudio] = audioTracks[0];
+                } else {
+                  tracks.push(audioTracks[0]);
+                }
+              }
+           }
+         } catch (audioErr) {
+           console.warn("Manual: Failed to get separate backstage audio:", audioErr);
          }
       }
       
+      const getMimeType = () => {
+        const types = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'];
+        return types.find(t => MediaRecorder.isTypeSupported(t)) || 'video/webm';
+      };
+
       const combinedStream = new MediaStream(tracks);
-      const recorder = new MediaRecorder(combinedStream, { mimeType: 'video/webm' });
+      const recorder = new MediaRecorder(combinedStream, { 
+        mimeType: getMimeType(),
+        videoBitsPerSecond: project?.audioSettings?.webcamBitrate || 5000000,
+        audioBitsPerSecond: 128000
+      });
       mediaRecorderRef.current = recorder;
       chunksRef.current = [];
       
@@ -118,20 +170,34 @@ export const BackstageCamera: React.FC<BackstageCameraProps> = ({
       };
       
       recorder.onstop = async () => {
+        if (!chunksRef.current.length) return;
         const videoBlob = new Blob(chunksRef.current, { type: 'video/webm' });
+        
+        if (videoBlob.size < 1000) {
+          console.warn("[BackstageCamera] Manual backstage recording too short, ignoring");
+          return;
+        }
+
         const backstagePath = project?.audioSettings?.backstageFolderPath || (project?.projectPath ? `${project?.projectPath}/backstage`.replace(/\\/g, '/') : null);
         if (backstagePath && window.electronAPI) {
-          const arrayBuffer = await videoBlob.arrayBuffer();
-          await window.electronAPI.saveTake({
-            projectPath: backstagePath,
-            role: 'backstage_manual',
-            startTime: Date.now() / 1000,
-            audioData: new Uint8Array(arrayBuffer)
-          });
+          try {
+            const arrayBuffer = await videoBlob.arrayBuffer();
+            const res = await window.electronAPI.saveTake({
+              projectPath: backstagePath,
+              role: 'backstage_manual',
+              startTime: Date.now() / 1000,
+              audioData: new Uint8Array(arrayBuffer)
+            });
+            if (res.success && res.data) {
+              console.log(`[BackstageCamera] Manual backstage recording saved to: ${res.data.filePath}`);
+            }
+          } catch (e) {
+            console.error("[BackstageCamera] Failed to save manual backstage recording:", e);
+          }
         }
       };
       
-      recorder.start();
+      recorder.start(1000);
       setIsRecording(true);
     } catch (e) {
       console.error("Failed to start manual recording:", e);
@@ -191,6 +257,10 @@ export const BackstageCamera: React.FC<BackstageCameraProps> = ({
     }
   };
 
+  // In parallel auto-mode, useAudioEngine already automates backstage recording perfectly 
+  // directly aligned with the segment timeline.
+  // No duplicate recording effect is needed here.
+
   return (
     <motion.div 
       drag
@@ -204,6 +274,13 @@ export const BackstageCamera: React.FC<BackstageCameraProps> = ({
         <video ref={webcamRef} autoPlay playsInline muted className="w-full h-full object-cover mirror" />
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent pointer-events-none" />
         
+        {isWebcamSimulated && (
+          <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-zinc-950/85 border border-amber-500/40 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-amber-400 font-bold shadow-md select-none">
+            <span>⚠️</span>
+            <span>Камера симулируется</span>
+          </div>
+        )}
+
         {(isRecording || autoMode) && (
           <div className="absolute top-3 right-3 flex items-center gap-2">
             <div className="w-2 h-2 bg-rose-500 rounded-full animate-pulse" />
@@ -220,7 +297,7 @@ export const BackstageCamera: React.FC<BackstageCameraProps> = ({
 
       <div className="p-2 flex items-center justify-between bg-zinc-900/90 border-t border-white/10 gap-1" onMouseDown={e => e.stopPropagation()}>
         <button 
-          onClick={isRecording ? stopManual : startManual}
+          onClick={() => isRecording ? stopManual() : startManual()}
           disabled={autoMode}
           className={cn(
             "flex-1 py-1.5 rounded-lg text-[10px] font-bold transition-all flex items-center justify-center gap-1.5",

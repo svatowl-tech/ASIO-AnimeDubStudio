@@ -48,7 +48,8 @@
           "find_file_by_hash",
           "concat_backstage_videos",
           "get_media_info",
-          "extract_mkv_assets"
+          "extract_mkv_assets",
+          "create_blank_video"
         ],
         "deny": []
       }

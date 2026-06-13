@@ -1,6 +1,6 @@
 import React, { useCallback, useRef, useEffect } from 'react';
 import { logger } from '../lib/logger';
-import { Project, AudioTrack } from '../types';
+import { Project, AudioTrack, SubtitleLine } from '../types';
 import { getGlobalAudioSettings, getSafeFileUrl } from '../lib/utils';
 
 export const useProjectImport = (
@@ -144,7 +144,11 @@ export const useProjectImport = (
       tracks: updatedTracks,
       subtitles: initialSubtitles,
       roles: initialRoles,
-      selectedRole: initialRoles[0] || currentProject.selectedRole
+      selectedRole: initialRoles[0] || currentProject.selectedRole,
+      audioSettings: {
+        ...(currentProject.audioSettings || getGlobalAudioSettings()),
+        playOriginalTrackSegments: false
+      }
     };
     
     setProject(updatedProject);

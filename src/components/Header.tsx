@@ -39,12 +39,14 @@ interface HeaderProps {
   handleMergeBackstage: () => void;
   handleToggleBackstage: () => void;
   setShowQuickImport: (show: boolean) => void;
+  setShowFixImport?: (show: boolean) => void;
   handleBulkImport: () => void;
-  isElectron: boolean;
+  handleGameDubbingImport?: () => void;
+  isDesktop: boolean;
   handleExport: (format: 'WAV' | 'MP3' | 'FLAC') => void;
   handleBatchExport: () => void;
   handleMuxVideo: () => void;
-  handleExportAudioBook: () => void;
+  handleExportAudioBook: (gap?: number) => void;
   handleExportStems: () => void;
   handleExportAllStemsZip: () => void;
   handleOpenProjectFolder?: () => void;
@@ -121,8 +123,10 @@ const Header: React.FC<HeaderProps> = ({
   handleMergeBackstage,
   handleToggleBackstage,
   setShowQuickImport,
+  setShowFixImport,
   handleBulkImport,
-  isElectron,
+  handleGameDubbingImport,
+  isDesktop,
   handleExport,
   handleBatchExport,
   handleMuxVideo,
@@ -137,12 +141,14 @@ const Header: React.FC<HeaderProps> = ({
   const [showImportModal, setShowImportModal] = useState(false);
 
   const importOptions = [
-    { icon: <FileVideo className="w-5 h-5 text-indigo-400" />, title: "Видео", description: "Открыть видеофайл для озвучки", onClick: () => isElectron && handleSelectVideo() },
-    { icon: <FileText className="w-5 h-5 text-purple-400" />, title: "Субтитры", description: "Импортировать (.ass, .srt, .vtt, .fb2, .csv)", onClick: () => isElectron && handleSelectSubs() },
-    { icon: <FileText className="w-5 h-5 text-blue-400" />, title: "Документ", description: "Импорт текстового документа", onClick: () => isElectron && handleSelectDocument() },
-    { icon: <Music className="w-5 h-5 text-amber-400" />, title: "Аудиореференс", description: "Выбрать референсный аудиофайл", onClick: () => isElectron && handleSelectReferenceAudio() },
+    { icon: <FileVideo className="w-5 h-5 text-indigo-400" />, title: "Видео", description: "Открыть видеофайл для озвучки", onClick: () => isDesktop && handleSelectVideo() },
+    { icon: <FileText className="w-5 h-5 text-purple-400" />, title: "Субтитры", description: "Импортировать (.ass, .srt, .vtt, .fb2, .csv)", onClick: () => isDesktop && handleSelectSubs() },
+    { icon: <FileText className="w-5 h-5 text-rose-400" />, title: "Импорт фиксов", description: "Вставить текст правок от куратора", onClick: () => setShowFixImport && setShowFixImport(true) },
+    { icon: <FileText className="w-5 h-5 text-blue-400" />, title: "Документ", description: "Импорт текстового документа", onClick: () => isDesktop && handleSelectDocument() },
+    { icon: <Music className="w-5 h-5 text-amber-400" />, title: "Аудиореференс", description: "Выбрать референсный аудиофайл", onClick: () => isDesktop && handleSelectReferenceAudio() },
     { icon: <FileText className="w-5 h-5 text-green-400" />, title: "Быстрый импорт", description: "Вставить текст из буфера обмена", onClick: () => setShowQuickImport(true) },
     { icon: <Layers className="w-5 h-5 text-indigo-400" />, title: "Пакетный импорт", description: "Импорт всех аудиофайлов из папки", onClick: handleBulkImport },
+    { icon: <Layers className="w-5 h-5 text-emerald-400" />, title: "Импорт игровой озвучки", description: "Выбрать папку реплик + TXT перевод", onClick: handleGameDubbingImport || (() => {}) },
   ];
 
   return (
@@ -182,7 +188,8 @@ const Header: React.FC<HeaderProps> = ({
                 <button onClick={() => handleExport('MP3')} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5">MP3 (320kbps)</button>
                 <button onClick={handleBatchExport} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-indigo-400">Пакетный экспорт</button>
                 <button onClick={handleMuxVideo} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-purple-400">Экспорт видео с озвучкой</button>
-                <button onClick={handleExportAudioBook} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-emerald-400">Аудиокнига</button>
+                <button onClick={() => handleExportAudioBook(1.5)} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-emerald-400">Аудиокнига (1.5s пауз)</button>
+                <button onClick={() => handleExportAudioBook(1.0)} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-teal-400">Реплики единым (1.0s пауз)</button>
                 <button onClick={handleExportStems} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-amber-400">Экспорт стемов</button>
                 <button onClick={handleExportAllStemsZip} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-zinc-400">Экспорт стемов (ZIP)</button>
                 <button onClick={handleMergeBackstage} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors text-rose-400">Объединить бекстейдж</button>

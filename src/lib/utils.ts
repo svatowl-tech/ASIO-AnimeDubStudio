@@ -75,9 +75,11 @@ export const getGlobalAudioSettings = (): AudioSettings => {
     compressorRatio: 4,
     highPassFrequency: 80,
     isDestructive: false,
+    webcamExportOverlay: true,
     backstageMode: 'parallel',
     isBackstageEnabled: false,
     asioMode: false,
+    playOriginalTrackSegments: false,
     keyMap: getDefaultKeyMap(),
     exportSettings: {
       mp3Bitrate: 320,
