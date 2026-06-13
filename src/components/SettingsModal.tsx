@@ -58,6 +58,49 @@ const SettingsModal: React.FC = () => {
                 />
               </section>
               <section>
+                <label className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-3 block">Обработка при записи</label>
+                <div className="space-y-4 bg-zinc-800/50 p-4 rounded-xl border border-white/5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-xs font-bold text-white">Лимитер (защита от перегруза)</div>
+                      <div className="text-[10px] text-zinc-500">Срезает пики громкости перед записью на таймлайн</div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input 
+                        type="checkbox" 
+                        className="sr-only peer"
+                        checked={project?.audioSettings?.limiterEnabled ?? false}
+                        onChange={(e) => {
+                          const settings = project?.audioSettings || {};
+                          onProjectUpdate({ audioSettings: { ...settings, limiterEnabled: e.target.checked } });
+                        }}
+                      />
+                      <div className="w-9 h-5 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-500"></div>
+                    </label>
+                  </div>
+                  {project?.audioSettings?.limiterEnabled && (
+                    <div className="space-y-2 pt-2 border-t border-white/5">
+                      <div className="flex justify-between text-[10px] font-bold text-zinc-500 uppercase tracking-tighter">
+                        <span>Порог (Threshold)</span>
+                        <span>{project?.audioSettings?.limiterThreshold ?? -9} дБ</span>
+                      </div>
+                      <input 
+                        type="range" 
+                        min="-30" 
+                        max="0" 
+                        step="1"
+                        value={project?.audioSettings?.limiterThreshold ?? -9}
+                        onChange={(e) => {
+                          const settings = project?.audioSettings || {};
+                          onProjectUpdate({ audioSettings: { ...settings, limiterThreshold: parseFloat(e.target.value) } });
+                        }}
+                        className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
+                      />
+                    </div>
+                  )}
+                </div>
+              </section>
+              <section>
                 <label className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-3 block">Компенсация задержки</label>
                 <div className="space-y-4">
                   <div className="bg-zinc-800/50 border border-white/5 p-4 rounded-xl">

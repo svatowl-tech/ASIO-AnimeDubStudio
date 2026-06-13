@@ -255,6 +255,8 @@ export const useAudioEngine = (
 
         const gateEnabled = project?.audioSettings?.isNoiseGateEnabled ?? false;
         const gateThreshold = project?.audioSettings?.noiseGateThreshold ?? -45.0;
+        const limiterEnabled = project?.audioSettings?.limiterEnabled ?? false;
+        const limiterThreshold = project?.audioSettings?.limiterThreshold ?? -9.0;
 
         const res = await window.electronAPI.startAsioRecording(
           device, 
@@ -270,7 +272,9 @@ export const useAudioEngine = (
           audioDeviceName,
           project?.projectPath || null,
           gateEnabled,
-          gateThreshold
+          gateThreshold,
+          limiterEnabled,
+          limiterThreshold
         );
         
         if (!isMounted.current) return;
@@ -334,6 +338,23 @@ export const useAudioEngine = (
       const gainNode = audioCtx.createGain();
       const destination = audioCtx.createMediaStreamDestination();
       
+      const isLimiterEnabled = project?.audioSettings?.limiterEnabled ?? false;
+      const limiterThreshold = project?.audioSettings?.limiterThreshold ?? -9;
+      
+      if (isLimiterEnabled) {
+          const compressor = audioCtx.createDynamicsCompressor();
+          compressor.threshold.value = limiterThreshold;
+          compressor.knee.value = 0.0; // Hard knee for limiting
+          compressor.ratio.value = 20.0; // High ratio for limiter
+          compressor.attack.value = 0.002; // Very fast attack 2ms
+          compressor.release.value = 0.1; // 100ms release
+          
+          source.connect(compressor);
+          compressor.connect(gainNode);
+      } else {
+          source.connect(gainNode);
+      }
+
       // More aggressive fade-in (300ms) to hide hardware surges and AGC settling
       // We start at true zero and ramp up
       gainNode.gain.setValueAtTime(0, audioCtx.currentTime);

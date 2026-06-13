@@ -321,11 +321,13 @@ export const tauriAPI = {
     audioDevice: string | null = null,
     projectPath: string | null = null,
     gateEnabled: boolean = false,
-    gateThreshold: number = -45.0
+    gateThreshold: number = -45.0,
+    limiterEnabled: boolean = false,
+    limiterThreshold: number = -9.0
   ): Promise<BridgeResponse<void>> => {
     if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
     try {
-        console.log(`[Bridge] start_recording via event: device=${device}, host=${hostName}, channel=${channelIndex}, backstage=${backstageRecord}, projectPath=${projectPath}, gate=${gateEnabled} (${gateThreshold}dB)`);
+        console.log(`[Bridge] start_recording via event: device=${device}, host=${hostName}, limiter=${limiterEnabled} (${limiterThreshold}dB)`);
         
         await emitAction('start_recording', { 
             deviceName: device, 
@@ -341,7 +343,9 @@ export const tauriAPI = {
             audioDevice,
             projectPath,
             gateEnabled,
-            gateThreshold
+            gateThreshold,
+            limiterEnabled,
+            limiterThreshold
         });
         
         return { success: true };

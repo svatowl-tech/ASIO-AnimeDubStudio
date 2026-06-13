@@ -160,6 +160,9 @@ interface TrackRowProps {
   onSplitSegment?: (trackId: string, segmentId: string, time: number) => void;
   onDuplicateSegment?: (trackId: string, segmentId: string, newStartTime: number) => void;
   onSelectSegment?: (segmentId: string, multi: boolean) => void;
+  onCopySegments?: () => void;
+  onCutSegments?: () => void;
+  onPasteSegments?: () => void;
   onGlueSegments?: () => void;
   currentTimeRef: React.MutableRefObject<number>;
   timelineVisibleRange: { start: number; end: number };
@@ -177,6 +180,9 @@ const TrackRow = React.memo(({
   onSplitSegment, 
   onDuplicateSegment, 
   onSelectSegment, 
+  onCopySegments,
+  onCutSegments,
+  onPasteSegments,
   onGlueSegments,
   currentTimeRef,
   timelineVisibleRange
@@ -233,6 +239,9 @@ const TrackRow = React.memo(({
           onDuplicateSegment={onDuplicateSegment}
           isSelected={selectedSegmentIds.includes(segment.id)}
           onSelectSegment={onSelectSegment}
+          onCopySegments={onCopySegments}
+          onCutSegments={onCutSegments}
+          onPasteSegments={onPasteSegments}
           onGlueSegments={(selectedSegmentIds.length > 1 && selectedSegmentIds.includes(segment.id)) ? onGlueSegments : undefined}
           currentTimeRef={currentTimeRef}
           autoFadeIn={autoFadeIn}
@@ -272,6 +281,9 @@ export const AdvancedTimeline = ({
   onSelectSegment,
   onSelectBatchSegments,
   onClearSelection,
+  onCopySegments,
+  onCutSegments,
+  onPasteSegments,
   onGlueSegments,
   recordingPeaks,
   recordingStartTime,
@@ -306,6 +318,9 @@ export const AdvancedTimeline = ({
   onSelectSegment?: (segmentId: string, multi: boolean) => void,
   onSelectBatchSegments?: (segmentIds: string[], multi?: boolean) => void,
   onClearSelection?: () => void,
+  onCopySegments?: () => void,
+  onCutSegments?: () => void,
+  onPasteSegments?: () => void,
   onGlueSegments?: () => void,
   recordingPeaks?: number[],
   recordingStartTime?: number,
@@ -895,6 +910,9 @@ export const AdvancedTimeline = ({
                     onSplitSegment={onSplitSegment}
                     onDuplicateSegment={onDuplicateSegment}
                     onSelectSegment={onSelectSegment}
+                    onCopySegments={onCopySegments}
+                    onCutSegments={onCutSegments}
+                    onPasteSegments={onPasteSegments}
                     onGlueSegments={onGlueSegments}
                     currentTimeRef={currentTimeRef}
                     timelineVisibleRange={timelineVisibleRange}

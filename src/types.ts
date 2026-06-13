@@ -19,6 +19,8 @@ export interface AudioSettings {
   channelIndex?: number;
   asioMode?: boolean; // Experimental low-latency raw ASIO/WASAPI Exclusive mode
   host?: string; // ASIO, WASAPI, etc.
+  limiterEnabled?: boolean;
+  limiterThreshold?: number; // dB
   // New effects parameters
   noiseGateThreshold: number; // dB
   isNoiseGateEnabled: boolean;
@@ -190,7 +192,7 @@ declare global {
       requestPermissions: () => Promise<BridgeResponse<boolean>>;
       onExportProgress: (callback: (progress: number) => void) => () => void;
       getAudioDevices: () => Promise<BridgeResponse<{ id: string, name: string, host: string, sampleRate: number, channels: number }[]>>;
-      startAsioRecording: (device: string, sampleRate: number, bufferSize: number, trackId: string, segmentId: string, startTime: number, hostName?: string, channelIndex?: number, backstageRecord?: boolean, videoDevice?: string | null, audioDevice?: string | null, projectPath?: string | null, gateEnabled?: boolean, gateThreshold?: number) => Promise<BridgeResponse<void>>;
+      startAsioRecording: (device: string, sampleRate: number, bufferSize: number, trackId: string, segmentId: string, startTime: number, hostName?: string, channelIndex?: number, backstageRecord?: boolean, videoDevice?: string | null, audioDevice?: string | null, projectPath?: string | null, gateEnabled?: boolean, gateThreshold?: number, limiterEnabled?: boolean, limiterThreshold?: number) => Promise<BridgeResponse<void>>;
       checkCrashes: () => Promise<BridgeResponse<any[]>>;
       generateWaveformPeaks: (data: { filePath: string, points: number }) => Promise<BridgeResponse<number[]>>;
       getFileInfo: (filePath: string) => Promise<BridgeResponse<{ path: string, name: string, projectPath: string, size: number, duration: number }>>;

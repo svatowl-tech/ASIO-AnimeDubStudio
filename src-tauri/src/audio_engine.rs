@@ -153,6 +153,50 @@ impl NoiseGate {
     }
 }
 
+// --- LIMITER LOGIC ---
+
+struct Limiter {
+    threshold: f32,
+    release_coef: f32,
+    envelope: f32,
+    enabled: bool,
+}
+
+impl Limiter {
+    fn new(sample_rate: f32, threshold_db: f32, release_ms: f32, enabled: bool) -> Self {
+        let threshold = 10.0f32.powf(threshold_db / 20.0);
+        let release_coef = (-1.0 / (release_ms * 0.001 * sample_rate)).exp();
+        
+        Self {
+            threshold,
+            release_coef,
+            envelope: threshold,
+            enabled,
+        }
+    }
+
+    fn process(&mut self, sample: f32) -> f32 {
+        if !self.enabled {
+            return sample;
+        }
+
+        let abs_sample = sample.abs();
+        
+        if abs_sample > self.envelope {
+            self.envelope = abs_sample; // Instant attack to prevent clipping
+        } else {
+            self.envelope = self.threshold + (self.envelope - self.threshold) * self.release_coef;
+        }
+
+        let mut gain = 1.0;
+        if self.envelope > self.threshold {
+            gain = self.threshold / self.envelope;
+        }
+
+        sample * gain
+    }
+}
+
 // --- TAURI COMMANDS ---
 
 #[tauri::command]
@@ -237,10 +281,12 @@ pub async fn start_recording(
     project_path: Option<String>,
     gate_enabled: bool,
     gate_threshold: Option<f32>,
+    limiter_enabled: bool,
+    limiter_threshold: f32,
 ) -> Result<(), String> {
     log_debug(&format!("--- START_RECORDING INITIATED ---"));
-    log_debug(&format!("Device: {}, Host: {}, SF: {}, Ch: {}, Backstage: {}, Gate: {} ({}dB), Project: {:?}", 
-        device_name, host_name, sample_rate, channel_index, backstage_record, gate_enabled, gate_threshold.unwrap_or(-45.0), project_path));
+    log_debug(&format!("Device: {}, Host: {}, SF: {}, Ch: {}, Backstage: {}, Gate: {} ({}dB), Limiter: {} ({}dB), Project: {:?}", 
+        device_name, host_name, sample_rate, channel_index, backstage_record, gate_enabled, gate_threshold.unwrap_or(-45.0), limiter_enabled, limiter_threshold, project_path));
 
     // ... (keep system init code)
     #[cfg(windows)]
@@ -731,6 +777,13 @@ pub async fn start_recording(
                     150.0, // 150ms release
                     gate_enabled
                 );
+                
+                let mut limiter = Limiter::new(
+                    sample_rate as f32,
+                    limiter_threshold,
+                    150.0, // 150ms release
+                    limiter_enabled
+                );
 
                 // Counters for Smart Trimming (Start Delay + Fade In)
                 let mut skipped_samples = 0usize;
@@ -751,7 +804,9 @@ pub async fn start_recording(
                                 let sample_f32 = $cast_fn(sample);
                                 
                                 let mut process_and_push = |s: f32| {
-                                    let s = gate.process(s);
+                                    let mut s = gate.process(s);
+                                    s = limiter.process(s);
+                                    
                                     sum_squares += s * s;
                                     let abs_sample = s.abs();
                                     if abs_sample > peak { peak = abs_sample; }

@@ -401,16 +401,52 @@ pub async fn export_audio(
         emit_progress(completed_tasks, total_tasks, &app_handle);
     }
 
-    // Mix and encode
+    // Mix and encode robustly in batches if there are too many files (avoiding OS argument/path list length limits)
+    let mut current_files = processed_files.clone();
+    let mut pass = 0;
+    while current_files.len() > 30 {
+        let mut mixed_files = Vec::new();
+        let chunks: Vec<_> = current_files.chunks(30).collect();
+        for (chunk_idx, chunk) in chunks.into_iter().enumerate() {
+            let out_file = temp_dir.join(format!("mix_pass_{}_{}.wav", pass, chunk_idx));
+            let mut chunk_args = vec!["-y".to_string()];
+            for path in chunk {
+                chunk_args.push("-i".to_string());
+                chunk_args.push(path.to_str().unwrap().to_string());
+            }
+            if chunk.len() > 1 {
+                let filter = format!("amix=inputs={}:duration=longest:dropout_transition=0:normalize=0", chunk.len());
+                chunk_args.push("-filter_complex".to_string());
+                chunk_args.push(filter);
+            }
+            chunk_args.push("-c:a".to_string());
+            chunk_args.push("pcm_s16le".to_string());
+            chunk_args.push(out_file.to_str().unwrap().to_string());
+
+            let status = Command::new("ffmpeg")
+                .args(&chunk_args)
+                .output()
+                .await
+                .map_err(|e| format!("FFmpeg mix pass failed to execute: {}", e))?;
+
+            if !status.status.success() {
+                return Err(format!("FFmpeg intermediate mix failed: {}", String::from_utf8_lossy(&status.stderr)));
+            }
+            mixed_files.push(out_file);
+        }
+        current_files = mixed_files;
+        pass += 1;
+    }
+
     let mut mix_args = vec!["-y".to_string()];
     
-    for path in &processed_files {
+    for path in &current_files {
         mix_args.push("-i".to_string());
         mix_args.push(path.to_str().unwrap().to_string());
     }
 
-    if processed_files.len() > 1 {
-        let filter = format!("amix=inputs={}:duration=longest:dropout_transition=0:normalize=0", processed_files.len());
+    if current_files.len() > 1 {
+        let filter = format!("amix=inputs={}:duration=longest:dropout_transition=0:normalize=0", current_files.len());
         mix_args.push("-filter_complex".to_string());
         mix_args.push(filter);
     }

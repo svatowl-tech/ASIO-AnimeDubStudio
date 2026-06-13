@@ -19,6 +19,9 @@ interface UseTimelineHotkeysProps {
   handleToggleBackstage?: () => void;
   handleDeleteLastTake?: () => void;
   handleJoinSegments?: () => void;
+  handleCopySegments?: () => void;
+  handleCutSegments?: () => void;
+  handlePasteSegments?: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
 }
@@ -40,9 +43,30 @@ export function useTimelineHotkeys({
   handleToggleBackstage,
   handleDeleteLastTake,
   handleJoinSegments,
+  handleCopySegments,
+  handleCutSegments,
+  handlePasteSegments,
   onUndo,
   onRedo
 }: UseTimelineHotkeysProps) {
+  const callbacksRef = React.useRef({
+    togglePlay, stopRecording, discardRecording, handleSplitSegment,
+    handleSeek, addMarker, deleteSegments, handleToggleRecord,
+    handleToggleBackstage, handleDeleteLastTake, handleJoinSegments,
+    handleCopySegments, handleCutSegments, handlePasteSegments,
+    onUndo, onRedo
+  });
+
+  useEffect(() => {
+    callbacksRef.current = {
+      togglePlay, stopRecording, discardRecording, handleSplitSegment,
+      handleSeek, addMarker, deleteSegments, handleToggleRecord,
+      handleToggleBackstage, handleDeleteLastTake, handleJoinSegments,
+      handleCopySegments, handleCutSegments, handlePasteSegments,
+      onUndo, onRedo
+    };
+  });
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Don't trigger hotkeys if user is typing in an input or textarea
@@ -67,20 +91,20 @@ export function useTimelineHotkeys({
         );
       };
 
-      // Undo/Redo
+      // Undo/Redo/Copy/Cut/Paste
       if (e.ctrlKey || e.metaKey) {
         if (e.code === 'KeyZ') {
           e.preventDefault();
           if (e.shiftKey) {
-            onRedo?.();
+            callbacksRef.current.onRedo?.();
           } else {
-            onUndo?.();
+            callbacksRef.current.onUndo?.();
           }
           return;
         }
         if (e.code === 'KeyY') {
           e.preventDefault();
-          onRedo?.();
+          callbacksRef.current.onRedo?.();
           return;
         }
       }
@@ -90,7 +114,7 @@ export function useTimelineHotkeys({
         const selectedIds = selectedSegmentIds;
         if (selectedIds && selectedIds.length > 0) {
           e.preventDefault();
-          deleteSegments?.();
+          callbacksRef.current.deleteSegments?.();
           return; // Allow the operation to consume the event
         }
       }
@@ -106,19 +130,19 @@ export function useTimelineHotkeys({
         // Wait if recording is in the middle of starting!
         if (isStartingRecordingRef?.current) return;
         
-        if (isRecordingRef && isRecordingRef.current && stopRecording) {
-            stopRecording();
+        if (isRecordingRef && isRecordingRef.current && callbacksRef.current.stopRecording) {
+            callbacksRef.current.stopRecording();
         } else {
-            togglePlay();
+            callbacksRef.current.togglePlay();
         }
         return;
       }
 
       // Discard recording
       if (isPressed('discard_recording')) {
-        if (isRecordingRef.current && discardRecording) {
+        if (isRecordingRef.current && callbacksRef.current.discardRecording) {
           e.preventDefault();
-          discardRecording();
+          callbacksRef.current.discardRecording();
         }
         return;
       }
@@ -127,7 +151,7 @@ export function useTimelineHotkeys({
       if (isPressed('seek_prev_sub')) {
         e.preventDefault();
         const proj = projectRef.current;
-        if (proj && proj.subtitles.length > 0 && handleSeek) {
+        if (proj && proj.subtitles.length > 0 && callbacksRef.current.handleSeek) {
           const subs = proj.subtitles;
           const role = proj.selectedRole;
           const currentTime = currentTimeRef.current;
@@ -149,7 +173,7 @@ export function useTimelineHotkeys({
           // 2. Logic: If inside sub and > 0.5s from start, go to start
           const currentSub = currentIndex !== -1 ? subs[currentIndex] : null;
           if (currentSub && currentTime > currentSub.start + 0.5) {
-            handleSeek(currentSub.start);
+            callbacksRef.current.handleSeek(currentSub.start);
             window.dispatchEvent(new CustomEvent('syncScroll'));
             return;
           }
@@ -165,9 +189,9 @@ export function useTimelineHotkeys({
           if (targetIndex === -1 && currentIndex > 0) targetIndex = currentIndex - 1;
 
           if (targetIndex !== -1) {
-            handleSeek(subs[targetIndex].start);
+            callbacksRef.current.handleSeek(subs[targetIndex].start);
           } else {
-            handleSeek(0);
+            callbacksRef.current.handleSeek(0);
           }
           window.dispatchEvent(new CustomEvent('syncScroll'));
         }
@@ -178,7 +202,7 @@ export function useTimelineHotkeys({
       if (isPressed('seek_next_sub')) {
         e.preventDefault();
         const proj = projectRef.current;
-        if (proj && proj.subtitles.length > 0 && handleSeek) {
+        if (proj && proj.subtitles.length > 0 && callbacksRef.current.handleSeek) {
           const subs = proj.subtitles;
           const role = proj.selectedRole;
           const currentTime = currentTimeRef.current;
@@ -210,7 +234,7 @@ export function useTimelineHotkeys({
           }
 
           if (targetIndex !== -1) {
-            handleSeek(subs[targetIndex].start);
+            callbacksRef.current.handleSeek(subs[targetIndex].start);
           } else {
             // Seek to end
             let maxEnd = 0;
@@ -219,7 +243,7 @@ export function useTimelineHotkeys({
                 maxEnd = Math.max(maxEnd, s.startTime + s.duration);
               });
             });
-            handleSeek(maxEnd);
+            callbacksRef.current.handleSeek(maxEnd);
           }
           window.dispatchEvent(new CustomEvent('syncScroll'));
         }
@@ -229,42 +253,42 @@ export function useTimelineHotkeys({
       // Add marker
       if (isPressed('add_marker')) {
         e.preventDefault();
-        addMarker?.();
+        callbacksRef.current.addMarker?.();
         return;
       }
 
       // Toggle record
       if (isPressed('record_toggle')) {
         e.preventDefault();
-        handleToggleRecord?.();
+        callbacksRef.current.handleToggleRecord?.();
         return;
       }
 
       // Toggle backstage
       if (isPressed('backstage_toggle')) {
         e.preventDefault();
-        handleToggleBackstage?.();
+        callbacksRef.current.handleToggleBackstage?.();
         return;
       }
 
       // Delete last take
       if (isPressed('delete_take')) {
         e.preventDefault();
-        handleDeleteLastTake?.();
+        callbacksRef.current.handleDeleteLastTake?.();
         return;
       }
 
       // Join segments
       if (isPressed('join_segments')) {
         e.preventDefault();
-        handleJoinSegments?.();
+        callbacksRef.current.handleJoinSegments?.();
         return;
       }
 
       // Seek start
       if (isPressed('seek_start')) {
         e.preventDefault();
-        handleSeek?.(0);
+        callbacksRef.current.handleSeek?.(0);
         return;
       }
 
@@ -272,14 +296,14 @@ export function useTimelineHotkeys({
       if (isPressed('seek_end')) {
         e.preventDefault();
         const proj = projectRef.current;
-        if (proj && handleSeek) {
+        if (proj && callbacksRef.current.handleSeek) {
           let maxEnd = 0;
           proj.tracks.forEach(t => {
             t.segments.forEach(s => {
               maxEnd = Math.max(maxEnd, s.startTime + s.duration);
             });
           });
-          handleSeek(maxEnd);
+          callbacksRef.current.handleSeek(maxEnd);
         }
         return;
       }
@@ -291,7 +315,7 @@ export function useTimelineHotkeys({
         e.stopPropagation();
         
         // Always trigger split - the logic for what to split resides in handleSplitSegment
-        handleSplitSegment('', '', -1); 
+        callbacksRef.current.handleSplitSegment('', '', -1); 
         return;
       }
     };
@@ -306,17 +330,46 @@ export function useTimelineHotkeys({
       }
     };
 
+    const handleCopy = (e: ClipboardEvent) => {
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement || (activeElement as HTMLElement)?.isContentEditable) return;
+      if (callbacksRef.current.handleCopySegments && selectedSegmentIds && selectedSegmentIds.length > 0) {
+        e.preventDefault();
+        callbacksRef.current.handleCopySegments();
+      }
+    };
+
+    const handleCut = (e: ClipboardEvent) => {
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement || (activeElement as HTMLElement)?.isContentEditable) return;
+      if (callbacksRef.current.handleCutSegments && selectedSegmentIds && selectedSegmentIds.length > 0) {
+        e.preventDefault();
+        callbacksRef.current.handleCutSegments();
+      }
+    };
+
+    const handlePaste = (e: ClipboardEvent) => {
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement || (activeElement as HTMLElement)?.isContentEditable) return;
+      if (callbacksRef.current.handlePasteSegments) {
+        e.preventDefault();
+        callbacksRef.current.handlePasteSegments();
+      }
+    };
+
     window.addEventListener('keydown', handleKeyDown, { capture: true });
     window.addEventListener('keyup', handleKeyUp, { capture: true });
+    document.addEventListener('copy', handleCopy);
+    document.addEventListener('cut', handleCut);
+    document.addEventListener('paste', handlePaste);
     return () => {
       window.removeEventListener('keydown', handleKeyDown, { capture: true });
       window.removeEventListener('keyup', handleKeyUp, { capture: true });
+      document.removeEventListener('copy', handleCopy);
+      document.removeEventListener('cut', handleCut);
+      document.removeEventListener('paste', handlePaste);
     };
   }, [
-    projectRef, selectedSegmentIds, currentTimeRef, isRecordingRef,
-    togglePlay, stopRecording, discardRecording, handleSplitSegment, 
-    handleSeek, addMarker, deleteSegments, handleToggleRecord,
-    handleToggleBackstage, handleDeleteLastTake, handleJoinSegments, 
-    onUndo, onRedo
+    projectRef, selectedSegmentIds, currentTimeRef, isRecordingRef
   ]);
 }

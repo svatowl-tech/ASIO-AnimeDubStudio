@@ -43,6 +43,8 @@ enum DubstudioAction {
         project_path: Option<String>,
         gate_enabled: bool,
         gate_threshold: Option<f32>,
+        limiter_enabled: Option<bool>,
+        limiter_threshold: Option<f32>,
     },
     #[serde(rename_all = "camelCase")]
     StopRecording {},
@@ -121,7 +123,7 @@ fn main() {
                             DubstudioAction::StartRecording { 
                                 device_name, host_name, sample_rate, buffer_size, track_id, segment_id, 
                                 start_time, channel_index, backstage_record, video_device, 
-                                audio_device, project_path, gate_enabled, gate_threshold 
+                                audio_device, project_path, gate_enabled, gate_threshold, limiter_enabled, limiter_threshold
                             } => {
                                 println!("Rust received start_recording action for dev: {}", device_name);
                                 let state = app_handle.state::<AudioState>();
@@ -129,7 +131,7 @@ fn main() {
                                     app_handle.clone(), state, device_name, host_name, sample_rate, 
                                     buffer_size, track_id, segment_id, start_time, channel_index, 
                                     backstage_record, video_device, audio_device, project_path, 
-                                    gate_enabled, gate_threshold
+                                    gate_enabled, gate_threshold, limiter_enabled.unwrap_or(false), limiter_threshold.unwrap_or(-9.0)
                                 ).await;
 
                                 if res.is_ok() {

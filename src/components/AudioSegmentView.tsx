@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { GripVertical, Trash2, RotateCcw, Scissors, Edit3, Maximize, Volume2, Video } from 'lucide-react';
+import { GripVertical, Trash2, RotateCcw, Scissors, Edit3, Maximize, Volume2, Video, Copy, ClipboardPaste } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { AudioSegment } from '../types';
 import { VirtualizedWaveform } from './VirtualizedWaveform';
@@ -21,6 +21,9 @@ export const AudioSegmentView = React.memo(({
   onDuplicateSegment,
   isSelected,
   onSelectSegment,
+  onCopySegments,
+  onCutSegments,
+  onPasteSegments,
   onGlueSegments,
   currentTimeRef,
   autoFadeIn = 0,
@@ -39,6 +42,9 @@ export const AudioSegmentView = React.memo(({
   onDuplicateSegment?: (trackId: string, segmentId: string, newStartTime: number) => void,
   isSelected?: boolean,
   onSelectSegment?: (segmentId: string, multi: boolean) => void,
+  onCopySegments?: () => void,
+  onCutSegments?: () => void,
+  onPasteSegments?: () => void,
   onGlueSegments?: () => void,
   currentTimeRef?: React.MutableRefObject<number>,
   autoFadeIn?: number,
@@ -53,6 +59,9 @@ export const AudioSegmentView = React.memo(({
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    if (!isSelected && onSelectSegment) {
+      onSelectSegment(seg.id, false);
+    }
     setContextMenu({ x: e.clientX, y: e.clientY });
   };
 
@@ -378,6 +387,24 @@ export const AudioSegmentView = React.memo(({
           y={contextMenu.y}
           onClose={() => setContextMenu(null)}
           items={[
+            {
+              label: "Скопировать",
+              icon: <Copy className="w-3.5 h-3.5 text-zinc-400" />,
+              disabled: !onCopySegments,
+              onClick: () => onCopySegments?.()
+            },
+            {
+              label: "Вырезать",
+              icon: <Scissors className="w-3.5 h-3.5 text-zinc-400" />,
+              disabled: !onCutSegments,
+              onClick: () => onCutSegments?.()
+            },
+            {
+              label: "Вставить",
+              icon: <ClipboardPaste className="w-3.5 h-3.5 text-zinc-400" />,
+              disabled: !onPasteSegments,
+              onClick: () => onPasteSegments?.()
+            },
             {
               label: "Нормализовать громкость",
               icon: <Maximize className="w-3.5 h-3.5 text-emerald-400" />,

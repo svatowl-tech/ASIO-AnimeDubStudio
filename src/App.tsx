@@ -2187,6 +2187,78 @@ export default function App() {
     };
   }, [showWebcam, project?.audioSettings?.isBackstageEnabled, project?.audioSettings?.webcamDeviceId, handleToggleBackstage, isPopoutOpen]);
 
+  const [clipboardSegments, setClipboardSegments] = useState<any[]>([]);
+
+  const handleCopySegments = () => {
+      if (!project || selectedSegmentIds.length === 0) return;
+      const copied: any[] = [];
+      project.tracks.forEach(track => {
+        track.segments.forEach(seg => {
+          if (selectedSegmentIds.includes(seg.id)) {
+            copied.push({
+              trackId: track.id,
+              segment: { ...seg }
+            });
+          }
+        });
+      });
+      setClipboardSegments(copied);
+  };
+
+  const handleCutSegments = () => {
+      handleCopySegments();
+      deleteSegments();
+  };
+
+  const handlePasteSegments = () => {
+      if (!project || clipboardSegments.length === 0) return;
+      saveSnapshot();
+
+      const minStartTime = Math.min(...clipboardSegments.map(c => c.segment.startTime));
+      const pasteTime = currentTimeRef.current;
+      const timeOffset = pasteTime - minStartTime;
+
+      const newSegmentsMap = new Map<string, any[]>();
+      const newSelectedIds: string[] = [];
+
+      clipboardSegments.forEach(c => {
+        const newSeg = {
+          ...c.segment,
+          id: "seg_" + crypto.randomUUID(),
+          startTime: c.segment.startTime + timeOffset
+        };
+        
+        let targetTrackId = c.trackId;
+        const armedTrack = project.tracks.find(t => t.isArmed);
+        if (armedTrack && clipboardSegments.length === 1) {
+            targetTrackId = armedTrack.id;
+        } else if (!project.tracks.some(t => t.id === targetTrackId)) {
+            targetTrackId = project.tracks[0]?.id;
+        }
+
+        if (targetTrackId) {
+            if (!newSegmentsMap.has(targetTrackId)) newSegmentsMap.set(targetTrackId, []);
+            newSegmentsMap.get(targetTrackId)!.push(newSeg);
+            newSelectedIds.push(newSeg.id);
+        }
+      });
+
+      if (newSegmentsMap.size === 0) return;
+
+      const updatedTracks = project.tracks.map(t => {
+        if (newSegmentsMap.has(t.id)) {
+          return {
+            ...t,
+            segments: [...t.segments, ...(newSegmentsMap.get(t.id) || [])].sort((a, b) => a.startTime - b.startTime)
+          };
+        }
+        return t;
+      });
+
+      setProject({ ...project, tracks: updatedTracks });
+      setSelectedSegmentIds(newSelectedIds);
+  };
+
 
   useTimelineHotkeys({
     projectRef,
@@ -2205,6 +2277,9 @@ export default function App() {
     handleToggleBackstage,
     handleDeleteLastTake,
     handleJoinSegments,
+    handleCopySegments,
+    handleCutSegments,
+    handlePasteSegments,
     onUndo: undo,
     onRedo: redo
   });
@@ -3432,6 +3507,7 @@ export default function App() {
                       updateSegment(segmentId, updates, targetTrackId);
                     }
                   }}
+                  onSplitSegment={handleSplit}
                   onDeleteSegment={(trackId, segmentId) => deleteSegments([segmentId])}
                   onDuplicateSegment={handleDuplicateSegment}
                   onAddTrack={handleAddTrack}
@@ -3443,6 +3519,9 @@ export default function App() {
                   isRippleEnabled={isRippleEnabled}
                   onToggleRipple={() => setIsRippleEnabled(!isRippleEnabled)}
                   selectedSegmentIds={selectedSegmentIds}
+                  onCopySegments={handleCopySegments}
+                  onCutSegments={handleCutSegments}
+                  onPasteSegments={handlePasteSegments}
                   onSelectSegment={(segmentId, multi) => {
                     setSelectedSegmentIds(prev => {
                       if (multi) {

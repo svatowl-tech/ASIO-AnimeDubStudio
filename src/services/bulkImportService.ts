@@ -96,8 +96,8 @@ export class BulkImportService {
       const trimmed = line.trim();
       if (!trimmed) continue;
 
-      // Match line beginning with a number e.g., "1. Мы одну...", "1) Мы одну...", "170. VO_..."
-      const match = trimmed.match(/^\s*(\d+)\s*[\.\)]\s*(.*)$/);
+      // Robust matching of line beginning with optional prefix (Файл/File/etc), then possible colons/spaces, then the number, then separators, then translation text
+      const match = trimmed.match(/^(?:Файл|File|Line|Номер|No|Num|Clip)?[\s\d_:#\-\[\]\.\)]*?\b(\d+)\s*[:\.\)\]\-\s]+\s*(.*)$/i);
       if (match) {
         flush();
         currentNum = parseInt(match[1], 10);
@@ -110,10 +110,17 @@ export class BulkImportService {
     }
     flush();
 
-    // Helper to extract prefix number from filename
+    // Helper to extract prefix number from filename (with fallback to first number block in the filename)
     const extractFilenameNumber = (filename: string): number | null => {
-      const match = filename.match(/^\s*(\d+)/);
-      return match ? parseInt(match[1], 10) : null;
+      const leadingMatch = filename.match(/^\s*(\d+)/);
+      if (leadingMatch) {
+        return parseInt(leadingMatch[1], 10);
+      }
+      const generalMatch = filename.match(/\d+/);
+      if (generalMatch) {
+        return parseInt(generalMatch[0], 10);
+      }
+      return null;
     };
 
     // Sort files numerically by prefix number (critical for correct sequence)
