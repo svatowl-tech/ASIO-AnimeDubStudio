@@ -243,10 +243,69 @@ pub fn generate_waveform_peaks_internal(file_path: &str, points: usize) -> Resul
 }
 
 #[tauri::command]
-pub async fn generate_waveform_peaks(file_path: String, points: usize) -> Result<Vec<f32>, String> {
+pub async fn generate_waveform_peaks(app_handle: AppHandle, file_path: String, points: usize) -> Result<Vec<f32>, String> {
     log_debug(&format!("generate_waveform_peaks called for: {}, points: {}", file_path, points));
-    // Run intensive CPU work in a blocking task so we don't block the async runtime
-    tokio::task::spawn_blocking(move || {
-        generate_waveform_peaks_internal(&file_path, points)
-    }).await.map_err(|e| e.to_string())?
+    
+    let is_wav = Path::new(&file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase()) == Some("wav".to_string());
+        
+    let target_path = if is_wav {
+        file_path.clone()
+    } else {
+        let temp_dir = std::env::temp_dir();
+        let fname = Path::new(&file_path).file_stem().unwrap_or_default().to_string_lossy();
+        let random_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let temp_wav = temp_dir.join(format!("{}_{}_temp_peaks.wav", fname, random_id));
+        let temp_wav_str = temp_wav.to_str().unwrap().to_string();
+        
+        log_debug(&format!("Converting to temp wav for peaks: {}", temp_wav_str));
+        
+        let mut success = false;
+        if let Ok(cmd) = app_handle.shell().sidecar("ffmpeg") {
+            if let Ok(out) = cmd.args(&["-y", "-v", "quiet", "-i", &file_path, "-vn", "-ac", "1", "-ar", "48000", &temp_wav_str]).output().await {
+                if out.status.success() {
+                    success = true;
+                } else {
+                    log_debug(&format!("FFmpeg sidecar error: {}", String::from_utf8_lossy(&out.stderr)));
+                }
+            }
+        }
+        
+        if !success {
+           let fallback = tokio::process::Command::new("ffmpeg")
+               .args(&["-y", "-v", "quiet", "-i", &file_path, "-vn", "-ac", "1", "-ar", "48000", &temp_wav_str])
+               .output().await;
+               
+           if let Ok(fo) = fallback {
+               if fo.status.success() {
+                   success = true;
+               } else {
+                   log_debug(&format!("FFmpeg system error: {}", String::from_utf8_lossy(&fo.stderr)));
+               }
+           }
+        }
+        
+        if !success {
+            return Err("Failed to convert audio file to WAV for peak extraction".to_string());
+        }
+        
+        temp_wav_str
+    };
+
+    let target_for_task = target_path.clone();
+    let peaks_result = tokio::task::spawn_blocking(move || {
+        generate_waveform_peaks_internal(&target_for_task, points)
+    }).await.map_err(|e| e.to_string())??;
+    
+    // Cleanup temporary wav
+    if !is_wav {
+        let _ = std::fs::remove_file(target_path);
+    }
+    
+    Ok(peaks_result)
 }

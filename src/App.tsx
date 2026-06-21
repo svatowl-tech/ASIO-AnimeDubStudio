@@ -114,9 +114,11 @@ export default function App() {
 
   const handleSaveProject = async () => {
     if (!project || !project.projectPath) {
+      logger.warn("Save Project Attempted: Project not saved on disk or no projectPath.");
       alert("Проект не сохранен на диске. Используйте 'Создать проект'.");
       return;
     }
+    logger.info(`Saving project: ${project.name} at ${project.projectPath}`);
     const updatedProject = {
       ...project,
       uiState: {
@@ -136,8 +138,10 @@ export default function App() {
     if (window.electronAPI) {
       try {
         await window.electronAPI.saveProjectJson({ projectPath: project.projectPath, projectData: updatedProject });
+        logger.info("Project saved successfully.");
         alert("Проект сохранен!");
       } catch (error) {
+        logger.error(`Save Project Failed: ${error}`);
         alert(`Ошибка при сохранении проекта: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -630,7 +634,8 @@ export default function App() {
                 const segmentId = seg.id;
                 const trackId = track.id;
                 
-                window.electronAPI.generateWaveformPeaks({ filePath: seg.filePath, points: 1024 })
+                const pts = Math.max(1024, Math.floor((seg.fileDuration || seg.duration || 20) * 50));
+                window.electronAPI.generateWaveformPeaks({ filePath: seg.filePath, points: pts })
                   .then(res => {
                       if (res.success && res.data) {
                           setProject(p => {
@@ -916,7 +921,8 @@ export default function App() {
            duration = infoRes.data.duration || 0;
         }
         
-        const peaksRes = await window.electronAPI.generateWaveformPeaks({ filePath: finalPath, points: 1024 });
+        const pts = Math.max(1024, Math.floor((duration || 20) * 50));
+        const peaksRes = await window.electronAPI.generateWaveformPeaks({ filePath: finalPath, points: pts });
         if (peaksRes.success && peaksRes.data) {
            peaks = peaksRes.data;
         }
@@ -1117,33 +1123,32 @@ export default function App() {
           
           for (const recoveryInfo of res.data) {
             if (await safeConfirm(`Была обнаружена прерванная запись (${recoveryInfo.file_path}).\nВосстановить этот фрагмент на таймлайне?`)) {
-              // Extract peaks for the recovered file
+              let durToUse = 20;
+              if (window.electronAPI.getFileInfo) {
+                const info = await window.electronAPI.getFileInfo(recoveryInfo.file_path);
+                if (info.success && info.data) {
+                  durToUse = info.data.duration || 20;
+                }
+              }
+
+              const pts = Math.max(1024, Math.floor(durToUse * 50));
               const peaksRes = await window.electronAPI.generateWaveformPeaks({ 
                 filePath: recoveryInfo.file_path, 
-                points: 1024 
+                points: pts 
               });
               
               const recoveredSegment: AudioSegment = {
                 id: recoveryInfo.segment_id || Math.random().toString(36).substr(2, 9),
                 startTime: recoveryInfo.start_time,
-                duration: 0, // Will be updated if we can get duration
+                duration: durToUse, // Updated 
                 fileOffset: 0,
-                fileDuration: 0,
+                fileDuration: durToUse,
                 filePath: recoveryInfo.file_path,
                 blobUrl: `asset://${recoveryInfo.file_path}`,
                 waveform: peaksRes.success ? (peaksRes.data as any) : [],
                 gain: 1,
                 playbackRate: 1
               };
-
-              // Try to get duration
-              if (window.electronAPI.getFileInfo) {
-                const info = await window.electronAPI.getFileInfo(recoveryInfo.file_path);
-                if (info.success && info.data) {
-                  recoveredSegment.duration = info.data.duration;
-                  recoveredSegment.fileDuration = info.data.duration;
-                }
-              }
 
               setProject(prev => {
                 if (!prev) return null;
@@ -1194,12 +1199,17 @@ export default function App() {
 
   const handleSelectDocument = async () => {
     if (!window.electronAPI) return;
+    logger.info("Opening Document Selection dialog...");
     const bridgeResponse = await window.electronAPI.openFile({
       title: 'Select Document',
       filters: [{ name: 'Documents', extensions: ['txt'] }]
     });
-    if (!bridgeResponse.success || !bridgeResponse.data) return;
+    if (!bridgeResponse.success || !bridgeResponse.data) {
+      logger.info("Document selection cancelled.");
+      return;
+    }
     const fileData = bridgeResponse.data;
+    logger.info(`Selected document: ${fileData.path}`);
     
     let finalProjectRoot = project?.projectPath;
     if (!finalProjectRoot && fileData.path) {
@@ -1359,21 +1369,28 @@ export default function App() {
 
   const handleSelectReferenceAudio = async () => {
     if (!window.electronAPI) return;
+    logger.info("Opening Reference Audio Selection dialog...");
     const fileDataRes = await window.electronAPI.openFile({
       title: 'Select Reference Audio',
       filters: [{ name: 'Audio Files', extensions: ['mp3', 'wav', 'ogg', 'm4a'] }]
     });
-    if (!fileDataRes.success || !fileDataRes.data) return;
+    if (!fileDataRes.success || !fileDataRes.data) {
+      logger.info("Reference Audio selection cancelled.");
+      return;
+    }
     const fileData = fileDataRes.data;
+    logger.info(`Selected reference audio: ${fileData.path}`);
     
     let finalProjectRoot = project?.projectPath;
     if (!finalProjectRoot && fileData.path) {
+      logger.info("No active project, auto-creating folder for reference audio...");
       const isWin = fileData.path.includes('\\');
       const sep = isWin ? '\\' : '/';
       const lastSepIndex = fileData.path.lastIndexOf(sep);
       const fileDir = lastSepIndex !== -1 ? fileData.path.substring(0, lastSepIndex) : '';
       const nameWithoutExt = fileData.name.replace(/\.[^/.]+$/, "");
       finalProjectRoot = fileDir ? `${fileDir}${sep}${nameWithoutExt}_Project` : `${nameWithoutExt}_Project`;
+      logger.info(`Initializing project root at: ${finalProjectRoot}`);
       await window.electronAPI.initProject(finalProjectRoot);
     }
     
@@ -1387,16 +1404,23 @@ export default function App() {
         playOriginalTrackSegments: true
       }
     });
+    logger.info("Reference audio loaded and project state updated.");
   };
 
   const handleBulkImport = async () => {
     if (!window.electronAPI) return;
+    logger.info("Bulk Import: Requesting folder selection...");
     const folderPathRes = await window.electronAPI.openFolder();
-    if (!folderPathRes.success || !folderPathRes.data) return;
+    if (!folderPathRes.success || !folderPathRes.data) {
+      logger.info("Bulk Import: Folder selection cancelled.");
+      return;
+    }
     const folderPath = folderPathRes.data;
+    logger.info(`Bulk Import: Scanning folder ${folderPath}`);
 
     try {
       const { tracks, duration, subtitles } = await BulkImportService.importFolder(folderPath);
+      logger.info(`Bulk Import Successful: Scanned ${tracks.length} tracks and ${subtitles.length} subtitles.`);
       setProject(prev => {
         const baseProject = prev || {
           id: Math.random().toString(36).substr(2, 9),
@@ -1445,26 +1469,38 @@ export default function App() {
   const handleGameDubbingImport = async () => {
     if (!window.electronAPI) return;
     
+    logger.info("Game Dubbing Import: Starting folder selection for WAV files...");
     // 1. Choose folder of WAV files
     const folderPathRes = await window.electronAPI.openFolder();
-    if (!folderPathRes.success || !folderPathRes.data) return;
+    if (!folderPathRes.success || !folderPathRes.data) {
+      logger.info("Game Dubbing Import: Folder selection cancelled.");
+      return;
+    }
     const folderPath = folderPathRes.data;
+    logger.info(`Game Dubbing Import: Selected folder ${folderPath}`);
 
     // 2. Choose text document
+    logger.info("Game Dubbing Import: Requesting translation file selection...");
     const fileRes = await window.electronAPI.openFile({
       title: 'Выберите текстовый файл перевода',
       filters: [{ name: 'Text', extensions: ['txt'] }]
     });
-    if (!fileRes.success || !fileRes.data) return;
+    if (!fileRes.success || !fileRes.data) {
+      logger.info("Game Dubbing Import: Translation file selection cancelled.");
+      return;
+    }
     const fileData = fileRes.data;
+    logger.info(`Game Dubbing Import: Selected translation file ${fileData.path}`);
     if (!fileData.content) {
+      logger.warn("Game Dubbing Import: Translation file is empty.");
       alert("Выбранный файл перевода пуст.");
       return;
     }
 
     try {
+      logger.info("Game Dubbing Import: Processing data via BulkImportService...");
       const { tracks, duration, subtitles } = await BulkImportService.importGameDubbing(folderPath, fileData.content);
-      
+      logger.info(`Game Dubbing Import Successful: Found ${tracks.length} tracks.`);
       // Auto-generate a blank master video of the exact project duration to neutralize non-video playback limits
       const blankVideoName = "blank_master_video.mp4";
       const blankVideoPath = `${folderPath}/${blankVideoName}`.replace(/\\/g, '/');
@@ -1527,7 +1563,12 @@ export default function App() {
   };
 
   const handleBatchExport = async () => {
-    if (!project || !project.projectPath || !window.electronAPI) return;
+    if (!project || !project.projectPath || !window.electronAPI) {
+      logger.warn("Batch Export cancelled: Project or API not ready.");
+      return;
+    }
+    
+    logger.info(`Batch Export started for project: ${project.name}`);
 
     // 1. Identify original reference track
     const origTrack = project.tracks.find(t => t.name === 'Оригинал' || t.name === 'Original');
@@ -1834,7 +1875,8 @@ export default function App() {
     const promises = project.tracks.flatMap(track => 
       track.segments.filter(seg => !seg.waveform && seg.filePath).map(async seg => {
         try {
-          const res = await window.electronAPI.generateWaveformPeaks({ filePath: seg.filePath!, points: 1024 });
+          const pts = Math.max(1024, Math.floor((seg.fileDuration || seg.duration || 20) * 50));
+          const res = await window.electronAPI.generateWaveformPeaks({ filePath: seg.filePath!, points: pts });
           if (res.success && res.data) {
             return { trackId: track.id, segId: seg.id, waveform: res.data };
           }
@@ -2323,7 +2365,7 @@ export default function App() {
 
     const exportTracks = project.tracks.filter(t => {
       if (t.name === 'Оригинал') return includeOriginalAudio;
-      return true; // Dubs track
+      return !t.isMuted; // Only include unmuted tracks by default for export if requested
     }).map(track => ({
       id: track.id,
       volume: track.volume,
@@ -2344,7 +2386,7 @@ export default function App() {
     const hasSegments = exportTracks.some(t => t.segments.length > 0);
 
     if (!hasSegments) {
-      alert("No recorded segments to export.");
+      alert("Нет сегментов (или все дорожки заглушены) для экспорта.");
       return;
     }
     
@@ -2422,6 +2464,136 @@ export default function App() {
         setIsExporting(false);
       }
       return;
+    }
+  };
+
+  const handleImportAudioTrack = async () => {
+    logger.info("handleImportAudioTrack: Start");
+    if (!project || !project.projectPath) {
+      logger.warn("handleImportAudioTrack: No active project or projectPath.");
+      alert("Настройте или сохраните проект перед импортом аудио.");
+      return;
+    }
+
+    if (!window.electronAPI) {
+      logger.error("handleImportAudioTrack: window.electronAPI is missing.");
+      return;
+    }
+
+    logger.info("handleImportAudioTrack: Opening file dialog...");
+    const res = await window.electronAPI.openFile({
+      title: 'Выберите аудиофайл для импорта',
+      filters: [
+        { name: 'Audio Files', extensions: ['wav', 'mp3', 'flac', 'm4a', 'aac', 'ogg'] }
+      ]
+    });
+
+    logger.info(`handleImportAudioTrack: openFile response success=${res.success}, hasData=${!!res.data}`);
+    
+    if (!res.success || !res.data) {
+      logger.info("handleImportAudioTrack: User cancelled or selection failed.");
+      return;
+    }
+
+    // Handle both { path: '...' } and '...' (if it returns path directly)
+    const filePath = typeof res.data === 'string' ? res.data : res.data.path;
+    const fileName = (typeof res.data === 'object' ? res.data.name : null) || filePath?.split(/[/\\]/).pop() || 'Imported Track';
+
+    if (!filePath) {
+      logger.error("handleImportAudioTrack: Could not determine file path from response.", res.data);
+      return;
+    }
+
+    logger.info(`handleImportAudioTrack: Proceeding with filePath=${filePath}`);
+
+    setIsExporting(true);
+    setExportOperation("Importing audio...");
+
+    try {
+      logger.info(`Starting Import Audio Track: ${filePath}`);
+      // Get duration
+      const infoRes = await window.electronAPI.getFileInfo(filePath);
+      if (!infoRes.success || !infoRes.data) {
+        logger.error(`Import Error: Failed to get file info for ${filePath}`);
+        throw new Error("Не удалось получить информацию о длительности файла.");
+      }
+
+      let duration = infoRes.data.duration;
+      
+      if (!duration || duration <= 0) {
+          logger.info(`Duration not provided by backend, falling back to HTMLAudioElement for ${filePath}`);
+          const fileUrl = getSafeFileUrl(filePath);
+          duration = await new Promise<number>((resolve) => {
+              const audioInfo = new Audio();
+              audioInfo.onloadedmetadata = () => {
+                  resolve(audioInfo.duration);
+              };
+              audioInfo.onerror = (e) => {
+                  logger.error(`Failed to load audio metadata for ${filePath}`, e);
+                  resolve(0); // Cannot get duration
+              };
+              audioInfo.src = fileUrl;
+          });
+      }
+      
+      if (!duration) {
+          throw new Error("Не удалось получить информацию о длительности файла (" + filePath + ").");
+      }
+
+      logger.info(`Imported file info: duration=${duration}s`);
+
+      // Generate waveform peaks
+      let waveform: number[] | undefined;
+      try {
+        logger.info(`Generating waveform for: ${filePath}`);
+        const pts = Math.max(1000, Math.floor(duration * 50));
+        const peaksRes = await window.electronAPI.generateWaveformPeaks({ filePath, points: pts });
+        if (peaksRes.success && peaksRes.data) {
+          waveform = peaksRes.data;
+          logger.info(`Waveform generated successfully: ${waveform.length} points`);
+        } else {
+          logger.warn(`Waveform extraction failed: ${peaksRes.error || "Unknown error"}`);
+        }
+      } catch (e) {
+        logger.warn(`Non-critical: Could not generate waveform for ${filePath}: ${e}`);
+      }
+
+      // Create new segment
+      const newSegment: AudioSegment = {
+        id: Math.random().toString(36).substr(2, 9),
+        startTime: 0,
+        duration: duration,
+        filePath: filePath,
+        blobUrl: getSafeFileUrl(filePath),
+        fileOffset: 0,
+        fileDuration: duration,
+        gain: 1.0,
+        playbackRate: 1.0,
+        text: fileName,
+        waveform
+      };
+
+      // Create new track
+      const newTrack: AudioTrack = {
+        id: Math.random().toString(36).substr(2, 9),
+        name: fileName,
+        segments: [newSegment],
+        volume: 1.0,
+        isMuted: false,
+        isSolo: false
+      };
+
+      setProject({
+        ...project,
+        tracks: [...project.tracks, newTrack]
+      });
+      
+      logger.info(`Imported audio track: ${fileName} (${duration}s)`);
+    } catch (err) {
+      alert(`Ошибка при импорте: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsExporting(false);
+      setExportOperation('');
     }
   };
 
@@ -2881,6 +3053,7 @@ export default function App() {
         setShowFixImport={setShowFixImport}
         handleBulkImport={handleBulkImport}
         handleGameDubbingImport={handleGameDubbingImport}
+        handleImportAudio={handleImportAudioTrack}
         isDesktop={isDesktop}
         handleExport={(format) => {
           setPendingExportFormat(format);

@@ -16,16 +16,29 @@ pub struct FileInfo {
     pub path: String,
     pub name: String,
     pub size: u64,
+    pub duration: Option<f64>,
 }
 
 #[tauri::command]
 pub fn get_file_info(path: String) -> Result<FileInfo, String> {
     let p = Path::new(&path);
     let metadata = fs::metadata(p).map_err(|e| e.to_string())?;
+    
+    let mut duration = None;
+    if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+        if ext.to_lowercase() == "wav" {
+            if let Ok(reader) = hound::WavReader::open(p) {
+                let spec = reader.spec();
+                duration = Some(reader.duration() as f64 / spec.sample_rate as f64);
+            }
+        }
+    }
+
     Ok(FileInfo {
         path: path.clone(),
         name: p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string(),
         size: metadata.len(),
+        duration,
     })
 }
 

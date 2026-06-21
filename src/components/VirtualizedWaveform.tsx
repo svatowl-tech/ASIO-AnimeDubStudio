@@ -88,9 +88,6 @@ export const VirtualizedWaveform = ({
     
     // Find the maximum peak for normalization
     let maxPeak = 0.0001; 
-    // Optimization: only search visible peaks for max to avoid O(N) on huge arrays, 
-    // or just assume max=1 since they are normalized to 0..1 from rust!
-    // Wait, let's keep the existing loop but it's okay because 75k iterations in TS takes <1ms.
     for(let i = 0; i < peaks.length; i++) { 
         if (peaks[i] > maxPeak) maxPeak = peaks[i]; 
     }
@@ -100,24 +97,41 @@ export const VirtualizedWaveform = ({
     ctx.fillStyle = color;
     
     const totalPeaks = peaks.length;
-    // Note: duration here is the file's duration, not the segment's duration!
-    // But passed duration might be segment's fileDuration.
     const peaksPerSecond = totalPeaks / duration;
     
-    // file map: local offset + segmentOffset
-    const startIdx = Math.floor((drawStart + segmentOffset) * peaksPerSecond);
-    const endIdx = Math.ceil((drawEnd + segmentOffset) * peaksPerSecond);
+    const pixelWidth = safeWidth; // Physical canvas width before high-DPI scaling
+    const barWidth = 2; // Width of each peak bar
+    const gap = 1; // Gap between bars
+    const step = barWidth + gap; // Step in pixels
     
-    const peakWidth = zoom / peaksPerSecond;
-    const barWidth = Math.max(1, peakWidth - 0.5);
-    
-    for (let i = Math.max(0, startIdx); i < Math.min(totalPeaks, endIdx); i++) {
-      const normalizedPeak = peaks[i] * scaleFactor;
+    for (let x = 0; x < pixelWidth; x += step) {
+      // Find the range of time representing this column of pixels
+      const colTimeStart = drawStart + (x / zoom);
+      const colTimeEnd = drawStart + ((x + step) / zoom);
+      
+      const idxStart = Math.floor((colTimeStart + segmentOffset) * peaksPerSecond);
+      const idxEnd = Math.ceil((colTimeEnd + segmentOffset) * peaksPerSecond);
+      
+      let maxVal = 0.0;
+      const actualStart = Math.max(0, idxStart);
+      const actualEnd = Math.min(totalPeaks, idxEnd);
+      
+      if (actualEnd > actualStart) {
+        for (let i = actualStart; i < actualEnd; i++) {
+          if (peaks[i] > maxVal) {
+            maxVal = peaks[i];
+          }
+        }
+      } else {
+        // Fallback to the closest single peak if the range is empty (due to high zoom level)
+        const idx = Math.floor((colTimeStart + segmentOffset) * peaksPerSecond);
+        if (idx >= 0 && idx < totalPeaks) {
+          maxVal = peaks[idx];
+        }
+      }
+      
+      const normalizedPeak = maxVal * scaleFactor;
       const visualPeak = Math.pow(normalizedPeak, 0.6); 
-
-      // x relative to the canvas drawStart
-      const localTime = (i / peaksPerSecond) - segmentOffset;
-      const x = (localTime - drawStart) * zoom;
       
       const h = Math.max(1, visualPeak * height);
       const y = (height - h) / 2;

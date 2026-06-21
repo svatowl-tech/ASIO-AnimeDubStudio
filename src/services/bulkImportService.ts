@@ -1,4 +1,5 @@
 import { Project, AudioTrack, AudioSegment, SubtitleLine } from '../types';
+import { getSafeFileUrl } from '../lib/utils';
 
 export class BulkImportService {
   static async importFolder(folderPath: string): Promise<{ tracks: AudioTrack[], duration: number, subtitles: SubtitleLine[] }> {
@@ -32,8 +33,7 @@ export class BulkImportService {
 
     files.forEach(file => {
       const segmentId = Math.random().toString(36).substr(2, 9);
-      const normalizedPath = file.path.replace(/\\/g, '/');
-      const safeUrl = /^[a-zA-Z]:/.test(normalizedPath) ? `safe-file:///${normalizedPath}` : `safe-file://${normalizedPath}`;
+      const safeUrl = getSafeFileUrl(file.path) || '';
 
       const segment: AudioSegment = {
         id: segmentId,
@@ -157,8 +157,7 @@ export class BulkImportService {
       const text = (num !== null && translations.has(num)) ? translations.get(num)! : file.name;
 
       const segmentId = Math.random().toString(36).substr(2, 9);
-      const normalizedPath = file.path.replace(/\\/g, '/');
-      const safeUrl = /^[a-zA-Z]:/.test(normalizedPath) ? `safe-file:///${normalizedPath}` : `safe-file://${normalizedPath}`;
+      const safeUrl = getSafeFileUrl(file.path) || '';
 
       const segment: AudioSegment = {
         id: segmentId,

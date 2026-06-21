@@ -22,6 +22,117 @@ const genId = () => Math.random().toString(36).substring(2, 11);
 
 const listenerRegistry = new Set<() => void>();
 
+function resolveStudioWorkspacePaths(projectData: any, actualDubPath: string): any {
+  if (!projectData) return projectData;
+  
+  const localDub = actualDubPath.replace(/\\/g, '/');
+  const lastSlash = localDub.lastIndexOf('/');
+  const localDubDir = lastSlash !== -1 ? localDub.substring(0, lastSlash) : '';
+  
+  let workspaceRootReplacement = '';
+  
+  // Find a string in projectData that starts with '/StudioWorkspace/'
+  const findStudioWorkspacePath = (obj: any): string | null => {
+    if (!obj) return null;
+    if (typeof obj === 'string' && obj.startsWith('/StudioWorkspace/')) {
+      return obj;
+    }
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        const r = findStudioWorkspacePath(item);
+        if (r) return r;
+      }
+    } else if (typeof obj === 'object') {
+      for (const key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+          const r = findStudioWorkspacePath(obj[key]);
+          if (r) return r;
+        }
+      }
+    }
+    return null;
+  };
+  
+  const samplePath = findStudioWorkspacePath(projectData);
+  if (samplePath) {
+    const sampleSegs = samplePath.split('/');
+    const localSegs = localDub.split('/');
+    
+    let bestMatchLen = 0;
+    let localMatchIdx = -1;
+    
+    for (let i = 1; i < sampleSegs.length - 1; i++) {
+      for (let j = 0; j < localSegs.length - 1; j++) {
+        if (sampleSegs[i].toLowerCase() === localSegs[j].toLowerCase()) {
+          let matchLen = 0;
+          while (i + matchLen < sampleSegs.length - 1 && 
+                 j + matchLen < localSegs.length - 1 && 
+                 sampleSegs[i + matchLen].toLowerCase() === localSegs[j + matchLen].toLowerCase()) {
+            matchLen++;
+          }
+          if (matchLen > bestMatchLen) {
+            bestMatchLen = matchLen;
+            localMatchIdx = j;
+          }
+        }
+      }
+    }
+    
+    if (bestMatchLen > 0 && localMatchIdx !== -1) {
+      workspaceRootReplacement = localSegs.slice(0, localMatchIdx).join('/');
+    } else {
+      const banzajIdx = localDub.toLowerCase().indexOf('/banzaj');
+      if (banzajIdx !== -1) {
+        workspaceRootReplacement = localDub.substring(0, banzajIdx);
+      } else {
+        const parts = localDubDir.split('/');
+        if (parts.length > 3) {
+          workspaceRootReplacement = parts.slice(0, parts.length - 3).join('/');
+        } else if (parts.length > 1) {
+          workspaceRootReplacement = parts[0];
+        }
+      }
+    }
+  }
+  
+  if (workspaceRootReplacement) {
+    if (workspaceRootReplacement.endsWith('/')) {
+      workspaceRootReplacement = workspaceRootReplacement.slice(0, -1);
+    }
+    console.log(`[Bridge] Auto-detected /StudioWorkspace replacement: ${workspaceRootReplacement}`);
+    
+    const replacePaths = (obj: any): any => {
+      if (!obj) return obj;
+      if (typeof obj === 'string') {
+        if (obj.startsWith('/StudioWorkspace/')) {
+          const replaced = obj.replace(/^\/StudioWorkspace\/?/, workspaceRootReplacement + '/');
+          return replaced.replace(/\\/g, '/');
+        }
+        return obj;
+      }
+      if (Array.isArray(obj)) {
+        return obj.map(replacePaths);
+      }
+      if (typeof obj === 'object') {
+        const copy: any = {};
+        for (const key in obj) {
+          if (Object.prototype.hasOwnProperty.call(obj, key)) {
+            copy[key] = replacePaths(obj[key]);
+          }
+        }
+        return copy;
+      }
+      return obj;
+    };
+    
+    const resolvedData = replacePaths(projectData);
+    resolvedData.projectPath = localDubDir;
+    return resolvedData;
+  }
+  
+  return projectData;
+}
+
 /**
  * Emit an action and wait for the result via the dubstudio-result event.
  * This decouples the invocation from the response, avoiding callback ID errors.
@@ -219,11 +330,14 @@ export const tauriAPI = {
         }
 
         const content = await invoke<string>('read_text_file', { path: actualPath });
-        const projectData = JSON.parse(content);
+        let projectData = JSON.parse(content);
         
         // Update projectPath to the context of the .dub file
         const projectPath = actualPath.replace(/\\/g, '/').substring(0, actualPath.replace(/\\/g, '/').lastIndexOf('/'));
         projectData.projectPath = projectPath;
+
+        // Auto-resolve studio workspace path references to the local structure
+        projectData = resolveStudioWorkspacePaths(projectData, actualPath);
 
         return {
            success: true,
@@ -754,7 +868,15 @@ export const tauriAPI = {
         });
         if (!path || Array.isArray(path)) return { success: false, error: 'Cancelled' };
         
-        const content = await invoke<string>('read_text_file', { path });
+        let content = undefined;
+        try {
+            content = await invoke<string>('read_text_file', { path });
+        } catch (e) {
+            // Suppress binary warning for audio/video files
+            if (!/\.(wav|mp3|flac|m4a|aac|ogg|mp4|mkv|avi|mov|webm)$/i.test(path)) {
+                console.warn("[Bridge] openFile could not read text file:", e);
+            }
+        }
         const name = path.split(/[/\\]/).pop() || '';
 
         return { success: true, data: { path, name, content } };

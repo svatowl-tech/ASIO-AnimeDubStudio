@@ -137,7 +137,7 @@ pub async fn merge_segments(
     run_ffmpeg_with_progress(app_handle.clone(), args, "Merging Segments".to_string(), Some(total_duration)).await?;
 
     // 4. Generate Peaks for the new merged file
-    let peaks = generate_waveform_peaks(output_path.clone(), 1024).await?;
+    let peaks = generate_waveform_peaks(app_handle.clone(), output_path.clone(), 1024).await?;
 
     // 5. Update Database (Transaction)
     // Delete old segments and insert the new merged one

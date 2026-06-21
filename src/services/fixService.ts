@@ -60,6 +60,34 @@ export class FixService {
           comment,
           isResolved: false
         });
+        continue;
+      }
+
+      // Check for Line Number + Comment pattern (Common in Game Voiceover)
+      // Matches: "94 перепеши...", "113 переслушай..."
+      const lineNumMatch = trimmedLine.match(/^(\d{1,5})(?:\s+)?(?:\.|\:|\-)?\s+(.+)$/i);
+      if (lineNumMatch) {
+        const lineNumStr = lineNumMatch[1];
+        const lineNum = parseInt(lineNumStr, 10);
+        const comment = lineNumMatch[2].trim();
+
+        // Try to find segment by ID or index
+        let targetSub = subtitles.find(s => s.id === lineNumStr || s.id === `L${lineNumStr.padStart(4, '0')}`);
+        
+        if (!targetSub && lineNum > 0 && lineNum <= subtitles.length) {
+            targetSub = subtitles[lineNum - 1]; // Assume 1-based index
+        }
+
+        if (targetSub) {
+          fixes.push({
+            id: Math.random().toString(36).substr(2, 9),
+            segmentId: targetSub.id,
+            timestamp: targetSub.start,
+            actor: targetSub.role || currentActor,
+            comment,
+            isResolved: false
+          });
+        }
       }
     }
 

@@ -17,6 +17,7 @@ interface TopHeaderProps {
   setShowFixImport: (v: boolean) => void;
   handleBulkImport: () => void;
   handleGameDubbingImport?: () => void;
+  handleImportAudio?: () => void;
   isDesktop: boolean;
   handleExport: (format: 'WAV' | 'MP3' | 'FLAC') => void;
   handleBatchExport: () => void;
@@ -101,6 +102,7 @@ export const TopHeader: React.FC<TopHeaderProps> = (props) => {
       setShowFixImport={props.setShowFixImport}
       handleBulkImport={props.handleBulkImport}
       handleGameDubbingImport={props.handleGameDubbingImport}
+      handleImportAudio={props.handleImportAudio}
       isDesktop={props.isDesktop}
       handleExport={props.handleExport}
       handleBatchExport={props.handleBatchExport}

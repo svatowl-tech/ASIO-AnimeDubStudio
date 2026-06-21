@@ -1,7 +1,31 @@
 import { useState } from 'react';
 import { Project } from '../types';
 import { logger } from '../lib/logger';
-import { getGlobalAudioSettings } from '../lib/utils';
+import { getGlobalAudioSettings, getSafeFileUrl } from '../lib/utils';
+
+const sanitizeProjectData = (p: Project): Project => {
+  if (!p || !p.tracks) return p;
+  return {
+    ...p,
+    tracks: p.tracks.map(track => ({
+      ...track,
+      segments: track.segments.map(seg => {
+        let cleanUrl = seg.blobUrl;
+        if (seg.filePath) {
+          cleanUrl = getSafeFileUrl(seg.filePath) || cleanUrl;
+        } else if (cleanUrl && cleanUrl.startsWith('safe-file://')) {
+          const extractedPath = cleanUrl.replace(/^safe-file:\/\/\/?/, '');
+          const decoded = decodeURIComponent(extractedPath);
+          cleanUrl = getSafeFileUrl(decoded) || cleanUrl;
+        }
+        return {
+          ...seg,
+          blobUrl: cleanUrl
+        };
+      })
+    }))
+  };
+};
 
 export const useProject = () => {
   const [project, setProject] = useState<Project | null>(null);
@@ -60,7 +84,7 @@ export const useProject = () => {
         logger.info(`Selected project file: ${filePath}`);
         const projectDataRes = await window.electronAPI.loadProjectJson(filePath);
         if (projectDataRes.success && projectDataRes.data) {
-          const projectData = projectDataRes.data;
+          const projectData = sanitizeProjectData(projectDataRes.data);
           logger.info(`Project loaded: ${projectData.name}`);
           setProject(projectData);
           setRecentProjects(prev => [...prev, { name: projectData.name, path: projectData.projectPath || filePath }]);
@@ -98,7 +122,7 @@ export const useProject = () => {
       logger.info(`Loading project from fixed path: ${path}`);
       const projectDataRes = await window.electronAPI.loadProjectJson(path);
       if (projectDataRes.success && projectDataRes.data) {
-        const projectData = projectDataRes.data;
+        const projectData = sanitizeProjectData(projectDataRes.data);
         logger.info(`Project loaded: ${projectData.name}`);
         setProject(projectData);
       }

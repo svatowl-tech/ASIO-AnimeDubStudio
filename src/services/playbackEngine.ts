@@ -221,12 +221,13 @@ export class PlaybackEngine {
         let arrayBuffer: ArrayBuffer;
         
         if (window.electronAPI && filePath) {
-            const res = await window.electronAPI.readBinaryFile(filePath);
-            if (res.success && res.data) {
-                arrayBuffer = (res.data as Uint8Array).buffer;
-            } else {
-                throw new Error("readBinaryFile failed: " + res.error);
+            // Using fetch with the safe URL is much more stable than IPC readBinaryFile for large files (30MB+ FLAC/WAV).
+            // Tauri converts file paths into asset://localhost/ paths that fetch() can natively handle without JSON serialization overhead.
+            const response = await fetch(url);
+            if (!response.ok) {
+              throw new Error(`HTTP error! status: ${response.status}`);
             }
+            arrayBuffer = await response.arrayBuffer();
         } else {
             const response = await fetch(url);
             if (!response.ok) {

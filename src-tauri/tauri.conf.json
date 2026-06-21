@@ -11,7 +11,7 @@
   },
   "app": {
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' asset: https: http://asset.localhost http://ipc.localhost; img-src 'self' asset: https: data: http://asset.localhost; media-src 'self' asset: https: blob: http://asset.localhost; connect-src 'self' asset: https: http://ipc.localhost http://asset.localhost;",
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' asset: https: blob: http://asset.localhost http://ipc.localhost; img-src 'self' asset: https: data: http://asset.localhost; media-src 'self' asset: https: blob: http://asset.localhost; connect-src 'self' asset: https: blob: http://ipc.localhost http://asset.localhost http://tauri.localhost;",
       "assetProtocol": {
         "enable": true,
         "scope": ["**", "C:\\**", "\\\\?\\**"]

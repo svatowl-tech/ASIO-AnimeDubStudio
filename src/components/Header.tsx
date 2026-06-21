@@ -42,6 +42,7 @@ interface HeaderProps {
   setShowFixImport?: (show: boolean) => void;
   handleBulkImport: () => void;
   handleGameDubbingImport?: () => void;
+  handleImportAudio?: () => void;
   isDesktop: boolean;
   handleExport: (format: 'WAV' | 'MP3' | 'FLAC') => void;
   handleBatchExport: () => void;
@@ -126,6 +127,7 @@ const Header: React.FC<HeaderProps> = ({
   setShowFixImport,
   handleBulkImport,
   handleGameDubbingImport,
+  handleImportAudio,
   isDesktop,
   handleExport,
   handleBatchExport,
@@ -147,6 +149,7 @@ const Header: React.FC<HeaderProps> = ({
     { icon: <FileText className="w-5 h-5 text-blue-400" />, title: "Документ", description: "Импорт текстового документа", onClick: () => isDesktop && handleSelectDocument() },
     { icon: <Music className="w-5 h-5 text-amber-400" />, title: "Аудиореференс", description: "Выбрать референсный аудиофайл", onClick: () => isDesktop && handleSelectReferenceAudio() },
     { icon: <FileText className="w-5 h-5 text-green-400" />, title: "Быстрый импорт", description: "Вставить текст из буфера обмена", onClick: () => setShowQuickImport(true) },
+    { icon: <Music className="w-5 h-5 text-emerald-500" />, title: "Импорт аудио", description: "Импорт готового аудио на новую дорожку", onClick: handleImportAudio },
     { icon: <Layers className="w-5 h-5 text-indigo-400" />, title: "Пакетный импорт", description: "Импорт всех аудиофайлов из папки", onClick: handleBulkImport },
     { icon: <Layers className="w-5 h-5 text-emerald-400" />, title: "Импорт игровой озвучки", description: "Выбрать папку реплик + TXT перевод", onClick: handleGameDubbingImport || (() => {}) },
   ];
