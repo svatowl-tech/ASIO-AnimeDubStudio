@@ -23,7 +23,7 @@ export interface AudioSettings {
   limiterThreshold?: number; // dB
   // New effects parameters
   noiseGateThreshold: number; // dB
-  isNoiseGateEnabled: boolean;
+  isNoiseGateEnabled?: boolean;
   compressorThreshold: number; // dB
   compressorRatio: number;
   highPassFrequency: number; // Hz
@@ -35,8 +35,8 @@ export interface AudioSettings {
   webcamBitrate?: number; // in bits per second
   webcamExportOverlay?: boolean; // Whether to export with overlay or just raw backstage video
   backstageFolderPath?: string;
-  backstageMode: 'parallel' | 'manual';
-  isBackstageEnabled: boolean;
+  isBackstageEnabled?: boolean;
+  backstageMode?: string;
   keyMap?: KeyMap;
   exportSettings?: {
     mp3Bitrate: number;
@@ -44,6 +44,59 @@ export interface AudioSettings {
     sampleRate: number;
   };
   playOriginalTrackSegments?: boolean;
+}
+
+export interface BackstageSession {
+  id: string;
+  startTime: number;
+  duration: number;
+  videoPath: string;
+  originalVideoPath?: string;
+  dubs: {
+    segmentId: string;
+    backstageStartTime: number;
+    backstageEndTime: number;
+    timelineStartTime: number;
+  }[];
+  speakingActivities?: {
+    start: number;
+    end: number;
+  }[];
+  sessionId?: string; // Дублирует id по требованию
+  rawVideoPath?: string; // Дублирует videoPath по требованию
+  totalDuration?: number; // Общая длительность в секундах
+  blocks?: TimelineBlock[]; // Блоки таймлайна
+}
+
+export type TimelineBlockType = 'dub' | 'speaking' | 'silence';
+
+export interface TimelineBlock {
+  id: string;
+  type: TimelineBlockType;
+  duration: number; // Длительность блока в секундах
+  originalStart: number; // Абсолютное время начала в исходном файле
+  originalEnd: number; // Абсолютное время конца в исходном файле
+  isFavorite?: boolean; // Флаг добавления в Избранное
+  videoRefStart?: number;
+  videoRefEnd?: number;
+  start?: number; // Время начала на таймлайне (в секундах)
+  end?: number; // Время конца на таймлайне (в секундах)
+  text?: string; // Текст субтитров или реплики
+}
+
+export interface ExportSettings {
+  includeOriginal: boolean;
+  aspectRatio: '16:9' | '9:16';
+  splitShortVideos: boolean;
+  professionalEditing: boolean;
+  onlyFavorites?: boolean; // Только избранное
+  useAudioTransitions?: boolean; // Использование J/L катов
+}
+
+export interface ExportPreset {
+  id: string;
+  name: string;
+  settings: ExportSettings;
 }
 
 export interface HotkeyAction {
@@ -106,6 +159,7 @@ export interface Project {
   audioSettings: AudioSettings;
   fixes?: Fix[]; // Сделаем опциональным
   uiState?: ProjectUIState;
+  subtitlesOffset?: number; // Сдвиг таймингов субтитров в секундах
 }
 
 export interface AudioTrack {
@@ -163,6 +217,7 @@ export interface AudioSegment {
   fadeIn?: number; // Fade in duration (seconds)
   fadeOut?: number; // Fade out duration (seconds)
   isExtractingWaveform?: boolean; // Temporary state for async loaded waveforms
+  recordedAt?: number; // Timestamp when recorded
 }
 
 export interface BridgeResponse<T> {
@@ -179,6 +234,10 @@ declare global {
       openSubtitles: () => Promise<BridgeResponse<{ path: string, name: string, parsed: { roles: string[], subtitles: any[] } }>>;
       extractAudioPeaks: (videoPath: string, projectPath: string) => Promise<BridgeResponse<{ filePath: string, peaks: Float32Array, duration: number }>>;
       saveTake: (data: { projectPath: string, role: string, startTime: number, audioData: Uint8Array }) => Promise<BridgeResponse<{ filePath: string, peaks: Float32Array }>>;
+      appendBackstageChunk: (data: { projectPath: string, sessionId: string, chunkData: Uint8Array }) => Promise<BridgeResponse<void>>;
+      finalizeBackstageSession: (data: { projectPath: string, sessionId: string }) => Promise<BridgeResponse<string>>;
+      listBackstageSessions: (projectPath: string) => Promise<BridgeResponse<string[]>>;
+      writeTextFile: (data: { path: string, data: string }) => Promise<BridgeResponse<void>>;
       exportAudio: (options: any) => Promise<BridgeResponse<{ success: boolean }>>;
       initProject: (projectPath: string) => Promise<BridgeResponse<void>>;
       generateStressTest: (projectId: string, trackId: string, projectPath: string) => Promise<BridgeResponse<void>>;
@@ -186,6 +245,7 @@ declare global {
       saveProjectJson: (data: { projectPath: string, projectData: Project }) => Promise<BridgeResponse<boolean>>;
       loadProjectJson: (projectPath: string) => Promise<BridgeResponse<Project>>;
       copyFileToProject: (src: string, destDir: string) => Promise<BridgeResponse<string>>;
+      deleteFile: (path: string) => Promise<BridgeResponse<void>>;
       importLegacyJson: (jsonString: string) => Promise<BridgeResponse<string>>;
       muxVideo: (data: { videoPath: string, audioPath: string, outputPath: string, duration?: number }) => Promise<BridgeResponse<{ success: boolean }>>;
       quickPreviewExport: (data: { projectPath: string, segmentId: string }) => Promise<BridgeResponse<{ success: boolean }>>;
@@ -222,6 +282,10 @@ declare global {
       cleanupOrphanedFiles: (files: string[]) => Promise<BridgeResponse<void>>;
       concatBackstageVideos: (data: { videoPaths: string[], outputPath: string, backstageMode?: string, isBackstageEnabled?: boolean }) => Promise<BridgeResponse<string>>;
       exportBackstageVideo: (data: { mainVideoPath: string, backstageVideoPath: string, finalAudioPath: string, outputPath: string, webcamExportOverlay?: boolean }) => Promise<BridgeResponse<string>>;
+      exportBlooper: (data: { videoPath: string, audioPath: string, startTime: number, endTime: number, voiceOffset: number, outputPath: string }) => Promise<BridgeResponse<string>>;
+      processBackstageShorts: (data: { videoPath: string, outputPath: string }) => Promise<BridgeResponse<string>>;
+      processBackstageRemoveSilence: (data: { videoPath: string, dubs: {start: number, end: number}[], outputPath: string }) => Promise<BridgeResponse<string>>;
+      exportBackstageAssemble: (data: { videoPath: string, originalVideoPath?: string, subtitles: {start: number, end: number, text: string}[], blocks: TimelineBlock[], settings: ExportSettings, outputPath: string }) => Promise<BridgeResponse<string>>;
       moveProject: (oldPath: string, newPath: string) => Promise<BridgeResponse<boolean>>;
       openPath: (path: string) => Promise<BridgeResponse<void>>;
       forceStopAll: () => Promise<BridgeResponse<void>>;

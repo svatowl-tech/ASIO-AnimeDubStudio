@@ -557,27 +557,37 @@ pub async fn verify_project_files(
         if let Some(path_str) = file_path {
             let path = std::path::Path::new(&path_str);
             if !path.exists() {
-                missing_segments.push(seg_data);
+                missing_segments.push(seg_data.clone());
             } else {
                 referenced_files.insert(path_str);
             }
         } else if seg_data.duration > 0.0 {
-            missing_segments.push(seg_data);
+            missing_segments.push(seg_data.clone());
+        }
+
+        if let Some(backstage_str) = seg_data.backstage_video_path.clone() {
+            referenced_files.insert(backstage_str);
         }
     }
 
-    // 2. Find orphaned files in .dubstudio
+    // 2. Find orphaned files in .dubstudio and takes
     let mut orphaned_files = Vec::new();
-    let dub_dir = std::path::Path::new(&project_root).join(".dubstudio");
-    if dub_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&dub_dir) {
-            for entry in entries.flatten() {
-                if let Ok(file_type) = entry.file_type() {
-                    if file_type.is_file() {
-                        let path_str = entry.path().to_str().unwrap_or("").to_string();
-                        // Check if ends with .wav and not in referenced_files
-                        if path_str.to_lowercase().ends_with(".wav") && !referenced_files.contains(&path_str) {
-                            orphaned_files.push(path_str);
+    let dirs_to_check = vec![
+        std::path::Path::new(&project_root).join(".dubstudio"),
+        std::path::Path::new(&project_root).join("takes")
+    ];
+
+    for dir in dirs_to_check {
+        if dir.exists() {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    if let Ok(file_type) = entry.file_type() {
+                        if file_type.is_file() {
+                            let path_str = entry.path().to_str().unwrap_or("").to_string();
+                            let ext = path_str.to_lowercase();
+                            if (ext.ends_with(".wav") || ext.ends_with(".mp4") || ext.ends_with(".webm")) && !referenced_files.contains(&path_str) {
+                                orphaned_files.push(path_str);
+                            }
                         }
                     }
                 }
@@ -660,20 +670,29 @@ pub async fn check_project_assets(
                 let file_name = path.file_name().and_then(|f| f.to_str());
                 let mut found = false;
                 
-                if let (Some(name), true) = (file_name, dub_dir.exists()) {
-                    if let Ok(entries) = fs::read_dir(&dub_dir) {
-                        for entry in entries.flatten() {
-                            if entry.file_name() == name {
-                                // Found: update database
-                                let new_path = entry.path().to_str().unwrap().to_string();
-                                sqlx::query("UPDATE segments SET file_path = ? WHERE id = ?")
-                                    .bind(&new_path)
-                                    .bind(&id)
-                                    .execute(pool)
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-                                found = true;
-                                break;
+                if let Some(name) = file_name {
+                    let dirs_to_check = vec![
+                        dub_dir.clone(),
+                        std::path::Path::new(&project_root).join("takes")
+                    ];
+                    
+                    for dir in dirs_to_check {
+                        if !found && dir.exists() {
+                            if let Ok(entries) = fs::read_dir(&dir) {
+                                for entry in entries.flatten() {
+                                    if entry.file_name() == name {
+                                        // Found: update database
+                                        let new_path = entry.path().to_str().unwrap().to_string();
+                                        sqlx::query("UPDATE segments SET file_path = ? WHERE id = ?")
+                                            .bind(&new_path)
+                                            .bind(&id)
+                                            .execute(pool)
+                                            .await
+                                            .unwrap_or_default();
+                                        found = true;
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }

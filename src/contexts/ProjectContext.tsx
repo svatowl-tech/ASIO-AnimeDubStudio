@@ -8,6 +8,7 @@ export interface ProjectContextType {
   handleNewProject: () => Promise<void>;
   handleOpenProject: (path?: string) => Promise<void>;
   handleSaveProject: () => Promise<void>;
+  handleCloseProject: () => void;
   onLoadProject: (projectData: Project, projectPath?: string) => void;
   undo: () => void;
   redo: () => void;

@@ -4,6 +4,7 @@ import { cn } from '../lib/utils';
 import { SubtitleLine, Project } from '../types';
 import Teleprompter from './Teleprompter';
 import BackstageCamera from './BackstageCamera';
+import { ScrollingWaveform } from './ScrollingWaveform';
 
 export const ActorOverlay = ({ 
   currentLine, 
@@ -33,7 +34,10 @@ export const ActorOverlay = ({
   project,
   onSettingsChange,
   onSeek,
-  isWebcamSimulated
+  isWebcamSimulated,
+  duration = 0,
+  isPopout = false,
+  previewStream
 }: { 
   currentLine?: SubtitleLine, 
   nextLine?: SubtitleLine,
@@ -42,6 +46,7 @@ export const ActorOverlay = ({
   webcamRef: React.RefObject<HTMLVideoElement | null>,
   isRecording: boolean,
   recordingStream: MediaStream | null,
+  previewStream?: MediaStream | null,
   onClipping?: (clipping: boolean) => void,
   subtitles?: SubtitleLine[],
   teleprompterMode: 'compact' | 'expanded',
@@ -62,8 +67,11 @@ export const ActorOverlay = ({
   project?: Project,
   onSettingsChange?: (settings: any) => void,
   onSeek?: (time: number) => void,
-  isWebcamSimulated?: boolean
+  isWebcamSimulated?: boolean,
+  duration?: number,
+  isPopout?: boolean
 }) => {
+
   return (
     <div className="absolute inset-0 pointer-events-none z-40 overflow-hidden">
       {/* Backstage Recording Indicator */}
@@ -128,6 +136,7 @@ export const ActorOverlay = ({
           <BackstageCamera 
             webcamRef={webcamRef} 
             recordingStream={recordingStream}
+            previewStream={previewStream}
             onClipping={onClipping}
             project={project}
             onSettingsChange={onSettingsChange!}
@@ -136,6 +145,15 @@ export const ActorOverlay = ({
           />
         )}
       </AnimatePresence>
+
+      {/* Scrolling Waveform (Popout/Actor Overlay) */}
+      {isPopout && project?.originalPeaks && project.originalPeaks.length > 0 && (
+        <ScrollingWaveform 
+          peaks={project.originalPeaks}
+          currentTime={currentTime}
+          duration={duration}
+        />
+      )}
 
       {/* Recording Status removed as per user request */}
     </div>

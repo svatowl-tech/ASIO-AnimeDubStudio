@@ -223,6 +223,8 @@ const StudioModeContent = () => {
         project={state.project as Project | null}
         onSettingsChange={() => {}}
         onSeek={() => {}}
+        isPopout={true}
+        duration={state.duration || 0}
       />
     </div>
   );

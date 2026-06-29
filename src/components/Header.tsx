@@ -30,6 +30,7 @@ interface HeaderProps {
   handleNewProject: () => void;
   handleOpenProject: () => void;
   handleSaveProject: () => void;
+  handleCloseProject: () => void;
   handleSelectProjectFolder?: () => void;
   handleSelectBackstageFolder?: () => void;
   handleSelectVideo: () => void;
@@ -37,7 +38,6 @@ interface HeaderProps {
   handleSelectDocument: () => void;
   handleSelectReferenceAudio: () => void;
   handleMergeBackstage: () => void;
-  handleToggleBackstage: () => void;
   setShowQuickImport: (show: boolean) => void;
   setShowFixImport?: (show: boolean) => void;
   handleBulkImport: () => void;
@@ -45,6 +45,8 @@ interface HeaderProps {
   handleImportAudio?: () => void;
   isDesktop: boolean;
   handleExport: (format: 'WAV' | 'MP3' | 'FLAC') => void;
+  onOpenBackstageEditor: () => void;
+  isBackstageSessionRecording?: boolean;
   handleBatchExport: () => void;
   handleMuxVideo: () => void;
   handleExportAudioBook: (gap?: number) => void;
@@ -52,6 +54,7 @@ interface HeaderProps {
   handleExportAllStemsZip: () => void;
   handleOpenProjectFolder?: () => void;
   onLoadProject: (path: string) => void;
+  hasBackstageSessions?: boolean;
 }
 
 const HotkeyHints = ({ onClose, keyMap }: { onClose: () => void, keyMap: any }) => {
@@ -115,6 +118,7 @@ const Header: React.FC<HeaderProps> = ({
   handleNewProject,
   handleOpenProject,
   handleSaveProject,
+  handleCloseProject,
   handleSelectProjectFolder,
   handleSelectBackstageFolder,
   handleSelectVideo,
@@ -122,7 +126,6 @@ const Header: React.FC<HeaderProps> = ({
   handleSelectDocument,
   handleSelectReferenceAudio,
   handleMergeBackstage,
-  handleToggleBackstage,
   setShowQuickImport,
   setShowFixImport,
   handleBulkImport,
@@ -130,6 +133,9 @@ const Header: React.FC<HeaderProps> = ({
   handleImportAudio,
   isDesktop,
   handleExport,
+  onOpenBackstageEditor,
+  isBackstageSessionRecording,
+  hasBackstageSessions,
   handleBatchExport,
   handleMuxVideo,
   handleExportAudioBook,
@@ -195,9 +201,20 @@ const Header: React.FC<HeaderProps> = ({
                 <button onClick={() => handleExportAudioBook(1.0)} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-teal-400">Реплики единым (1.0s пауз)</button>
                 <button onClick={handleExportStems} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-amber-400">Экспорт стемов</button>
                 <button onClick={handleExportAllStemsZip} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-zinc-400">Экспорт стемов (ZIP)</button>
-                <button onClick={handleMergeBackstage} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors text-rose-400">Объединить бекстейдж</button>
               </div>
             </div>
+          )}
+
+          {project && hasBackstageSessions && (
+            <button
+              onClick={onOpenBackstageEditor}
+              disabled={isBackstageSessionRecording}
+              className={`px-3 py-1.5 ${isBackstageSessionRecording ? 'bg-rose-900/50 text-rose-500/50 cursor-not-allowed' : 'bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/20'} rounded-lg text-[10px] font-bold flex items-center gap-2 transition-all`}
+              title={isBackstageSessionRecording ? "Остановите запись бекстейджа, чтобы открыть редактор" : "Редактор бекстейджа"}
+            >
+              <VideoIcon className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Редактор бекстейджа</span>
+            </button>
           )}
           
           <div className="relative">
@@ -241,6 +258,15 @@ const Header: React.FC<HeaderProps> = ({
                         <Bookmark className="w-4 h-4 text-amber-400" />
                         Сохранить проект
                       </button>
+                      {project && (
+                        <button 
+                          onClick={() => { handleCloseProject(); setShowProjectMenu(false); }}
+                          className="w-full flex items-center gap-3 px-3 py-2 hover:bg-rose-500/10 rounded-lg text-xs font-bold transition-colors text-rose-400"
+                        >
+                          <X className="w-4 h-4" />
+                          Закрыть проект
+                        </button>
+                      )}
                     </div>
 
                     {project && (handleSelectProjectFolder || handleOpenProjectFolder) && (

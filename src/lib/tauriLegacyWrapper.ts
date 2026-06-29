@@ -5,7 +5,7 @@ import { listen, emit, UnlistenFn } from '@tauri-apps/api/event';
 
 import { safeConfirm } from './utils';
 import { UniversalParserService } from '../services/UniversalParserService';
-import { SubtitleLine } from '../types';
+import { SubtitleLine, TimelineBlock, ExportSettings } from '../types';
 
 /**
  * Standard interface for IPC communication responses
@@ -359,6 +359,16 @@ export const tauriAPI = {
     }
   },
 
+  deleteFile: async (path: string): Promise<BridgeResponse<void>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        await invoke('delete_file', { path });
+        return { success: true };
+    } catch(err) {
+        return { success: false, error: String(err) };
+    }
+  },
+
   importLegacyJson: async (jsonString: string): Promise<BridgeResponse<string>> => {
     if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
     try {
@@ -504,6 +514,16 @@ export const tauriAPI = {
     try {
         const result = await invoke<string>('read_text_file', { path });
         return { success: true, data: result };
+    } catch(err) {
+        return { success: false, error: String(err) };
+    }
+  },
+
+  writeTextFile: async (args: { path: string, data: string }): Promise<BridgeResponse<void>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        await invoke('save_project_file', { path: args.path, data: args.data });
+        return { success: true };
     } catch(err) {
         return { success: false, error: String(err) };
     }
@@ -832,6 +852,43 @@ export const tauriAPI = {
     }
   },
 
+  appendBackstageChunk: async (args: { projectPath: string, sessionId: string, chunkData: Uint8Array }): Promise<BridgeResponse<void>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        await invoke('append_backstage_chunk', {
+            projectPath: args.projectPath,
+            sessionId: args.sessionId,
+            data: Array.from(args.chunkData)
+        });
+        return { success: true };
+    } catch (e: any) {
+        return { success: false, error: e.toString() };
+    }
+  },
+
+  finalizeBackstageSession: async (args: { projectPath: string, sessionId: string }): Promise<BridgeResponse<string>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        const filePath = await invoke<string>('finalize_backstage_session', {
+            projectPath: args.projectPath,
+            sessionId: args.sessionId
+        });
+        return { success: true, data: filePath };
+    } catch (e: any) {
+        return { success: false, error: e.toString() };
+    }
+  },
+
+  listBackstageSessions: async (projectPath: string): Promise<BridgeResponse<string[]>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        const result = await invoke<string[]>('list_backstage_sessions', { projectPath });
+        return { success: true, data: result };
+    } catch(err) {
+        return { success: false, error: String(err) };
+    }
+  },
+
   openVideo: async (): Promise<BridgeResponse<{ path: string, name: string, projectPath: string, size: number }>> => {
     if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
     console.log("[Bridge] openVideo called");
@@ -1079,6 +1136,53 @@ export const tauriAPI = {
         const result = await invoke<string>('export_backstage_video', args);
         return { success: true, data: result };
     } catch(err) {
+        return { success: false, error: String(err) };
+    }
+  },
+
+  exportBlooper: async (args: { videoPath: string, audioPath: string, startTime: number, endTime: number, voiceOffset: number, outputPath: string }): Promise<BridgeResponse<string>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        const result = await invoke<string>('export_blooper', args);
+        return { success: true, data: result };
+    } catch(err) {
+        return { success: false, error: String(err) };
+    }
+  },
+
+  processBackstageShorts: async (args: { videoPath: string, outputPath: string }): Promise<BridgeResponse<string>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        console.log(`[TauriWrapper] processBackstageShorts, args:`, args);
+        const result = await invoke<string>('process_backstage_shorts', args);
+        return { success: true, data: result };
+    } catch(err) {
+        console.error(`[TauriWrapper] processBackstageShorts error:`, err);
+        return { success: false, error: String(err) };
+    }
+  },
+
+  processBackstageRemoveSilence: async (args: { videoPath: string, dubs: {start: number, end: number}[], outputPath: string }): Promise<BridgeResponse<string>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        console.log(`[TauriWrapper] processBackstageRemoveSilence, args:`, args);
+        const result = await invoke<string>('process_backstage_remove_silence', args);
+        return { success: true, data: result };
+    } catch(err) {
+        console.error(`[TauriWrapper] processBackstageRemoveSilence error:`, err);
+        return { success: false, error: String(err) };
+    }
+  },
+
+  exportBackstageAssemble: async (args: { videoPath: string, originalVideoPath?: string, subtitles: {start: number, end: number, text: string}[], blocks: TimelineBlock[], settings: ExportSettings, outputPath: string }): Promise<BridgeResponse<string>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        console.log(`[TauriWrapper] exportBackstageAssemble, args:`, args);
+        const result = await invoke<string>('export_backstage_assemble', args);
+        console.log(`[TauriWrapper] exportBackstageAssemble success, result:`, result);
+        return { success: true, data: result };
+    } catch(err) {
+        console.error(`[TauriWrapper] exportBackstageAssemble error:`, err);
         return { success: false, error: String(err) };
     }
   },

@@ -49,7 +49,17 @@
           "concat_backstage_videos",
           "get_media_info",
           "extract_mkv_assets",
-          "create_blank_video"
+          "create_blank_video",
+          "append_backstage_chunk",
+          "finalize_backstage_session",
+          "list_backstage_sessions",
+          "delete_file",
+          "export_backstage_assemble",
+          "process_backstage_shorts",
+          "process_backstage_remove_silence",
+          "export_backstage_video",
+          "export_blooper",
+          "force_stop_all"
         ],
         "deny": []
       }

@@ -90,6 +90,96 @@ pub fn write_audio_file(path: String, data: Vec<u8>) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn append_backstage_chunk(project_path: String, session_id: String, data: Vec<u8>) -> Result<(), String> {
+    let takes_dir = Path::new(&project_path).join("takes");
+    if !takes_dir.exists() {
+        fs::create_dir_all(&takes_dir).map_err(|e| e.to_string())?;
+    }
+    
+    let file_name = format!("backstage_session_{}.webm", session_id);
+    let target_path = takes_dir.join(&file_name);
+    
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&target_path)
+        .map_err(|e| e.to_string())?;
+        
+    file.write_all(&data).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_backstage_sessions(project_path: String) -> Result<Vec<String>, String> {
+    let takes_dir = Path::new(&project_path).join("takes");
+    if !takes_dir.exists() {
+        return Ok(Vec::new());
+    }
+    
+    let mut sessions = Vec::new();
+    if let Ok(entries) = fs::read_dir(takes_dir) {
+        for entry in entries.flatten() {
+            if let Ok(file_type) = entry.file_type() {
+                if file_type.is_file() {
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    if file_name.starts_with("backstage_session_") && file_name.ends_with(".json") {
+                        if let Ok(content) = fs::read_to_string(entry.path()) {
+                            sessions.push(content);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(sessions)
+}
+
+#[tauri::command]
+pub async fn finalize_backstage_session(project_path: String, session_id: String) -> Result<String, String> {
+    let takes_dir = Path::new(&project_path).join("takes");
+    let webm_name = format!("backstage_session_{}.webm", session_id);
+    let webm_path = takes_dir.join(&webm_name);
+    
+    if !webm_path.exists() {
+        return Err("Session file not found".to_string());
+    }
+    
+    let mp4_name = format!("backstage_session_{}_fixed.webm", session_id);
+    let mp4_path = takes_dir.join(&mp4_name);
+    
+    let mut cmd = std::process::Command::new("ffmpeg");
+    cmd.args(&[
+        "-nostdin",
+        "-y",
+        "-i", webm_path.to_str().unwrap(),
+        "-c", "copy",
+        mp4_path.to_str().unwrap()
+    ]);
+    
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    
+    let output = cmd.output().map_err(|e| format!("FFmpeg failed: {}", e))?;
+    
+    if !output.status.success() {
+        let err_msg = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("FFmpeg error: {}", err_msg));
+    }
+    
+    // Optionally remove the webm file to save space
+    let _ = fs::remove_file(&webm_path);
+    
+    Ok(mp4_path.to_str().unwrap().to_string())
+}
+
+#[tauri::command]
 pub async fn save_media_recorder_take(project_path: String, role: String, data: Vec<u8>) -> Result<String, String> {
     let epoch_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
     
@@ -114,7 +204,7 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
     // If backstage, convert to MP4 with consistent specs for later concatenation
     // If not backstage (audio), convert to WAV
     let mut command = std::process::Command::new("ffmpeg");
-    command.arg("-y").arg("-i").arg(temp_path.to_str().unwrap());
+    command.arg("-nostdin").arg("-y").arg("-i").arg(temp_path.to_str().unwrap());
     
     if is_backstage {
         command.args(&[
@@ -172,7 +262,22 @@ pub fn init_project_folder(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn save_project_file(path: String, data: String) -> Result<(), String> {
-    fs::write(path, data).map_err(|e| format!("Failed to save project file: {}", e))
+    let p = Path::new(&path);
+    if let Some(parent) = p.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create directories for project file: {}", e))?;
+        }
+    }
+    fs::write(p, data).map_err(|e| format!("Failed to save project file: {}", e))
+}
+
+#[tauri::command]
+pub fn delete_file(path: String) -> Result<(), String> {
+    if std::path::Path::new(&path).exists() {
+        std::fs::remove_file(&path).map_err(|e| format!("Failed to delete file: {}", e))
+    } else {
+        Ok(())
+    }
 }
 
 #[tauri::command]

@@ -47,8 +47,9 @@ pub async fn concat_backstage_videos(
 
     // Склеиваем видео без перекодирования (stream copy), если это возможно
     // Внимание: это работает стабильно, если все исходники имеют одинаковые параметры (кодек, разрешение)
-    let output = std::process::Command::new("ffmpeg")
+    let output = tokio::process::Command::new("ffmpeg")
         .args(&[
+            "-nostdin",
             "-y",
             "-f", "concat",
             "-safe", "0",
@@ -57,6 +58,7 @@ pub async fn concat_backstage_videos(
             &output_path
         ])
         .output()
+        .await
         .map_err(|e| e.to_string())?;
 
     // Удаляем временный файл
@@ -570,8 +572,9 @@ pub async fn create_blank_video(
     duration: f64,
     output_path: String,
 ) -> Result<String, String> {
-    let output = std::process::Command::new("ffmpeg")
+    let output = tokio::process::Command::new("ffmpeg")
         .args(&[
+            "-nostdin",
             "-y",
             "-f", "lavfi",
             "-i", "color=c=black:s=1280x720:r=24",
@@ -584,6 +587,7 @@ pub async fn create_blank_video(
             &output_path
         ])
         .output()
+        .await
         .map_err(|e| e.to_string())?;
 
     if !output.status.success() {

@@ -38,7 +38,8 @@ import {
   Archive,
   Circle,
   Square,
-  Repeat
+  Repeat,
+  Smile
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useDropzone } from 'react-dropzone';
@@ -93,10 +94,12 @@ import { TimelineProvider } from './contexts/TimelineContext';
 import LeftSidebar from './components/layout/LeftSidebar';
 import { UIProvider } from './contexts/UIContext';
 import ModalsManager from './components/layout/ModalsManager';
+import BackstageEditor from './components/BackstageEditor';
 import { MkvTrackSelectorModal } from './components/MkvTrackSelectorModal';
 import TopHeader from './components/layout/TopHeader';
 import StyledExportOverlay from './components/layout/ExportOverlay';
 import { useAudioEngine } from './hooks/useAudioEngine';
+import { useBackstageSession } from './hooks/useBackstageSession';
 import { useProjectImport } from './hooks/useProjectImport';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { openStudioWindow, closeStudioWindow } from './lib/windowHelpers';
@@ -109,6 +112,7 @@ export default function App() {
     handleNewProject, 
     handleOpenProject, 
     handleSaveProject: origHandleSaveProject, 
+    handleCloseProject,
     onLoadProject 
   } = useProject();
 
@@ -178,6 +182,8 @@ export default function App() {
     timelineRef
   } = useTimelineState(project, duration, setDuration, videoRef, referenceAudioRef);
 
+  const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
+
   const {
     isRecording,
     recordingStream,
@@ -185,20 +191,55 @@ export default function App() {
     recordingPeaks,
     isBackstageRecording,
     setIsBackstageRecording,
-    isManualBackstageRecording,
     recordingStartTimeRef,
     startRecording,
     stopRecording,
     discardRecording,
     handleToggleRecord,
-    handleToggleBackstage,
     handleDeleteLastTake,
     isRecordingRef,
     isStartingRecordingRef
-  } = useAudioEngine(project, setProject, videoRef, currentTimeRef, isPlayingRef, togglePlay, webcamRef);
+  } = useAudioEngine(project, setProject, videoRef, currentTimeRef, isPlayingRef, togglePlay, previewStream);
 
   const { saveSnapshot, undo, redo, canUndo, canRedo } = useTimelineHistory(project, setProject);
 
+  const {
+    isSessionRecording: isBackstageSessionRecording,
+    startSession: startBackstageSession,
+    stopSession: stopBackstageSession,
+    recordDub,
+    startDub,
+    stopDub,
+    backstageStream,
+    hasSessions: hasBackstageSessions,
+    audioSilenceError,
+    setAudioSilenceError
+  } = useBackstageSession(
+    project?.projectPath, 
+    previewStream, 
+    project?.audioSettings?.backstageAudioDeviceId,
+    !!project?.audioSettings?.isBackstageEnabled
+  );
+  
+  // Track dubs automatically based on isRecording state
+  const lastDubStartTimeRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (isRecording) {
+      lastDubStartTimeRef.current = Date.now();
+      if (startDub) {
+        startDub(currentTimeRef.current);
+      }
+    } else {
+      if (lastDubStartTimeRef.current !== null && project?.selectedRole) {
+        const duration = Date.now() - lastDubStartTimeRef.current;
+        recordDub(`dub-${Date.now()}`, currentTimeRef.current, duration);
+        if (stopDub) {
+          stopDub();
+        }
+        lastDubStartTimeRef.current = null;
+      }
+    }
+  }, [isRecording, recordDub, startDub, stopDub, project?.selectedRole]);
   
   const isRippleEnabledRef = useRef(isRippleEnabled);
   useEffect(() => { isRippleEnabledRef.current = isRippleEnabled; }, [isRippleEnabled]);
@@ -244,6 +285,7 @@ export default function App() {
 
   const [isDesktop, setIsDesktop] = useState(!!(window as any).__TAURI_INTERNALS__);
   const [showProjectMenu, setShowProjectMenu] = useState(false);
+  const [showBackstageEditor, setShowBackstageEditor] = useState(false);
   const [showFixes, setShowFixes] = useState(true);
   const [showQuickImport, setShowQuickImport] = useState(false);
   const [processingTrackId, setProcessingTrackId] = useState<string | null>(null);
@@ -716,8 +758,92 @@ export default function App() {
       const fileExt = fileName.substring(fileName.lastIndexOf('.')).toLowerCase();
       const fileDir = path.replace(/\\/g, '/').substring(0, path.replace(/\\/g, '/').lastIndexOf('/'));
 
-      if (['.mp4', '.mkv', '.webm', '.mov', '.avi', '.mp3', '.wav', '.flac', '.ogg', '.m4a'].includes(fileExt)) {
-        // Handle video or standalone audio
+      const isVideo = ['.mp4', '.mkv', '.webm', '.mov', '.avi'].includes(fileExt);
+      const isAudio = ['.mp3', '.wav', '.flac', '.ogg', '.m4a'].includes(fileExt);
+
+      const isProjectActive = !!project?.videoUrl || !!project?.projectPath;
+
+      if (isAudio && isProjectActive && !project?.projectPath) {
+        alert("Настройте или сохраните проект перед импортом аудио.");
+        continue;
+      }
+
+      if (isAudio && isProjectActive && project?.projectPath && window.electronAPI) {
+        // Handle audio drop on active project -> new track (Import Audio logic)
+        try {
+          setIsExporting(true);
+          setExportOperation(`Импорт аудио: ${fileName}...`);
+          
+          const assetsDir = `${project.projectPath}/assets`.replace(/\\/g, '/');
+          const copyRes = await window.electronAPI.copyFileToProject(path, assetsDir);
+          const finalPath = copyRes.success && copyRes.data ? copyRes.data : path;
+          
+          let duration = 0;
+          let peaks: number[] = [];
+          
+          const infoRes = await window.electronAPI.getFileInfo(finalPath);
+          if (infoRes.success && infoRes.data) {
+             duration = infoRes.data.duration || 0;
+          }
+          
+          if (duration <= 0) {
+              const fileUrl = getSafeFileUrl(finalPath);
+              duration = await new Promise<number>((resolve) => {
+                  const audioInfo = new Audio();
+                  audioInfo.onloadedmetadata = () => resolve(audioInfo.duration);
+                  audioInfo.onerror = () => resolve(1); 
+                  audioInfo.src = fileUrl;
+              });
+          }
+          
+          const pts = Math.max(1024, Math.floor((duration || 20) * 50));
+          const peaksRes = await window.electronAPI.generateWaveformPeaks({ filePath: finalPath, points: pts });
+          if (peaksRes.success && peaksRes.data) {
+             peaks = peaksRes.data;
+          }
+          
+          if (duration === 0 && peaks.length > 0) {
+             duration = peaks.length / 50.0;
+          } else if (duration === 0) {
+             duration = 1;
+          }
+
+          const newSegment: AudioSegment = {
+             id: `drop-${Date.now()}-${Math.random().toString(36).substr(2,9)}`,
+             startTime: currentTimeRef.current || 0,
+             duration: duration,
+             fileOffset: 0,
+             fileDuration: duration,
+             blobUrl: getSafeFileUrl(finalPath),
+             filePath: finalPath,
+             gain: 1,
+             playbackRate: 1,
+             waveform: peaks.length > 0 ? peaks : undefined,
+             originalFileName: fileName
+          };
+
+          const newTrack: AudioTrack = {
+             id: `track-drop-${Date.now()}`,
+             name: fileName.replace(/\.[^/.]+$/, ""),
+             volume: 1,
+             isMuted: false,
+             segments: [newSegment]
+          };
+
+          setProject(prev => {
+             if (!prev) return prev;
+             return {
+                ...prev,
+                tracks: [...prev.tracks, newTrack]
+             };
+          });
+        } catch (e) {
+          logger.error("Failed importing audio drop natively:", e);
+        } finally {
+          setIsExporting(false);
+        }
+      } else if (isVideo || isAudio) {
+        // Handle video or standalone audio (Project initialization / original replace)
         let projectRoot = project?.projectPath;
         if (!projectRoot) {
            // Create a new project folder next to the video
@@ -899,7 +1025,14 @@ export default function App() {
     const mediaFiles = acceptedFiles.filter(f => f.type.startsWith('video/') || f.type.startsWith('audio/') || ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.mp3', '.wav', '.flac', '.ogg', '.m4a'].some(ext => f.name.toLowerCase().endsWith(ext)));
     const textFiles = acceptedFiles.filter(f => ['.ass', '.srt', '.vtt', '.csv', '.fb2', '.txt', '.epub', '.docx', '.pdf'].some(ext => f.name.toLowerCase().endsWith(ext)));
 
-    if (isProjectActive && mediaFiles.length > 0 && window.electronAPI && project.projectPath) {
+    const isAudioDropOnly = mediaFiles.length > 0 && mediaFiles.every(f => f.type.startsWith('audio/') || ['.mp3', '.wav', '.flac', '.ogg', '.m4a'].some(ext => f.name.toLowerCase().endsWith(ext)));
+
+    if (isProjectActive && isAudioDropOnly && (!window.electronAPI || !project?.projectPath)) {
+        alert("Настройте или сохраните проект перед импортом аудио.");
+        return;
+    }
+
+    if (isProjectActive && mediaFiles.length > 0 && window.electronAPI && project?.projectPath) {
       // Add drops as a new track
       const newTrackId = `track-drop-${Date.now()}`;
       const newTrackName = mediaFiles[0].name.replace(/\.[^/.]+$/, "");
@@ -1291,9 +1424,7 @@ export default function App() {
       logger.info(`Concatenating backstage videos to ${tempVideoPath}`);
       const concatRes = await window.electronAPI.concatBackstageVideos({
         videoPaths,
-        outputPath: tempVideoPath,
-        backstageMode: project.audioSettings?.backstageMode,
-        isBackstageEnabled: project.audioSettings?.isBackstageEnabled
+        outputPath: tempVideoPath
       });
 
       if (!concatRes.success) {
@@ -1336,6 +1467,9 @@ export default function App() {
         if (overlayRes.success) {
           alert(`Бекстейдж успешно создан с проектным звуком: ${finalOutputPath}`);
           logger.info("Backstage merge successful.");
+          // Clean up temp files
+          await window.electronAPI.deleteFile(tempVideoPath);
+          await window.electronAPI.deleteFile(tempAudioPath);
         } else {
           alert(`Ошибка при финальном сведении: ${overlayRes.error}`);
           logger.error("Backstage overlay failed:", overlayRes.error);
@@ -1352,6 +1486,9 @@ export default function App() {
         if (muxRes.success) {
           alert(`Бекстейдж успешно создан с проектным звуком: ${finalOutputPath}`);
           logger.info("Backstage merge successful.");
+          // Clean up temp files
+          await window.electronAPI.deleteFile(tempVideoPath);
+          await window.electronAPI.deleteFile(tempAudioPath);
         } else {
           alert(`Ошибка при финальном сведении: ${muxRes.error}`);
           logger.error("Backstage mux failed:", muxRes.error);
@@ -1360,6 +1497,105 @@ export default function App() {
     } catch (err) {
       alert(`Ошибка: ${err instanceof Error ? err.message : String(err)}`);
       logger.error("Backstage merge operation failed:", err);
+    } finally {
+      setIsExporting(false);
+      setExportProgress(100);
+      setExportOperation("");
+    }
+  };
+
+  const handleSaveBlooper = async () => {
+    if (isRecording) {
+      alert("Остановите запись (Пробел), чтобы сохранить этот дубль!");
+      return;
+    }
+
+    if (!project || !project.projectPath || !project.videoPath || !window.electronAPI) {
+      alert("Откройте проект и добавьте оригинальное видео.");
+      return;
+    }
+
+    let targetSegment: AudioSegment | null = null;
+
+    // Check if user has a segment selected
+    if (selectedSegmentIds && selectedSegmentIds.length > 0) {
+      for (const track of project.tracks) {
+        if (!track.isOriginal) {
+          const found = track.segments.find(s => selectedSegmentIds.includes(s.id));
+          if (found) {
+            targetSegment = found;
+            break;
+          }
+        }
+      }
+    }
+
+    // Otherwise, fallback to the latest recorded segment (or max start time if recordedAt is missing)
+    if (!targetSegment) {
+      let maxRecordedAt = -1;
+      let maxStartTimeFallback = -1;
+
+      for (const track of project.tracks) {
+        if (!track.isOriginal) {
+          for (const seg of track.segments) {
+            // Priority 1: Use recordedAt if available
+            if (seg.recordedAt !== undefined) {
+              if (seg.recordedAt > maxRecordedAt) {
+                maxRecordedAt = seg.recordedAt;
+                targetSegment = seg;
+              }
+            } 
+            // Priority 2: Fallback to startTime if no segments have recordedAt yet
+            else if (maxRecordedAt === -1 && seg.startTime > maxStartTimeFallback) {
+              maxStartTimeFallback = seg.startTime;
+              targetSegment = seg;
+            }
+          }
+        }
+      }
+    }
+
+    if (!targetSegment || !targetSegment.filePath) {
+      alert("Нет записанных реплик (сегментов) для сохранения дубля.");
+      return;
+    }
+
+    try {
+      const defaultFilename = `LoL_${targetSegment.text ? targetSegment.text.substring(0, 15).replace(/[^a-zA-Zа-яА-Я0-9]/g, '_') : 'blooper'}.mp4`;
+      const dialogRes = await window.electronAPI.saveFile({
+        title: 'Сохранить неудачный дубль',
+        defaultPath: `${project.projectPath}/${defaultFilename}`,
+        filters: [{ name: 'MP4 Video', extensions: ['mp4'] }]
+      });
+
+      if (!dialogRes.success || !dialogRes.data) return; // cancelled
+
+      const finalOutputPath = dialogRes.data;
+
+      setIsExporting(true);
+      setExportOperation("Сохранение смешного дубля...");
+      setExportProgress(0);
+
+      const blooperStartTime = Math.max(0, targetSegment.startTime - 3.0);
+      const blooperEndTime = targetSegment.startTime + targetSegment.duration + 1.0;
+      const voiceOffset = targetSegment.startTime - blooperStartTime;
+
+      const blooperRes = await window.electronAPI.exportBlooper({
+        videoPath: project.videoPath,
+        audioPath: targetSegment.filePath,
+        startTime: blooperStartTime,
+        endTime: blooperEndTime,
+        voiceOffset: voiceOffset,
+        outputPath: finalOutputPath
+      });
+
+      if (blooperRes.success) {
+        alert(`Неудачный дубль сохранен: ${finalOutputPath}`);
+      } else {
+        alert(`Ошибка при сохранении дубля: ${blooperRes.error}`);
+      }
+    } catch (e) {
+      alert(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setIsExporting(false);
       setExportProgress(100);
@@ -2142,6 +2378,7 @@ export default function App() {
           console.log(`[Webcam] Webcam stream acquired. Video tracks:`, stream.getVideoTracks().map(t => t.label));
           activeStream = stream;
           setIsWebcamSimulated(false);
+          setPreviewStream(stream);
           if (webcamRef.current) {
             webcamRef.current.srcObject = stream;
             webcamRef.current.onloadedmetadata = () => {
@@ -2170,6 +2407,7 @@ export default function App() {
             }
             activeStream = fallbackStream;
             setIsWebcamSimulated(false);
+            setPreviewStream(fallbackStream);
             if (webcamRef.current) {
               webcamRef.current.srcObject = fallbackStream;
               try {
@@ -2191,6 +2429,7 @@ export default function App() {
               activeStream = mock.stream;
               mockCleanup = mock.cleanup;
               setIsWebcamSimulated(true);
+              setPreviewStream(mock.stream);
               if (webcamRef.current) {
                 webcamRef.current.srcObject = mock.stream;
                 try {
@@ -2203,9 +2442,6 @@ export default function App() {
               }
             } catch (simErr) {
               console.error("[Webcam] Simulated webcam generation failed:", simErr);
-              if (project?.audioSettings?.isBackstageEnabled) {
-                handleToggleBackstage();
-              }
             }
           }
         }
@@ -2223,11 +2459,12 @@ export default function App() {
         mockCleanup();
       }
       setIsWebcamSimulated(false);
+      setPreviewStream(null);
       if (webcamRef.current) {
         webcamRef.current.srcObject = null;
       }
     };
-  }, [showWebcam, project?.audioSettings?.isBackstageEnabled, project?.audioSettings?.webcamDeviceId, handleToggleBackstage, isPopoutOpen]);
+  }, [showWebcam, project?.audioSettings?.isBackstageEnabled, project?.audioSettings?.webcamDeviceId]);
 
   const [clipboardSegments, setClipboardSegments] = useState<any[]>([]);
 
@@ -2316,7 +2553,6 @@ export default function App() {
     addMarker,
     deleteSegments,
     handleToggleRecord,
-    handleToggleBackstage,
     handleDeleteLastTake,
     handleJoinSegments,
     handleCopySegments,
@@ -2821,14 +3057,16 @@ export default function App() {
   const studioSyncDataRef = useRef({
     project, currentTime, currentLine, nextLine, showWebcam, isRecording,
     teleprompterMode, teleprompterFontSize, teleprompterLineHeight, teleprompterPacing,
-    teleprompterPosition, teleprompterSize, isManualBackstageRecording, isBackstageRecording
+    teleprompterPosition, teleprompterSize, isBackstageRecording,
+    duration
   });
 
   useEffect(() => {
     studioSyncDataRef.current = {
       project, currentTime, currentLine, nextLine, showWebcam, isRecording,
       teleprompterMode, teleprompterFontSize, teleprompterLineHeight, teleprompterPacing,
-      teleprompterPosition, teleprompterSize, isManualBackstageRecording, isBackstageRecording
+      teleprompterPosition, teleprompterSize, isBackstageRecording,
+      duration
     };
   });
 
@@ -2865,7 +3103,8 @@ export default function App() {
           videoPath: state.project.videoPath,
           projectPath: state.project.projectPath,
           selectedRole: state.project.selectedRole,
-          audioSettings: state.project.audioSettings
+          audioSettings: state.project.audioSettings,
+          originalPeaks: state.project.originalPeaks
         } : null;
         
         const dataPayload = {
@@ -2881,6 +3120,7 @@ export default function App() {
             isAudiobook: !!state.project?.documentContent,
             activeRole: state.project?.selectedRole || '',
             project: minimalProject,
+            duration: state.duration || 0,
         };
         
         try {
@@ -2905,7 +3145,7 @@ export default function App() {
             currentTime: state.currentTime,
             isPlaying: isPlayingRef.current,
             isRecording: state.isRecording,
-            isBackstageRecording: state.project?.audioSettings?.backstageMode === 'manual' ? state.isManualBackstageRecording : (state.isRecording && state.isBackstageRecording),
+            isBackstageRecording: state.isRecording && state.isBackstageRecording,
             currentLine: state.currentLine,
             nextLine: state.nextLine,
         };
@@ -2921,7 +3161,7 @@ export default function App() {
             currentTime: state.currentTime,
             isPlaying: isPlayingRef.current,
             isRecording: state.isRecording,
-            isBackstageRecording: state.project?.audioSettings?.backstageMode === 'manual' ? state.isManualBackstageRecording : (state.isRecording && state.isBackstageRecording),
+            isBackstageRecording: state.isRecording && state.isBackstageRecording,
             currentLine: state.currentLine ? { id: state.currentLine.id, start: state.currentLine.start, end: state.currentLine.end, text: state.currentLine.text, role: state.currentLine.role } : null,
             nextLine: state.nextLine ? { id: state.nextLine.id, start: state.nextLine.start, end: state.nextLine.end, text: state.nextLine.text, role: state.nextLine.role } : null,
           };
@@ -2992,7 +3232,7 @@ export default function App() {
   }, [isPopoutOpen]);
 
   const projectContextValue = {
-    project, setProject, recentProjects, handleNewProject, handleOpenProject, handleSaveProject, onLoadProject,
+    project, setProject, recentProjects, handleNewProject, handleOpenProject, handleSaveProject, handleCloseProject, onLoadProject,
     undo, redo, canUndo, canRedo
   };
   const timelineContextValue = {
@@ -3009,6 +3249,14 @@ export default function App() {
       resolvedMainVideoPath = `${project.projectPath}/${cleanPath}`.replace(/\\/g, '/');
     }
   }
+
+  const IS_TAURI = !!(window as any).__TAURI_INTERNALS__;
+  const getVideoSource = () => {
+    if (project?.videoUrl && (!IS_TAURI || !resolvedMainVideoPath)) {
+      return project.videoUrl; // Prefer blob URL in web preview
+    }
+    return resolvedMainVideoPath ? getSafeFileUrl(resolvedMainVideoPath) : undefined;
+  };
 
   return (
     <ProjectProvider value={projectContextValue}>
@@ -3048,7 +3296,6 @@ export default function App() {
         handleSelectDocument={handleSelectDocument}
         handleSelectReferenceAudio={handleSelectReferenceAudio}
         handleMergeBackstage={handleMergeBackstage}
-        handleToggleBackstage={handleToggleBackstage}
         setShowQuickImport={setShowQuickImport}
         setShowFixImport={setShowFixImport}
         handleBulkImport={handleBulkImport}
@@ -3059,6 +3306,9 @@ export default function App() {
           setPendingExportFormat(format);
           setIsExportModalOpen(true);
         }}
+        isBackstageSessionRecording={isBackstageSessionRecording}
+        hasBackstageSessions={hasBackstageSessions}
+        onOpenBackstageEditor={() => setShowBackstageEditor(true)}
         handleBatchExport={handleBatchExport}
         handleMuxVideo={handleMuxVideo}
         handleExportAudioBook={handleExportAudioBook}
@@ -3143,7 +3393,17 @@ export default function App() {
                 currentLine={currentLine}
                 isPlaying={isPlaying}
                 isRecording={isRecording}
-                onToggleBackstage={handleToggleBackstage}
+                onToggleBackstage={() => {
+                  if (project) {
+                    setProject({
+                      ...project,
+                      audioSettings: {
+                        ...project.audioSettings,
+                        isBackstageEnabled: !project.audioSettings?.isBackstageEnabled
+                      }
+                    });
+                  }
+                }}
               />
             ) : (
               <video 
@@ -3168,7 +3428,7 @@ export default function App() {
                     playbackEngine.stop();
                   }
                 }}
-                src={resolvedMainVideoPath ? getSafeFileUrl(resolvedMainVideoPath) : project.videoUrl ? project.videoUrl : undefined}
+                src={getVideoSource()}
                 onLoadedMetadata={(e) => {
                   let newDuration = e.currentTarget.duration;
                   logger.info("Video metadata loaded. Duration:", newDuration);
@@ -3222,6 +3482,9 @@ export default function App() {
                 onError={(e) => {
                   const video = e.currentTarget;
                   const error = video.error;
+                  if (!project?.videoPath && !project?.videoUrl) {
+                    return; // Ignore error if no video is expected
+                  }
                   let message = "Видео не может быть загружено. Пожалуйста, проверьте формат файла.";
                   
                   if (error) {
@@ -3261,9 +3524,9 @@ export default function App() {
                     playbackEngine.stop();
                   }
                 }}
-                src={getSafeFileUrl(project.referenceAudioPath.startsWith('./') && project.projectPath ? `${project.projectPath}/${project.referenceAudioPath.slice(2)}` : project.referenceAudioPath)} 
+                src={getSafeFileUrl(project?.referenceAudioPath?.startsWith('./') && project?.projectPath ? `${project.projectPath}/${project.referenceAudioPath.slice(2)}` : project?.referenceAudioPath)} 
                 onLoadedMetadata={(e) => {
-                  if (!project.videoPath && !project.videoUrl) {
+                  if (!project?.videoPath && !project?.videoUrl) {
                     setDuration(e.currentTarget.duration);
                   }
                 }}
@@ -3278,8 +3541,10 @@ export default function App() {
                 showWebcam={showWebcam || !!project.audioSettings?.isBackstageEnabled}
                 webcamRef={webcamRef}
                 isRecording={isRecording}
-                recordingStream={recordingStream}
+                recordingStream={backstageStream || recordingStream}
+                previewStream={previewStream}
                 isWebcamSimulated={isWebcamSimulated}
+                duration={duration}
                 onClipping={(clipping) => {
                   if (isRecording) setClippingDetected(clipping);
                 }}
@@ -3297,7 +3562,7 @@ export default function App() {
                 teleprompterSize={teleprompterSize}
                 setTeleprompterSize={setTeleprompterSize}
                 isAudiobook={!!project.documentContent}
-                isBackstageRecording={project?.audioSettings?.backstageMode === 'manual' ? isManualBackstageRecording : (isRecording && isBackstageRecording)}
+                isBackstageRecording={isRecording && isBackstageRecording}
                 activeRole={project.selectedRole || ''}
                 project={project}
                 onSettingsChange={(newSettings) => setProject({ ...project, audioSettings: newSettings })}
@@ -3331,7 +3596,7 @@ export default function App() {
                           playbackEngine.stop();
                         }
                       }}
-                      src={resolvedMainVideoPath ? getSafeFileUrl(resolvedMainVideoPath) : project.videoUrl ? project.videoUrl : undefined}
+                      src={getVideoSource()}
                       onLoadedMetadata={(e) => {
                         let newDuration = e.currentTarget.duration;
                         if (newDuration !== Infinity && newDuration > 0) {
@@ -3347,6 +3612,7 @@ export default function App() {
                       onError={(e) => {
                         const video = e.currentTarget;
                         const error = video.error;
+                        if (!project?.videoPath && !project?.videoUrl) return;
                         setVideoError(`Ошибка воспроизведения видео во втором окне: ${error?.message || error?.code}`);
                       }}
                     />
@@ -3360,8 +3626,10 @@ export default function App() {
                     showWebcam={showWebcam || !!project.audioSettings?.isBackstageEnabled}
                     webcamRef={webcamRef}
                     isRecording={isRecording}
-                    recordingStream={recordingStream}
+                    recordingStream={backstageStream || recordingStream}
+                    previewStream={previewStream}
                     isWebcamSimulated={isWebcamSimulated}
+                    duration={duration}
                     onClipping={(clipping) => {
                       if (isRecording) setClippingDetected(clipping);
                     }}
@@ -3379,11 +3647,12 @@ export default function App() {
                     teleprompterSize={teleprompterSize}
                     setTeleprompterSize={setTeleprompterSize}
                     isAudiobook={!!project.documentContent}
-                    isBackstageRecording={project?.audioSettings?.backstageMode === 'manual' ? isManualBackstageRecording : (isRecording && isBackstageRecording)}
+                    isBackstageRecording={isRecording && isBackstageRecording}
                     activeRole={project.selectedRole || ''}
                     project={project}
                     onSettingsChange={(newSettings) => setProject({ ...project, audioSettings: newSettings })}
                     onSeek={handleSeek}
+                    isPopout={true}
                   />
 
                   {/* Dynamic popup visual helpers */}
@@ -3433,7 +3702,7 @@ export default function App() {
                   <div className="hidden">
                     <video 
                       ref={videoRef}
-                      src={resolvedMainVideoPath ? getSafeFileUrl(resolvedMainVideoPath) : project.videoUrl ? project.videoUrl : undefined}
+                      src={getVideoSource()}
                       crossOrigin="anonymous"
                       onLoadedMetadata={(e) => {
                         let newDuration = e.currentTarget.duration;
@@ -3588,16 +3857,6 @@ export default function App() {
                   >
                     <LayoutTemplate className="w-5 h-5" />
                   </button>
-                  <button 
-                    onClick={handleToggleBackstage}
-                    className={cn(
-                      "p-2 rounded-lg transition-colors",
-                      project?.audioSettings?.isBackstageEnabled ? "bg-indigo-600 text-white" : "hover:bg-white/10 text-zinc-400"
-                    )}
-                    title="Переключить камеру актера"
-                  >
-                    <VideoIcon className="w-5 h-5" />
-                  </button>
                   <button className="p-2 hover:bg-white/10 rounded-lg transition-colors" title="Настройки громкости"><Volume2 className="w-5 h-5" /></button>
                   <button 
                     onClick={handleTogglePopout}
@@ -3646,7 +3905,25 @@ export default function App() {
             <TransportControls 
               isRecording={isRecording}
               onToggleRecord={handleToggleRecord}
-              recordingStream={recordingStream}
+              recordingStream={backstageStream || recordingStream}
+              showWebcam={showWebcam}
+              onToggleWebcam={() => {
+                if (project) {
+                  const newIsBackstageEnabled = !project.audioSettings?.isBackstageEnabled;
+                  setProject({
+                    ...project,
+                    audioSettings: {
+                      ...project.audioSettings,
+                      isBackstageEnabled: newIsBackstageEnabled
+                    }
+                  });
+                  if (!newIsBackstageEnabled && isBackstageSessionRecording) {
+                    stopBackstageSession().then(session => {
+                      if (session) setShowBackstageEditor(true);
+                    });
+                  }
+                }
+              }}
               onClipping={(clipping) => {
                 if (isRecording) setClippingDetected(clipping);
               }}
@@ -3657,9 +3934,47 @@ export default function App() {
               onToggleAutoHeight={() => setIsAutoHeight(!isAutoHeight)}
               zoomLevel={zoomLevel}
               onZoomChange={setZoomLevel}
-              isBackstageRecording={project?.audioSettings?.backstageMode === 'manual' ? isManualBackstageRecording : isBackstageRecording}
-              onToggleBackstage={handleToggleBackstage}
-              backstageMode={project?.audioSettings?.backstageMode || 'parallel'}
+              isBackstageSessionRecording={isBackstageSessionRecording}
+              onToggleBackstageSession={async () => {
+                if (isBackstageSessionRecording) {
+                  const session = await stopBackstageSession();
+                  if (session) {
+                    // Open backstage editor automatically when session stops?
+                    setShowBackstageEditor(true);
+                  }
+                } else {
+                  if (!project?.projectPath) {
+                    setVideoError("Для записи бекстейджа необходимо сначала сохранить проект на диск.");
+                    return;
+                  }
+                  
+                  if (!project?.audioSettings?.isBackstageEnabled) {
+                    if (project) {
+                      setProject({
+                        ...project,
+                        audioSettings: {
+                          ...project.audioSettings,
+                          isBackstageEnabled: true
+                        }
+                      });
+                    }
+                  }
+                  
+                  // Wait for camera to initialize if it hasn't already
+                  let attempts = 0;
+                  const waitForCamera = setInterval(async () => {
+                    if (webcamRef.current?.srcObject) {
+                      clearInterval(waitForCamera);
+                      await startBackstageSession(project?.videoPath || '');
+                    } else if (attempts >= 50) {
+                      clearInterval(waitForCamera);
+                      console.error("Timeout waiting for camera initialization");
+                    }
+                    attempts++;
+                  }, 100);
+                }
+              }}
+              onSaveBlooper={handleSaveBlooper}
             />
             <div ref={timelineContainerRef} className="flex-1 overflow-hidden flex flex-col">
               {project ? (
@@ -3799,6 +4114,14 @@ export default function App() {
       )}
 
       <ModalsManager />
+      
+      {showBackstageEditor && project && (
+        <BackstageEditor 
+          projectPath={project.projectPath} 
+          projectSubtitles={project.subtitles || []}
+          onClose={() => setShowBackstageEditor(false)} 
+        />
+      )}
 
       {isExportModalOpen && (
         <ExportModal 
@@ -3813,6 +4136,61 @@ export default function App() {
         exportProgress={exportProgress} 
         exportOperation={exportOperation} 
       />
+
+      {audioSilenceError && (
+        <div className="fixed inset-0 flex items-center justify-center bg-black/90 backdrop-blur-md z-[200] p-4">
+          <motion.div 
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="bg-zinc-900 border border-red-500/30 p-8 rounded-2xl shadow-2xl max-w-lg w-full flex flex-col gap-6"
+          >
+            <div className="flex items-center gap-3 border-b border-white/5 pb-4">
+              <div className="p-3 bg-red-500/10 text-red-400 rounded-xl">
+                <AlertTriangle className="w-6 h-6 animate-pulse" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-white">Внимание: Отсутствует аудиосигнал!</h3>
+                <p className="text-xs text-zinc-400 mt-0.5">Обнаружена абсолютная тишина (RMS = 0)</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-zinc-300 leading-relaxed">
+              Запись бэкстейджа без звука <strong>бессмысленна</strong>. Скорее всего, выбранное аудиоустройство занято в эксклюзивном режиме (например, ASIO) или микрофон отключен. Пожалуйста, выберите другой рабочий источник звука для веб-камеры бэкстейджа:
+            </p>
+
+            <div className="bg-zinc-950/50 p-4 rounded-xl border border-white/5 max-h-[300px] overflow-y-auto custom-scrollbar">
+              <AudioDeviceManager 
+                settings={project?.audioSettings || getGlobalAudioSettings()}
+                onSettingsChange={(newSettings) => {
+                  setProject(p => p ? { ...p, audioSettings: newSettings } : p);
+                }}
+              />
+            </div>
+
+            <div className="flex gap-3 justify-end pt-2 border-t border-white/5">
+              <button
+                onClick={() => {
+                  setAudioSilenceError(false);
+                }}
+                className="flex-1 py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-xl text-xs font-bold transition-all"
+              >
+                Закрыть
+              </button>
+              <button
+                onClick={async () => {
+                  setAudioSilenceError(false);
+                  setTimeout(async () => {
+                    await startBackstageSession(project?.videoPath || '');
+                  }, 300);
+                }}
+                className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-600/20 transition-all flex items-center justify-center gap-2"
+              >
+                Начать запись заново
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
     </div>
       </TimelineProvider>
     </UIProvider>

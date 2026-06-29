@@ -20,7 +20,7 @@ const StudioDashboard: React.FC<StudioDashboardProps> = ({
   onToggleBackstage
 }) => {
   const isBackstageEnabled = project.audioSettings?.isBackstageEnabled || false;
-  const isBackstageRecording = project.audioSettings?.backstageMode === 'manual' ? isRecording : (isRecording && isBackstageEnabled);
+  const isBackstageRecording = isRecording && isBackstageEnabled;
   
   const formatTime = (time: number) => {
     return `${Math.floor(time / 60)}:${Math.floor(time % 60).toString().padStart(2, '0')}.${(time % 1).toFixed(3).substring(2)}`;
@@ -138,7 +138,6 @@ const StudioDashboard: React.FC<StudioDashboardProps> = ({
                 <Settings2 className="w-4 h-4" />
                 Настройки Бекстейджа:
               </div>
-              Режим: <span className="font-mono text-indigo-300">{project.audioSettings?.backstageMode === 'manual' ? 'Ручной' : 'Синхронный'}</span><br/>
               Статус камеры: <span className="font-mono text-zinc-300">{project.audioSettings?.isBackstageEnabled ? 'Включена (настройки ОС)' : 'Выключена'}</span>
             </div>
           </div>

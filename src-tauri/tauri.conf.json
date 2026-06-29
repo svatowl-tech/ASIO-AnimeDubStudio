@@ -11,10 +11,38 @@
   },
   "app": {
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' asset: https: blob: http://asset.localhost http://ipc.localhost; img-src 'self' asset: https: data: http://asset.localhost; media-src 'self' asset: https: blob: http://asset.localhost; connect-src 'self' asset: https: blob: http://ipc.localhost http://asset.localhost http://tauri.localhost;",
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' asset: tauri: https: blob: http://asset.localhost http://ipc.localhost http://tauri.localhost; img-src 'self' asset: tauri: https: data: blob: http://asset.localhost http://tauri.localhost; media-src 'self' asset: tauri: https: data: blob: file: http://asset.localhost http://tauri.localhost; connect-src 'self' asset: tauri: https: data: blob: http://ipc.localhost http://asset.localhost http://tauri.localhost;",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**", "C:\\**", "\\\\?\\**"]
+        "scope": [
+          "**",
+          "/**",
+          "C:\\**",
+          "D:\\**",
+          "E:\\**",
+          "F:\\**",
+          "G:\\**",
+          "H:\\**",
+          "I:\\**",
+          "J:\\**",
+          "K:\\**",
+          "L:\\**",
+          "M:\\**",
+          "N:\\**",
+          "O:\\**",
+          "P:\\**",
+          "Q:\\**",
+          "R:\\**",
+          "S:\\**",
+          "T:\\**",
+          "U:\\**",
+          "V:\\**",
+          "W:\\**",
+          "X:\\**",
+          "Y:\\**",
+          "Z:\\**",
+          "\\\\?\\**"
+        ]
       }
     },
     "windows": [

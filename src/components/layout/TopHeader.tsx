@@ -12,7 +12,6 @@ interface TopHeaderProps {
   handleSelectDocument: () => void;
   handleSelectReferenceAudio: () => void;
   handleMergeBackstage: () => void;
-  handleToggleBackstage: () => void;
   setShowQuickImport: (v: boolean) => void;
   setShowFixImport: (v: boolean) => void;
   handleBulkImport: () => void;
@@ -25,12 +24,15 @@ interface TopHeaderProps {
   handleExportAudioBook: () => void;
   handleExportStems: () => void;
   handleExportAllStemsZip: () => void;
+  onOpenBackstageEditor: () => void;
+  isBackstageSessionRecording?: boolean;
+  hasBackstageSessions?: boolean;
   setIsExporting: (v: boolean) => void;
   setExportOperation: (o: string) => void;
 }
 
 export const TopHeader: React.FC<TopHeaderProps> = (props) => {
-  const { project, setProject, recentProjects, handleNewProject, handleOpenProject, handleSaveProject, onLoadProject } = useProjectData();
+  const { project, setProject, recentProjects, handleNewProject, handleOpenProject, handleSaveProject, handleCloseProject, onLoadProject } = useProjectData();
 
   const handleSelectProjectFolder = async () => {
     if (window.electronAPI && project && project.projectPath) {
@@ -89,6 +91,7 @@ export const TopHeader: React.FC<TopHeaderProps> = (props) => {
       handleNewProject={handleNewProject}
       handleOpenProject={handleOpenProject}
       handleSaveProject={handleSaveProject}
+      handleCloseProject={handleCloseProject}
       handleSelectProjectFolder={handleSelectProjectFolder}
       handleOpenProjectFolder={handleOpenProjectFolder}
       handleSelectBackstageFolder={handleSelectBackstageFolder}
@@ -97,7 +100,6 @@ export const TopHeader: React.FC<TopHeaderProps> = (props) => {
       handleSelectDocument={props.handleSelectDocument}
       handleSelectReferenceAudio={props.handleSelectReferenceAudio}
       handleMergeBackstage={props.handleMergeBackstage}
-      handleToggleBackstage={props.handleToggleBackstage}
       setShowQuickImport={props.setShowQuickImport}
       setShowFixImport={props.setShowFixImport}
       handleBulkImport={props.handleBulkImport}
@@ -105,6 +107,9 @@ export const TopHeader: React.FC<TopHeaderProps> = (props) => {
       handleImportAudio={props.handleImportAudio}
       isDesktop={props.isDesktop}
       handleExport={props.handleExport}
+      onOpenBackstageEditor={props.onOpenBackstageEditor}
+      isBackstageSessionRecording={props.isBackstageSessionRecording}
+      hasBackstageSessions={props.hasBackstageSessions}
       handleBatchExport={props.handleBatchExport}
       handleMuxVideo={props.handleMuxVideo}
       handleExportAudioBook={props.handleExportAudioBook}

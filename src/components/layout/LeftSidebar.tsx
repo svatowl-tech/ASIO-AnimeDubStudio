@@ -10,6 +10,26 @@ export const LeftSidebar: React.FC = () => {
   const sidebarRef = useRef<HTMLDivElement>(null);
   const [sidebarScrollTop, setSidebarScrollTop] = useState(0);
 
+  const handleShiftSubtitles = (newOffset: number) => {
+    if (!project) return;
+    const currentOffset = project.subtitlesOffset || 0;
+    const delta = newOffset - currentOffset;
+
+    if (delta === 0) return;
+
+    const shiftedSubtitles = project.subtitles.map((sub) => ({
+      ...sub,
+      start: Number((sub.start + delta).toFixed(3)),
+      end: Number((sub.end + delta).toFixed(3)),
+    }));
+
+    setProject({
+      ...project,
+      subtitles: shiftedSubtitles,
+      subtitlesOffset: Number(newOffset.toFixed(3)),
+    });
+  };
+
   return (
     <Sidebar 
       project={project}
@@ -28,6 +48,7 @@ export const LeftSidebar: React.FC = () => {
         setSidebarWidth(newWidth);
       }}
       referenceAudioRef={referenceAudioRef as React.RefObject<HTMLAudioElement>}
+      onShiftSubtitles={handleShiftSubtitles}
     />
   );
 };

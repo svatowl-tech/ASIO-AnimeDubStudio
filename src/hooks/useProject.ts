@@ -129,6 +129,15 @@ export const useProject = () => {
     }
   };
 
+  const handleCloseProject = () => {
+    if (project) {
+      if (window.confirm("Вы уверены, что хотите закрыть текущий проект?")) {
+        setProject(null);
+        logger.info("Project closed by user.");
+      }
+    }
+  };
+
   return {
     project,
     setProject,
@@ -136,6 +145,7 @@ export const useProject = () => {
     handleNewProject,
     handleOpenProject,
     handleSaveProject,
+    handleCloseProject,
     onLoadProject
   };
 };

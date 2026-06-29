@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Circle, Square, Repeat, ZoomOut, ZoomIn, Layers, Video } from 'lucide-react';
+import { Circle, Square, Repeat, ZoomOut, ZoomIn, Layers, Video, Smile } from 'lucide-react';
 import { cn } from '../lib/utils';
 import VUMeter from './VUMeter';
 
@@ -16,10 +16,12 @@ interface TransportControlsProps {
   onToggleAutoHeight: () => void;
   zoomLevel: number;
   onZoomChange: (zoom: number) => void;
-  isBackstageRecording: boolean;
-  onToggleBackstage: () => void;
-  backstageMode?: 'parallel' | 'manual';
+  isBackstageSessionRecording: boolean;
+  onToggleBackstageSession: () => void;
   children?: React.ReactNode;
+  onSaveBlooper: () => void;
+  showWebcam?: boolean;
+  onToggleWebcam?: () => void;
 }
 
 const TransportControls: React.FC<TransportControlsProps> = ({
@@ -34,9 +36,11 @@ const TransportControls: React.FC<TransportControlsProps> = ({
   onToggleAutoHeight,
   zoomLevel,
   onZoomChange,
-  isBackstageRecording,
-  onToggleBackstage,
-  backstageMode = 'parallel',
+  isBackstageSessionRecording,
+  onToggleBackstageSession,
+  onSaveBlooper,
+  showWebcam,
+  onToggleWebcam,
   children
 }) => {
   return (
@@ -69,18 +73,49 @@ const TransportControls: React.FC<TransportControlsProps> = ({
           {isRecording ? "СТОП" : "ЗАПИСЬ"}
         </motion.button>
 
+        {onToggleWebcam && (
+          <button 
+            onClick={onToggleWebcam}
+            className={cn(
+              "flex items-center gap-1.5 px-3 h-9 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border",
+              showWebcam
+                ? "bg-indigo-600 border-indigo-500 text-white" 
+                : "bg-zinc-800 border-white/5 text-zinc-400 hover:text-white"
+            )}
+            title={showWebcam ? "Выключить камеру" : "Включить камеру"}
+          >
+            <Video className="w-3 h-3" />
+            КАМЕРА
+          </button>
+        )}
+
+        {showWebcam && (
+          <button 
+            onClick={onToggleBackstageSession}
+            className={cn(
+              "flex items-center gap-2 px-3 h-9 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border",
+              isBackstageSessionRecording 
+                ? "bg-rose-600 border-rose-500 text-white animate-pulse" 
+                : "bg-zinc-800 border-white/5 text-zinc-400 hover:text-white"
+            )}
+          >
+            <Video className="w-3 h-3" />
+            {isBackstageSessionRecording ? "БЕКСТЕЙДЖ: ИДЕТ ЗАПИСЬ" : "ЗАПИСЬ БЕКСТЕЙДЖА"}
+          </button>
+        )}
+
         <button 
-          onClick={onToggleBackstage}
+          onClick={onSaveBlooper}
           className={cn(
             "flex items-center gap-2 px-3 h-9 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border",
-            isBackstageRecording 
-              ? (backstageMode === 'manual' ? "bg-rose-600 border-rose-500 text-white animate-pulse" : "bg-amber-500 border-amber-400 text-white") 
-              : "bg-zinc-800 border-white/5 text-zinc-400 hover:text-white"
+            "bg-zinc-800 hover:bg-zinc-700 border-white/5 text-zinc-400 hover:text-amber-400"
           )}
+          title="Сохранить неудачный дубль"
         >
-          <Video className="w-3 h-3" />
-          {backstageMode === 'manual' ? (isBackstageRecording ? "БЕКСТЕЙДЖ: ЗАПИСЬ" : "ЗАПУСТИТЬ БЕКСТЕЙДЖ") : `БЕКСТЕЙДЖ: ${isBackstageRecording ? "ВКЛ" : "ВЫКЛ"}`}
+          <Smile className="w-4 h-4" />
+          ДУБЛЬ
         </button>
+
         {isRecording && (
           <div className="w-48 h-9 bg-black/20 rounded-xl px-2 flex items-center border border-white/5">
             <VUMeter 

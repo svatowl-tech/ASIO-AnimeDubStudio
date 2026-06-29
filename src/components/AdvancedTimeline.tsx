@@ -65,10 +65,7 @@ export const TimelineAutoScroller = ({ timelineRef, isPlaying, zoom }: any) => {
     const isOutLeft = currentX < scrollLeft;
 
     if (isOutRight || isOutLeft) {
-      if (isPlaying) {
-        // Simple assignment during playback for a clean "page turn" or to follow along instantly
-        el.scrollLeft = Math.max(0, currentX - clientWidth * 0.1);
-      }
+      el.scrollLeft = Math.max(0, currentX - clientWidth * 0.1);
     }
   }, [currentTime, isPlaying, zoom, timelineRef]);
   return null;

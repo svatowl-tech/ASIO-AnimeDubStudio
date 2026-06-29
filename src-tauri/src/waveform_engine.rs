@@ -106,6 +106,7 @@ pub async fn extract_audio_peaks_bin(app_handle: AppHandle, file_path: String, o
         // Fallback to system ffmpeg
         let fallback_output = tokio::process::Command::new("ffmpeg")
             .args(&[
+                "-nostdin",
                 "-y",
                 "-v", "quiet",
                 "-copyts",
@@ -278,7 +279,7 @@ pub async fn generate_waveform_peaks(app_handle: AppHandle, file_path: String, p
         
         if !success {
            let fallback = tokio::process::Command::new("ffmpeg")
-               .args(&["-y", "-v", "quiet", "-i", &file_path, "-vn", "-ac", "1", "-ar", "48000", &temp_wav_str])
+               .args(&["-nostdin", "-y", "-v", "quiet", "-i", &file_path, "-vn", "-ac", "1", "-ar", "48000", &temp_wav_str])
                .output().await;
                
            if let Ok(fo) = fallback {

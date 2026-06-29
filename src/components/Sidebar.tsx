@@ -1,5 +1,5 @@
 import React from 'react';
-import { FileText } from 'lucide-react';
+import { FileText, SlidersHorizontal, RotateCcw } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Project } from '../types';
 import { useSyncScriptScroll } from '../hooks/useSyncScriptScroll';
@@ -16,6 +16,7 @@ interface SidebarProps {
   onScroll: (scrollTop: number) => void;
   sidebarRef: React.RefObject<HTMLDivElement | null>;
   width?: number;
+  onShiftSubtitles?: (newOffset: number) => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
@@ -29,7 +30,8 @@ const Sidebar: React.FC<SidebarProps> = ({
   sidebarScrollTop,
   onScroll,
   sidebarRef,
-  width = 320
+  width = 320,
+  onShiftSubtitles
 }) => {
   const currentLineIndex = React.useMemo(() => {
     if (!project || project.subtitles.length === 0) return 0;
@@ -157,6 +159,46 @@ const Sidebar: React.FC<SidebarProps> = ({
             >
               След.
             </button>
+          </div>
+        )}
+
+        {project && onShiftSubtitles && (
+          <div className="mt-4 pt-4 border-t border-white/5 flex flex-col gap-2">
+            <div className="flex justify-between items-center">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 flex items-center gap-1.5 font-sans">
+                <SlidersHorizontal className="w-3 h-3 text-rose-500" />
+                Сдвиг субтитров
+              </span>
+              <span className={cn(
+                "text-[10px] font-mono font-bold px-1.5 py-0.5 rounded",
+                (project.subtitlesOffset || 0) === 0 
+                  ? "text-zinc-500 bg-zinc-800/30" 
+                  : (project.subtitlesOffset || 0) > 0 
+                    ? "text-emerald-400 bg-emerald-500/10" 
+                    : "text-rose-400 bg-rose-500/10"
+              )}>
+                {(project.subtitlesOffset || 0) > 0 ? '+' : ''}{(project.subtitlesOffset || 0).toFixed(1)}s
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input 
+                type="range"
+                min="-10"
+                max="10"
+                step="0.1"
+                value={project.subtitlesOffset || 0}
+                onChange={(e) => onShiftSubtitles(parseFloat(e.target.value))}
+                className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-rose-500"
+              />
+              <button
+                onClick={() => onShiftSubtitles(0)}
+                disabled={(project.subtitlesOffset || 0) === 0}
+                className="p-1 text-zinc-500 hover:text-white disabled:opacity-30 disabled:hover:text-zinc-500 transition-colors rounded hover:bg-zinc-800"
+                title="Сбросить сдвиг"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         )}
       </div>

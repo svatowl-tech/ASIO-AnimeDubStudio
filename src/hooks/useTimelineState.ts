@@ -40,11 +40,12 @@ export const useTimelineState = (
     if (videoRef.current) videoRef.current.currentTime = safeTime;
     if (referenceAudioRef.current) referenceAudioRef.current.currentTime = safeTime;
     setCurrentTime(safeTime);
+    currentTimeRef.current = safeTime;
     
     if (project) {
       playbackEngine.seek(safeTime, project.tracks);
     }
-  }, [duration, project, videoRef, referenceAudioRef]);
+  }, [duration, project, videoRef, referenceAudioRef, currentTimeRef]);
 
   const togglePlay = useCallback(async () => {
     if (isTogglingPlayRef.current) return;
@@ -60,6 +61,9 @@ export const useTimelineState = (
       } else {
         if (videoRef.current && !videoError) {
           try {
+            if (Math.abs(videoRef.current.currentTime - currentTimeRef.current) > 0.05) {
+               videoRef.current.currentTime = currentTimeRef.current;
+            }
             await videoRef.current.play();
             setIsPlaying(true);
             if (project) {
@@ -92,7 +96,33 @@ export const useTimelineState = (
             if (error.name !== 'AbortError') {
               console.error("Playback failed:", error);
               setVideoError(`Playback failed: ${error.message || "Unknown error"}`);
-              setIsPlaying(false);
+              
+              if (error.name === 'NotSupportedError' || error.name === 'NotAllowedError') {
+                // If video fails due to no src or permissions, we can still play audio
+                setIsPlaying(true);
+                if (project) {
+                  const tracksToPlay = [...project.tracks];
+                  const originalsTrack = project.tracks.find(t => t.name === 'Оригинал');
+                  if (project.referenceAudioPath && (!originalsTrack || originalsTrack.segments.length === 0)) {
+                    tracksToPlay.push({
+                      id: 'reference-track',
+                      name: 'Reference',
+                      volume: originalsTrack?.volume ?? 1.0,
+                      isMuted: originalsTrack?.isMuted ?? false,
+                      isSolo: originalsTrack?.isSolo ?? false,
+                      segments: [{
+                        id: 'reference-seg',
+                        startTime: 0,
+                        duration: duration,
+                        filePath: project.referenceAudioPath.startsWith('./') && project.projectPath ? `${project.projectPath}/${project.referenceAudioPath.slice(2)}` : project.referenceAudioPath
+                      }]
+                    } as any);
+                  }
+                  playbackEngine.play(tracksToPlay, currentTimeRef.current);
+                }
+              } else {
+                setIsPlaying(false);
+              }
             }
           }
         } else {
@@ -140,37 +170,47 @@ export const useTimelineState = (
   }, [duration]);
 
   // Sync playback engine with video currentTime periodically
+  const lastTickRef = useRef<number>(performance.now());
+
   useEffect(() => {
-    if (!isPlaying || !videoRef.current) return;
+    if (!isPlaying) return;
 
     let rafId: number;
-    let lastLoggedId: string | null = null;
+    lastTickRef.current = performance.now();
     
     const sync = () => {
-      if (videoRef.current && isPlaying) {
-        let time = videoRef.current.currentTime;
-        
-        // Loop Logic
-        if (isLooping && loopRange && time >= loopRange.end) {
-          time = loopRange.start;
-          videoRef.current.currentTime = time;
-          if (referenceAudioRef.current) referenceAudioRef.current.currentTime = time;
-          playbackEngine.seek(time, project?.tracks || []);
-        }
+      if (!isPlaying) return;
 
-        playbackEngine.tick(time, project?.tracks || []);
-        setCurrentTime(time);
-        
-        // Sync Logic for logging/subtitles could go here if needed, 
-        // but it was mostly for debug in App.tsx
-        
-        rafId = requestAnimationFrame(sync);
+      let time = currentTimeRef.current;
+      
+      if (videoRef.current && !videoRef.current.paused && !videoError) {
+        time = videoRef.current.currentTime;
+      } else {
+        const now = performance.now();
+        const elapsed = (now - lastTickRef.current) / 1000;
+        time += elapsed;
       }
+      
+      lastTickRef.current = performance.now();
+        
+      // Loop Logic
+      if (isLooping && loopRange && time >= loopRange.end && time - loopRange.end < 1.0) {
+        time = loopRange.start;
+        if (videoRef.current) videoRef.current.currentTime = time;
+        if (referenceAudioRef.current) referenceAudioRef.current.currentTime = time;
+        playbackEngine.seek(time, project?.tracks || []);
+      }
+
+      playbackEngine.tick(time, project?.tracks || []);
+      setCurrentTime(time);
+      currentTimeRef.current = time;
+      
+      rafId = requestAnimationFrame(sync);
     };
 
     rafId = requestAnimationFrame(sync);
     return () => cancelAnimationFrame(rafId);
-  }, [isPlaying, isLooping, loopRange, project?.tracks, videoRef, referenceAudioRef]);
+  }, [isPlaying, isLooping, loopRange, project?.tracks, videoRef, referenceAudioRef, videoError]);
 
   // Update playback engine when video playback rate changes
   useEffect(() => {
