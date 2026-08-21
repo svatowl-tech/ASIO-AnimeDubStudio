@@ -13,6 +13,7 @@
     "lint": "tsc --noEmit",
     "tauri": "tauri",
     "version:sync": "node scripts/sync-version.js",
+    "generate:icons": "node scripts/generate-icons.js",
     "postinstall": "node scripts/setup-ffmpeg.js"
   },
   "build": {
