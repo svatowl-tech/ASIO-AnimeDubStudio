@@ -113,6 +113,9 @@ jobs:
       - name: Install npm dependencies and setup FFmpeg sidecars
         run: npm ci || npm install
 
+      - name: Generate Fresh and Valid Application Icons
+        run: npm run generate:icons
+
       - name: Sync configuration files
         run: node scripts/sync-version.js
 
