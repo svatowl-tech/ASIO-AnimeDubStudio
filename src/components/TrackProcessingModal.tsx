@@ -64,7 +64,7 @@ export const TrackProcessingModal = () => {
 
   const onSave = (settings: TrackProcessing) => {
     if (!project || !processingTrackId) return;
-    const newTracks = project.tracks.map(t => 
+    const newTracks = (project.tracks || []).map(t => 
       t.id === processingTrackId ? { ...t, processing: settings } : t
     );
     setProject({ ...project, tracks: newTracks });

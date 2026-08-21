@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { logger } from '../lib/logger';
 
-export const Waveform = ({ peaks, color = '#3b82f6' }: { peaks: number[], color?: string }) => {
+export const Waveform = React.memo(({ peaks, color = '#3b82f6' }: { peaks: number[], color?: string }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -74,5 +74,7 @@ export const Waveform = ({ peaks, color = '#3b82f6' }: { peaks: number[], color?
   }, [peaks, color]);
 
   return <canvas ref={canvasRef} className="w-full h-full opacity-60 pointer-events-none block" />;
-};
+});
+
+Waveform.displayName = 'Waveform';
 

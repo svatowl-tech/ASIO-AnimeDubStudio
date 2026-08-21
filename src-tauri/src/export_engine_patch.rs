@@ -27,7 +27,7 @@ pub async fn export_backstage_assemble(
     let professional = settings.professional_editing;
 
     // Check camera audio
-    let probe_out = Command::new("ffprobe")
+    let probe_out = Command::new(crate::get_ffprobe_path())
         .args(["-i", &video_path, "-show_streams", "-select_streams", "a", "-loglevel", "error"])
         .output().await;
     let has_cam_audio = probe_out.map(|o| !o.stdout.is_empty()).unwrap_or(true);
@@ -106,7 +106,7 @@ pub async fn export_backstage_assemble(
             }
         }
 
-        let mut cmd = Command::new("ffmpeg");
+        let mut cmd = Command::new(crate::get_ffmpeg_path());
         cmd.arg("-nostdin").arg("-y");
         cmd.arg("-i").arg(&video_path);
         
@@ -140,7 +140,7 @@ pub async fn export_backstage_assemble(
     f.write_all(concat_list.as_bytes()).map_err(|e| e.to_string())?;
 
     println!("[export_backstage_assemble] Склеивание {} блоков...", chunk_files.len());
-    let mut concat_cmd = Command::new("ffmpeg");
+    let mut concat_cmd = Command::new(crate::get_ffmpeg_path());
     concat_cmd.args([
         "-nostdin",
         "-y",

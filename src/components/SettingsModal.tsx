@@ -9,15 +9,13 @@ import { useProjectData } from '../contexts/ProjectContext';
 
 const SettingsModal: React.FC = () => {
   const { activeModal, setActiveModal } = useUIState();
-  const { project, setProject } = useProjectData();
+  const { project, setProject, handleSaveProject } = useProjectData();
   const show = activeModal === 'settings';
 
   const onClose = () => setActiveModal(null);
 
   const onProjectUpdate = (updates: any) => {
-    if (project) {
-      setProject({ ...project, ...updates });
-    }
+    setProject(prev => prev ? { ...prev, ...updates } : null);
   };
 
   const onStartCalibration = () => {
@@ -177,7 +175,10 @@ const SettingsModal: React.FC = () => {
 
             <div className="p-6 bg-zinc-800/50 flex justify-end gap-3">
               <button onClick={onClose} className="px-6 py-2 rounded-xl font-bold text-sm hover:bg-white/5 transition-all">Отмена</button>
-              <button onClick={onClose} className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-xl font-bold text-sm transition-all">Сохранить</button>
+              <button onClick={() => {
+                onClose();
+                handleSaveProject();
+              }} className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-xl font-bold text-sm transition-all">Сохранить</button>
             </div>
           </motion.div>
         </div>

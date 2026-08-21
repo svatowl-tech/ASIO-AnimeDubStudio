@@ -14,6 +14,7 @@ export interface ProjectContextType {
   redo: () => void;
   canUndo: boolean;
   canRedo: boolean;
+  saveSnapshot: (targetId?: string) => void;
 }
 
 const ProjectContext = createContext<ProjectContextType | null>(null);

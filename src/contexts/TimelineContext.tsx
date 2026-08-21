@@ -12,6 +12,7 @@ export interface TimelineContextType {
   selectedSegmentIds: string[];
   isLooping: boolean;
   loopRange: { start: number; end: number } | null;
+  isHighlightingMissingSubtitles?: boolean;
   currentTimeRef: MutableRefObject<number>;
   videoRef: RefObject<HTMLVideoElement>;
   referenceAudioRef: RefObject<HTMLAudioElement>;
@@ -27,6 +28,7 @@ export interface TimelineContextType {
   setSelectedSegmentIds: (ids: React.SetStateAction<string[]>) => void;
   setIsLooping: (l: boolean) => void;
   setLoopRange: (r: { start: number; end: number } | null) => void;
+  setIsHighlightingMissingSubtitles?: (val: boolean) => void;
   
   togglePlay: () => void;
   handleSeek: (time: number) => void;

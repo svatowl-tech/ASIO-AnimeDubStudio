@@ -39,23 +39,28 @@ import {
   Circle,
   Square,
   Repeat,
-  Smile
+  Smile,
+  Film
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useDropzone } from 'react-dropzone';
 import WaveSurfer from 'wavesurfer.js';
-import { cn, getSafeFileUrl, getGlobalAudioSettings, getDefaultKeyMap, safeConfirm } from './lib/utils';
+import { cn, getSafeFileUrl, getGlobalAudioSettings, getDefaultKeyMap, safeConfirm, getFriendlySubtitleErrorMessage, getFriendlyFileLoadErrorMessage } from './lib/utils';
 import { FixesPanel } from './components/FixesPanel';
 import { Waveform } from './components/Waveform';
 import AudioSegmentView from './components/AudioSegmentView';
 import VUMeter from './components/VUMeter';
 import AudioDeviceManager from './components/AudioDeviceManager';
 import ExportModal from './components/ExportModal';
+import CastingImportModal from './components/CastingImportModal';
+import DocumentImportModal from './components/DocumentImportModal';
 import QuickImportModal from './components/QuickImportModal';
 import FixImportModal from './components/FixImportModal';
+import { ensureBlankVideoForProject } from './services/blankVideoService';
 import PreRollCountdown from './components/PreRollCountdown';
 import Teleprompter from './components/Teleprompter';
-import { Project, SubtitleLine, AudioTrack, AudioSegment, Fix, Marker, TrackProcessing } from './types';
+import { Project, SubtitleLine, AudioTrack, AudioSegment, Fix, Marker, TrackProcessing, TeleprompterMode } from './types';
+import { getStoredTeleprompterPref, saveTeleprompterPref } from './components/teleprompter/useTeleprompterLayout';
 import { SubtitleService, ParsedSubtitles } from './services/subtitleService';
 import { TextImportService } from './services/textImportService';
 import { LatencyCalibration } from './components/LatencyCalibration';
@@ -68,7 +73,11 @@ import { playbackEngine } from './services/playbackEngine';
 import { logger } from './lib/logger';
 import { splitSegmentAtTime } from './lib/timelineUtils';
 
+import { MissingSubtitlesBanner } from './components/MissingSubtitlesBanner';
+import { getSubtitleCoverageStats } from './lib/subtitleCoverage';
+
 // Extracted Components
+import { AudioDAWView } from './components/AudioDAWView';
 import ActorOverlay from './components/ActorOverlay';
 import PopoutWindow from './components/PopoutWindow';
 import StudioDashboard from './components/StudioDashboard';
@@ -95,12 +104,16 @@ import LeftSidebar from './components/layout/LeftSidebar';
 import { UIProvider } from './contexts/UIContext';
 import ModalsManager from './components/layout/ModalsManager';
 import BackstageEditor from './components/BackstageEditor';
+import { BackstageErrorBoundary } from './components/backstage/BackstageErrorBoundary';
 import { MkvTrackSelectorModal } from './components/MkvTrackSelectorModal';
 import TopHeader from './components/layout/TopHeader';
 import StyledExportOverlay from './components/layout/ExportOverlay';
+import VideoPreparationModal from './components/VideoPreparationModal';
+import { prepareVideoProxy, syncProxyVideoWithProject } from './services/videoProxyService';
 import { useAudioEngine } from './hooks/useAudioEngine';
 import { useBackstageSession } from './hooks/useBackstageSession';
 import { useProjectImport } from './hooks/useProjectImport';
+import { useAppExport } from './hooks/useAppExport';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { openStudioWindow, closeStudioWindow } from './lib/windowHelpers';
 
@@ -116,40 +129,54 @@ export default function App() {
     onLoadProject 
   } = useProject();
 
+  const [saveTrigger, setSaveTrigger] = useState(0);
+
   const handleSaveProject = async () => {
-    if (!project || !project.projectPath) {
-      logger.warn("Save Project Attempted: Project not saved on disk or no projectPath.");
-      alert("Проект не сохранен на диске. Используйте 'Создать проект'.");
-      return;
-    }
-    logger.info(`Saving project: ${project.name} at ${project.projectPath}`);
-    const updatedProject = {
-      ...project,
-      uiState: {
-        zoomLevel,
-        timelineHeight,
-        sidebarWidth,
-        teleprompterMode,
-        teleprompterFontSize,
-        teleprompterLineHeight,
-        teleprompterPacing,
-        teleprompterPosition,
-        teleprompterSize,
-        showFixes
+    setProject(prev => {
+      if (!prev || !prev.projectPath) {
+        logger.warn("Save Project Attempted: Project not saved on disk or no projectPath.");
+        alert("Проект не сохранен на диске. Используйте 'Создать проект'.");
+        return prev;
       }
-    };
-    setProject(updatedProject);
-    if (window.electronAPI) {
-      try {
-        await window.electronAPI.saveProjectJson({ projectPath: project.projectPath, projectData: updatedProject });
-        logger.info("Project saved successfully.");
-        alert("Проект сохранен!");
-      } catch (error) {
-        logger.error(`Save Project Failed: ${error}`);
-        alert(`Ошибка при сохранении проекта: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
+      return {
+        ...prev,
+        uiState: {
+          zoomLevel,
+          timelineHeight,
+          sidebarWidth,
+          teleprompterMode,
+          teleprompterFontSize,
+          teleprompterLineHeight,
+          teleprompterPacing,
+          teleprompterPosition,
+          teleprompterSize,
+          showFixes
+        }
+      };
+    });
+    
+    // Trigger the actual disk save in useEffect after state has committed
+    setSaveTrigger(t => t + 1);
   };
+
+  useEffect(() => {
+    if (saveTrigger > 0 && project && project.projectPath && window.electronAPI) {
+      const projectToSave = JSON.parse(JSON.stringify(project));
+      delete projectToSave.audioSettings;
+      
+      logger.info(`Saving project: ${projectToSave.name} at ${projectToSave.projectPath}`);
+      window.electronAPI.saveProjectJson({ projectPath: projectToSave.projectPath, projectData: projectToSave })
+        .then(() => {
+          logger.info("Project saved successfully.");
+          alert("Проект сохранен!");
+        })
+        .catch((error) => {
+          logger.error(`Save Project Failed: ${error}`);
+          alert(`Ошибка при сохранении проекта: ${error instanceof Error ? error.message : String(error)}`);
+        });
+    }
+  }, [saveTrigger]); // We intentionally do not include 'project' to prevent auto-saving on every project change
+
 
   const [duration, setDuration] = useState(0);
   const [isWebcamSimulated, setIsWebcamSimulated] = useState(false);
@@ -203,6 +230,7 @@ export default function App() {
 
   const { saveSnapshot, undo, redo, canUndo, canRedo } = useTimelineHistory(project, setProject);
 
+
   const {
     isSessionRecording: isBackstageSessionRecording,
     startSession: startBackstageSession,
@@ -231,15 +259,13 @@ export default function App() {
       }
     } else {
       if (lastDubStartTimeRef.current !== null && project?.selectedRole) {
-        const duration = Date.now() - lastDubStartTimeRef.current;
-        recordDub(`dub-${Date.now()}`, currentTimeRef.current, duration);
         if (stopDub) {
           stopDub();
         }
         lastDubStartTimeRef.current = null;
       }
     }
-  }, [isRecording, recordDub, startDub, stopDub, project?.selectedRole]);
+  }, [isRecording, startDub, stopDub, project?.selectedRole]);
   
   const isRippleEnabledRef = useRef(isRippleEnabled);
   useEffect(() => { isRippleEnabledRef.current = isRippleEnabled; }, [isRippleEnabled]);
@@ -297,6 +323,91 @@ export default function App() {
   const [externalWindow, setExternalWindow] = useState<Window | null>(null);
   const [popupBlocked, setPopupBlocked] = useState(false);
   const [fixImportText, setFixImportText] = useState('');
+
+  const [videoPreparation, setVideoPreparation] = useState<{
+    isOpen: boolean;
+    progress: number;
+    time?: string;
+    statusText?: string;
+    error?: string | null;
+    isSuccess?: boolean;
+  }>({
+    isOpen: false,
+    progress: 0,
+    time: '',
+    statusText: 'Конвертирование видео в совместимый формат MP4 (H.264)...',
+    error: null,
+    isSuccess: false
+  });
+
+  const handleCreateProxyVideo = useCallback(async (videoPathOverride?: string, projectPathOverride?: string) => {
+    const targetVideoPath = videoPathOverride || project?.videoPath;
+    const targetProjectPath = projectPathOverride || project?.projectPath || (targetVideoPath ? `${targetVideoPath.replace(/\.[^/.]+$/, "")}_Project` : '');
+
+    if (!targetVideoPath || !targetProjectPath) {
+      logger.warn("Cannot create proxy: videoPath or projectPath is missing");
+      setVideoError("Не найден путь к видео или проекту для конвертирования.");
+      return;
+    }
+
+    setVideoPreparation({
+      isOpen: true,
+      progress: 0,
+      time: '',
+      statusText: 'Подготовка видео через FFmpeg в формат MP4 (H.264)...',
+      error: null,
+      isSuccess: false
+    });
+
+    try {
+      const res = await prepareVideoProxy({
+        videoPath: targetVideoPath,
+        projectPath: targetProjectPath,
+        duration: duration > 0 ? duration : undefined,
+        onProgress: (data) => {
+          setVideoPreparation(prev => ({
+            ...prev,
+            progress: data.percent,
+            time: data.time,
+            statusText: data.operation ? `${data.operation}...` : prev.statusText
+          }));
+        }
+      });
+
+      if (res.success && res.proxyPath) {
+        setVideoPreparation(prev => ({
+          ...prev,
+          progress: 100,
+          isSuccess: true,
+          statusText: 'Видео успешно сконвертировано!'
+        }));
+
+        if (project) {
+          const updatedProject = await syncProxyVideoWithProject(project, res.proxyPath);
+          setProject(updatedProject);
+        }
+
+        setVideoError(null);
+        if (videoRef.current) {
+          videoRef.current.load();
+        }
+
+        setTimeout(() => {
+          setVideoPreparation(prev => ({ ...prev, isOpen: false, isSuccess: false }));
+        }, 900);
+      } else {
+        setVideoPreparation(prev => ({
+          ...prev,
+          error: res.error || 'Не удалось сконвертировать видео. Проверьте файл.'
+        }));
+      }
+    } catch (err: any) {
+      setVideoPreparation(prev => ({
+        ...prev,
+        error: String(err?.message || err)
+      }));
+    }
+  }, [project, duration, setProject]);
 
   // Exit app handler for Tauri main window
   useEffect(() => {
@@ -505,10 +616,14 @@ export default function App() {
   const showWebcam = !!project?.audioSettings?.isBackstageEnabled;
   const [videoType, setVideoType] = useState<string | null>(null);
   const [showCalibration, setShowCalibration] = useState(false);
-  const [teleprompterMode, setTeleprompterMode] = useState<'compact' | 'expanded'>('compact');
+  const initialTpPref = getStoredTeleprompterPref();
+  const [teleprompterMode, setTeleprompterMode] = useState<TeleprompterMode>(initialTpPref.mode || 'compact');
   const [settingsRevision, setSettingsRevision] = useState(0);
   const [teleprompterPosition, setTeleprompterPosition] = useState({ x: 0, y: 0 });
-  const [teleprompterSize, setTeleprompterSize] = useState({ width: 800, height: 200 });
+  const [teleprompterSize, setTeleprompterSize] = useState({ 
+    width: initialTpPref.floatWidth || 460, 
+    height: initialTpPref.floatHeight || 200 
+  });
 
 
   useEffect(() => {
@@ -571,6 +686,18 @@ export default function App() {
   }, [isDesktop]);
   const [preRollCountdown, setPreRollCountdown] = useState<number | null>(null);
   const [sidebarScrollTop, setSidebarScrollTop] = useState(0);
+  const [isHighlightingMissingSubtitles, setIsHighlightingMissingSubtitles] = useState(false);
+
+  const handleStartRecordingMissing = useCallback(() => {
+    setIsHighlightingMissingSubtitles(true);
+    const stats = getSubtitleCoverageStats(project);
+    if (stats.unrecordedLines.length > 0) {
+      const firstUnrecorded = stats.unrecordedLines[0];
+      const preroll = project?.audioSettings?.prerollSeconds ?? 2;
+      const offset = project?.subtitlesOffset || 0;
+      handleSeek(Math.max(0, firstUnrecorded.start + offset - preroll));
+    }
+  }, [project, handleSeek]);
   const [teleprompterFontSize, setTeleprompterFontSize] = useState(32);
   const [teleprompterLineHeight, setTeleprompterLineHeight] = useState(1.4);
   const [teleprompterPacing, setTeleprompterPacing] = useState<'auto' | 'manual'>('auto');
@@ -603,8 +730,12 @@ export default function App() {
     return () => unlisten();
   }, [setExportProgress, setExportOperation]);
 
+  // Keep projectRef always up to date
   useEffect(() => {
     projectRef.current = project;
+  }, [project]);
+
+  useEffect(() => {
     // When switching projects, clear the buffer cache to save memory
     if (project?.id) {
        playbackEngine.clearCache();
@@ -612,8 +743,11 @@ export default function App() {
     if (project) {
       playbackEngine.setAudioOffset(project.audioOffsetMs || 0);
       playbackEngine.setPlayOriginalTrackSegments(!!project.audioSettings?.playOriginalTrackSegments);
+      if (project.audioSettings?.outputDeviceId) {
+        playbackEngine.setOutputDevice(project.audioSettings.outputDeviceId);
+      }
     }
-  }, [project?.id, project?.audioOffsetMs, project?.audioSettings?.playOriginalTrackSegments]);
+  }, [project?.id, project?.audioOffsetMs, project?.audioSettings?.playOriginalTrackSegments, project?.audioSettings?.outputDeviceId]);
 
   useEffect(() => {
     return () => {
@@ -621,6 +755,41 @@ export default function App() {
       playbackEngine.clearCache();
     };
   }, []);
+
+  // Dynamic duration control for audio-only projects
+  useEffect(() => {
+    if (!project) {
+      setDuration(0);
+      return;
+    }
+    // If there is a video or reference audio, their metadata listeners will set the duration
+    if (project.videoPath || project.videoUrl || project.referenceAudioPath) {
+      return;
+    }
+
+    // Default duration for empty audio projects: 5 minutes (300 seconds)
+    let maxTime = 300;
+    
+    project.tracks.forEach(track => {
+      track.segments.forEach(seg => {
+        const segEnd = (seg.startTime || 0) + (seg.duration || 0);
+        if (segEnd > maxTime) {
+          maxTime = segEnd;
+        }
+      });
+    });
+
+    if (project.subtitles) {
+      project.subtitles.forEach(sub => {
+        if (sub.end > maxTime) {
+          maxTime = sub.end;
+        }
+      });
+    }
+
+    const finalDuration = maxTime > 300 ? maxTime + 15 : 300;
+    setDuration(finalDuration);
+  }, [project?.id, project?.tracks, project?.subtitles, project?.videoPath, project?.videoUrl, project?.referenceAudioPath, setDuration]);
 
   // Hydrator for missing waveforms (e.g. loaded from DB)
   useEffect(() => {
@@ -636,11 +805,11 @@ export default function App() {
           if (!prev) return prev;
           return {
             ...prev,
-            tracks: prev.tracks.map(t => {
+            tracks: (prev.tracks || []).map(t => {
               if (t.name === 'Оригинал') {
                 return {
                   ...t,
-                  segments: t.segments.map(s => {
+                  segments: (t.segments || []).map(s => {
                      if (s.id === 'original-audio-seg' || !s.waveform || s.waveform.length === 0) {
                         return { ...s, waveform: Array.from(prev.originalPeaks!) };
                      }
@@ -684,18 +853,18 @@ export default function App() {
                               if (!p) return p;
                               return {
                                   ...p,
-                                  tracks: p.tracks.map(t => t.id === trackId ? {
+                                  tracks: (p.tracks).map(t => t.id === trackId ? {
                                       ...t,
-                                      segments: t.segments.map(s => s.id === segmentId ? { ...s, waveform: Array.from(res.data as any), isExtractingWaveform: false } : s)
+                                      segments: (t.segments || []).map(s => s.id === segmentId ? { ...s, waveform: Array.from(res.data as any), isExtractingWaveform: false } : s)
                                   } : t)
                               };
                           });
                       } else {
                           setProject(p => p ? {
                               ...p,
-                              tracks: p.tracks.map(t => t.id === trackId ? {
+                              tracks: (p.tracks).map(t => t.id === trackId ? {
                                   ...t,
-                                  segments: t.segments.map(s => s.id === segmentId ? { ...s, isExtractingWaveform: false } : s)
+                                  segments: (t.segments || []).map(s => s.id === segmentId ? { ...s, isExtractingWaveform: false } : s)
                               } : t)
                           } : p);
                       }
@@ -704,9 +873,9 @@ export default function App() {
                       console.warn("Failed to generate waveform for", seg.filePath, err);
                       setProject(p => p ? {
                           ...p,
-                          tracks: p.tracks.map(t => t.id === trackId ? {
+                          tracks: (p.tracks).map(t => t.id === trackId ? {
                               ...t,
-                              segments: t.segments.map(s => s.id === segmentId ? { ...s, isExtractingWaveform: false } : s)
+                              segments: (t.segments || []).map(s => s.id === segmentId ? { ...s, isExtractingWaveform: false } : s)
                           } : t)
                       } : p);
                   });
@@ -736,21 +905,7 @@ export default function App() {
     audioSettings: getGlobalAudioSettings()
   }), []);
 
-  // Auto-save effect
-  useEffect(() => {
-    if (project && project.projectPath && window.electronAPI) {
-      const timer = setTimeout(() => {
-        window.electronAPI.saveProjectJson({ projectPath: project.projectPath!, projectData: project })
-          .then(res => {
-            if (res.success) {
-              console.log("[AutoSave] Project saved successfully");
-            }
-          })
-          .catch(err => console.error("[AutoSave] Error:", err));
-      }, 2000); // Debounce saves for 2 seconds
-      return () => clearTimeout(timer);
-    }
-  }, [project]);
+  // Removed redundant auto-save effect that conflicted with the one at line 1719
 
   const handleNativeDrop = useCallback(async (paths: string[]) => {
     for (const path of paths) {
@@ -758,7 +913,7 @@ export default function App() {
       const fileExt = fileName.substring(fileName.lastIndexOf('.')).toLowerCase();
       const fileDir = path.replace(/\\/g, '/').substring(0, path.replace(/\\/g, '/').lastIndexOf('/'));
 
-      const isVideo = ['.mp4', '.mkv', '.webm', '.mov', '.avi'].includes(fileExt);
+      const isVideo = ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.hevc', '.h265', '.265', '.ts', '.m2ts'].includes(fileExt);
       const isAudio = ['.mp3', '.wav', '.flac', '.ogg', '.m4a'].includes(fileExt);
 
       const isProjectActive = !!project?.videoUrl || !!project?.projectPath;
@@ -947,18 +1102,26 @@ export default function App() {
             
             if (contentToParse) {
                 const content = contentToParse;
-                const subtitles = await UniversalParserService.parse(content, fileName);
-                const roles = Array.from(new Set(subtitles.map(s => s.role)));
-                
-                setProject(p => {
-                  const base = p || createDefaultProject(fileName.split('.')[0]);
-                  return {
-                    ...base,
-                    subtitles,
-                    roles,
-                    selectedRole: roles[0] || 'Default'
-                  };
-                });
+                try {
+                  const subtitles = await UniversalParserService.parse(content, fileName);
+                  if (!subtitles || subtitles.length === 0) {
+                    throw new Error("Файл пуст или имеет неверную структуру.");
+                  }
+                  const roles = Array.from(new Set(subtitles.map(s => s.role)));
+                  
+                  setProject(p => {
+                    const base = p || createDefaultProject(fileName.split('.')[0]);
+                    return {
+                      ...base,
+                      subtitles,
+                      roles,
+                      selectedRole: roles[0] || 'Default'
+                    };
+                  });
+                } catch (parseErr) {
+                  const msg = getFriendlySubtitleErrorMessage(parseErr, fileName);
+                  alert(msg);
+                }
             }
         }
       }
@@ -1022,7 +1185,7 @@ export default function App() {
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     const isProjectActive = !!project?.videoUrl || !!project?.projectPath;
     
-    const mediaFiles = acceptedFiles.filter(f => f.type.startsWith('video/') || f.type.startsWith('audio/') || ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.mp3', '.wav', '.flac', '.ogg', '.m4a'].some(ext => f.name.toLowerCase().endsWith(ext)));
+    const mediaFiles = acceptedFiles.filter(f => f.type.startsWith('video/') || f.type.startsWith('audio/') || ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.hevc', '.h265', '.265', '.ts', '.m2ts', '.mp3', '.wav', '.flac', '.ogg', '.m4a'].some(ext => f.name.toLowerCase().endsWith(ext)));
     const textFiles = acceptedFiles.filter(f => ['.ass', '.srt', '.vtt', '.csv', '.fb2', '.txt', '.epub', '.docx', '.pdf'].some(ext => f.name.toLowerCase().endsWith(ext)));
 
     const isAudioDropOnly = mediaFiles.length > 0 && mediaFiles.every(f => f.type.startsWith('audio/') || ['.mp3', '.wav', '.flac', '.ogg', '.m4a'].some(ext => f.name.toLowerCase().endsWith(ext)));
@@ -1114,7 +1277,7 @@ export default function App() {
            projectRoot = `${fileDir}/${baseName}_Project`.replace(/\\/g, '/');
         }
 
-        const isVideo = file.type.startsWith('video/') || ['.mp4', '.mkv', '.webm', '.mov', '.avi'].some(ext => file.name.toLowerCase().endsWith(ext));
+        const isVideo = file.type.startsWith('video/') || ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.hevc', '.h265', '.265', '.ts', '.m2ts'].some(ext => file.name.toLowerCase().endsWith(ext));
         setProject(prev => {
           const baseProject = prev || createDefaultProject(file.name.replace(/\.[^/.]+$/, ""), projectRoot);
           return { 
@@ -1212,18 +1375,26 @@ export default function App() {
           content = await file.text();
       }
       
-      const subtitles = await UniversalParserService.parse(content, file.name);
-      const roles = Array.from(new Set(subtitles.map(s => s.role)));
-      
-      setProject(prev => {
-        const baseProject = prev || createDefaultProject(file.name.replace(/\.[^/.]+$/, ""), fileDir);
-        return {
-          ...baseProject,
-          subtitles,
-          roles,
-          selectedRole: roles[0] || 'Default'
-        };
-      });
+      try {
+        const subtitles = await UniversalParserService.parse(content, file.name);
+        if (!subtitles || subtitles.length === 0) {
+          throw new Error("Файл пуст или имеет неверную структуру.");
+        }
+        const roles = Array.from(new Set(subtitles.map(s => s.role)));
+        
+        setProject(prev => {
+          const baseProject = prev || createDefaultProject(file.name.replace(/\.[^/.]+$/, ""), fileDir);
+          return {
+            ...baseProject,
+            subtitles,
+            roles,
+            selectedRole: roles[0] || 'Default'
+          };
+        });
+      } catch (parseErr) {
+        const msg = getFriendlySubtitleErrorMessage(parseErr, file.name);
+        alert(msg);
+      }
     }
   }, [project, currentTimeRef.current]);
 
@@ -1231,7 +1402,7 @@ export default function App() {
     onDrop,
     noClick: true,
     accept: {
-      'video/*': ['.mp4', '.webm', '.mkv', '.mov', '.avi'],
+      'video/*': ['.mp4', '.webm', '.mkv', '.mov', '.avi', '.hevc', '.h265', '.265', '.ts', '.m2ts'],
       'audio/*': ['.mp3', '.wav', '.flac', '.ogg', '.m4a'],
       'text/plain': ['.txt', '.csv', '.vtt'],
       'application/x-subrip': ['.srt'],
@@ -1285,7 +1456,7 @@ export default function App() {
 
               setProject(prev => {
                 if (!prev) return null;
-                const updatedTracks = prev.tracks.map(track => {
+                const updatedTracks = (prev.tracks || []).map(track => {
                   if (track.id === recoveryInfo.track_id || track.name === 'Dubs') {
                     return { ...track, segments: [...track.segments, recoveredSegment] };
                   }
@@ -1382,226 +1553,9 @@ export default function App() {
     });
   };
 
-  const handleMergeBackstage = async () => {
-    if (!project || !project.projectPath || !window.electronAPI) return;
 
-    // Collect all unique backstage video paths from all segments
-    const videoPaths: string[] = [];
-    project.tracks.forEach(track => {
-      track.segments.forEach(seg => {
-        if (seg.backstageVideoPath && !videoPaths.includes(seg.backstageVideoPath)) {
-          videoPaths.push(seg.backstageVideoPath);
-        }
-      });
-    });
 
-    if (videoPaths.length === 0) {
-      alert("Нет записанных бекстейдж-видео для объединения.");
-      return;
-    }
 
-    const saveRes = await window.electronAPI.saveFile({
-      title: 'Сохранить финальный бекстейдж',
-      defaultPath: `${project.projectPath}/final_backstage.mp4`,
-      filters: [{ name: 'Video', extensions: ['mp4'] }]
-    });
-
-    if (!saveRes.success || !saveRes.data) return;
-    const finalOutputPath = saveRes.data;
-
-    setIsExporting(true);
-    setExportProgress(0);
-    setExportOperation("Preparing backstage video...");
-    
-    try {
-      logger.info(`Starting backstage merge for ${videoPaths.length} videos to ${finalOutputPath}`);
-      
-      const tempVideoPath = `${project.projectPath}/temp_backstage_concat.mp4`;
-      const tempAudioPath = `${project.projectPath}/temp_backstage_audio.wav`;
-
-      // 1. Concat all backstage videos
-      setExportOperation("Concatenating backstage video...");
-      logger.info(`Concatenating backstage videos to ${tempVideoPath}`);
-      const concatRes = await window.electronAPI.concatBackstageVideos({
-        videoPaths,
-        outputPath: tempVideoPath
-      });
-
-      if (!concatRes.success) {
-        throw new Error(`Ошибка при объединении видео: ${concatRes.error}`);
-      }
-
-      // 2. Export project audio (Original + Dubs)
-      setExportOperation("Mixing project audio for backstage...");
-      logger.info(`Mixing project audio for backstage to ${tempAudioPath}`);
-      const audioRes = await window.electronAPI.exportAudio({
-        projectJson: JSON.stringify({
-          tracks: project.tracks.map(t => ({
-            name: t.name,
-            isMuted: t.isMuted,
-            isSolo: t.isSolo,
-            segments: t.segments
-          })),
-          audioOffsetMs: project.audioOffsetMs || 0
-        }),
-        outputPath: tempAudioPath,
-        format: 'wav'
-      });
-
-      if (!audioRes.success) {
-        throw new Error(`Ошибка при экспорте аудио: ${audioRes.error}`);
-      }
-
-      // 3. Mux video from (1) and audio from (2)
-      if (project.videoPath && project.audioSettings?.webcamExportOverlay !== false) {
-        setExportOperation("Applying backstage overlay on main video...");
-        logger.info(`Applying backstage overlay onto ${project.videoPath} to ${finalOutputPath}`);
-        const overlayRes = await window.electronAPI.exportBackstageVideo({
-          mainVideoPath: project.videoPath,
-          backstageVideoPath: tempVideoPath,
-          finalAudioPath: tempAudioPath,
-          outputPath: finalOutputPath,
-          webcamExportOverlay: project.audioSettings?.webcamExportOverlay
-        });
-        
-        if (overlayRes.success) {
-          alert(`Бекстейдж успешно создан с проектным звуком: ${finalOutputPath}`);
-          logger.info("Backstage merge successful.");
-          // Clean up temp files
-          await window.electronAPI.deleteFile(tempVideoPath);
-          await window.electronAPI.deleteFile(tempAudioPath);
-        } else {
-          alert(`Ошибка при финальном сведении: ${overlayRes.error}`);
-          logger.error("Backstage overlay failed:", overlayRes.error);
-        }
-      } else {
-        setExportOperation("Muxing video with project audio...");
-        logger.info(`Muxing joined video with audio to ${finalOutputPath}`);
-        const muxRes = await window.electronAPI.muxVideo({
-          videoPath: tempVideoPath,
-          audioPath: tempAudioPath,
-          outputPath: finalOutputPath
-        });
-
-        if (muxRes.success) {
-          alert(`Бекстейдж успешно создан с проектным звуком: ${finalOutputPath}`);
-          logger.info("Backstage merge successful.");
-          // Clean up temp files
-          await window.electronAPI.deleteFile(tempVideoPath);
-          await window.electronAPI.deleteFile(tempAudioPath);
-        } else {
-          alert(`Ошибка при финальном сведении: ${muxRes.error}`);
-          logger.error("Backstage mux failed:", muxRes.error);
-        }
-      }
-    } catch (err) {
-      alert(`Ошибка: ${err instanceof Error ? err.message : String(err)}`);
-      logger.error("Backstage merge operation failed:", err);
-    } finally {
-      setIsExporting(false);
-      setExportProgress(100);
-      setExportOperation("");
-    }
-  };
-
-  const handleSaveBlooper = async () => {
-    if (isRecording) {
-      alert("Остановите запись (Пробел), чтобы сохранить этот дубль!");
-      return;
-    }
-
-    if (!project || !project.projectPath || !project.videoPath || !window.electronAPI) {
-      alert("Откройте проект и добавьте оригинальное видео.");
-      return;
-    }
-
-    let targetSegment: AudioSegment | null = null;
-
-    // Check if user has a segment selected
-    if (selectedSegmentIds && selectedSegmentIds.length > 0) {
-      for (const track of project.tracks) {
-        if (!track.isOriginal) {
-          const found = track.segments.find(s => selectedSegmentIds.includes(s.id));
-          if (found) {
-            targetSegment = found;
-            break;
-          }
-        }
-      }
-    }
-
-    // Otherwise, fallback to the latest recorded segment (or max start time if recordedAt is missing)
-    if (!targetSegment) {
-      let maxRecordedAt = -1;
-      let maxStartTimeFallback = -1;
-
-      for (const track of project.tracks) {
-        if (!track.isOriginal) {
-          for (const seg of track.segments) {
-            // Priority 1: Use recordedAt if available
-            if (seg.recordedAt !== undefined) {
-              if (seg.recordedAt > maxRecordedAt) {
-                maxRecordedAt = seg.recordedAt;
-                targetSegment = seg;
-              }
-            } 
-            // Priority 2: Fallback to startTime if no segments have recordedAt yet
-            else if (maxRecordedAt === -1 && seg.startTime > maxStartTimeFallback) {
-              maxStartTimeFallback = seg.startTime;
-              targetSegment = seg;
-            }
-          }
-        }
-      }
-    }
-
-    if (!targetSegment || !targetSegment.filePath) {
-      alert("Нет записанных реплик (сегментов) для сохранения дубля.");
-      return;
-    }
-
-    try {
-      const defaultFilename = `LoL_${targetSegment.text ? targetSegment.text.substring(0, 15).replace(/[^a-zA-Zа-яА-Я0-9]/g, '_') : 'blooper'}.mp4`;
-      const dialogRes = await window.electronAPI.saveFile({
-        title: 'Сохранить неудачный дубль',
-        defaultPath: `${project.projectPath}/${defaultFilename}`,
-        filters: [{ name: 'MP4 Video', extensions: ['mp4'] }]
-      });
-
-      if (!dialogRes.success || !dialogRes.data) return; // cancelled
-
-      const finalOutputPath = dialogRes.data;
-
-      setIsExporting(true);
-      setExportOperation("Сохранение смешного дубля...");
-      setExportProgress(0);
-
-      const blooperStartTime = Math.max(0, targetSegment.startTime - 3.0);
-      const blooperEndTime = targetSegment.startTime + targetSegment.duration + 1.0;
-      const voiceOffset = targetSegment.startTime - blooperStartTime;
-
-      const blooperRes = await window.electronAPI.exportBlooper({
-        videoPath: project.videoPath,
-        audioPath: targetSegment.filePath,
-        startTime: blooperStartTime,
-        endTime: blooperEndTime,
-        voiceOffset: voiceOffset,
-        outputPath: finalOutputPath
-      });
-
-      if (blooperRes.success) {
-        alert(`Неудачный дубль сохранен: ${finalOutputPath}`);
-      } else {
-        alert(`Ошибка при сохранении дубля: ${blooperRes.error}`);
-      }
-    } catch (e) {
-      alert(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setIsExporting(false);
-      setExportProgress(100);
-      setExportOperation("");
-    }
-  };
 
   const handleSelectReferenceAudio = async () => {
     if (!window.electronAPI) return;
@@ -1632,8 +1586,18 @@ export default function App() {
     
     const currentProject = project || createDefaultProject(fileData.name.replace(/\.[^/.]+$/, ""), finalProjectRoot || "");
     
+    let videoPath = currentProject.videoPath;
+    let videoUrl = currentProject.videoUrl;
+    if (!videoPath && finalProjectRoot) {
+      const blank = await ensureBlankVideoForProject(finalProjectRoot, 120);
+      videoPath = blank.videoPath;
+      videoUrl = blank.videoUrl;
+    }
+
     setProject({
       ...currentProject,
+      videoPath,
+      videoUrl,
       referenceAudioPath: fileData.path,
       audioSettings: {
         ...(currentProject.audioSettings || getGlobalAudioSettings()),
@@ -1657,6 +1621,15 @@ export default function App() {
     try {
       const { tracks, duration, subtitles } = await BulkImportService.importFolder(folderPath);
       logger.info(`Bulk Import Successful: Scanned ${tracks.length} tracks and ${subtitles.length} subtitles.`);
+
+      let videoPath = project?.videoPath;
+      let videoUrl = project?.videoUrl;
+      if (!videoPath && folderPath) {
+        const blank = await ensureBlankVideoForProject(folderPath, Math.max(duration, 60));
+        videoPath = blank.videoPath;
+        videoUrl = blank.videoUrl;
+      }
+
       setProject(prev => {
         const baseProject = prev || {
           id: Math.random().toString(36).substr(2, 9),
@@ -1684,7 +1657,9 @@ export default function App() {
 
         return {
           ...baseProject,
-          tracks: [...(baseProject.tracks || []), ...tracks],
+          videoPath: videoPath || baseProject.videoPath,
+          videoUrl: videoUrl || baseProject.videoUrl,
+          tracks: [...(baseProject.tracks), ...tracks],
           subtitles: [...(baseProject.subtitles || []), ...subtitles],
           roles: Array.from(new Set([...(baseProject.roles || []), "Original", "Dub"])),
           selectedRole: "Dub",
@@ -1777,7 +1752,7 @@ export default function App() {
 
         return {
           ...baseProject,
-          tracks: [...(baseProject.tracks || []), ...tracks],
+          tracks: [...(baseProject.tracks), ...tracks],
           subtitles: [...(baseProject.subtitles || []), ...subtitles],
           roles: Array.from(new Set([...(baseProject.roles || []), "Original", "Dub"])),
           selectedRole: "Dub",
@@ -1798,287 +1773,13 @@ export default function App() {
     }
   };
 
-  const handleBatchExport = async () => {
-    if (!project || !project.projectPath || !window.electronAPI) {
-      logger.warn("Batch Export cancelled: Project or API not ready.");
-      return;
-    }
-    
-    logger.info(`Batch Export started for project: ${project.name}`);
 
-    // 1. Identify original reference track
-    const origTrack = project.tracks.find(t => t.name === 'Оригинал' || t.name === 'Original');
-    if (!origTrack) {
-      alert("Не найден оригинальный трек ('Оригинал') для определения временных интервалов и имен игровых реплик.");
-      return;
-    }
 
-    // Accidental split mitigation: group segments on the reference track by duplicate `originalFileName`.
-    const origGroupedMap = new Map<string, typeof origTrack.segments>();
-    for (const s of origTrack.segments) {
-      if (s.originalFileName) {
-        let list = origGroupedMap.get(s.originalFileName);
-        if (!list) {
-          list = [];
-          origGroupedMap.set(s.originalFileName, list);
-        }
-        list.push(s);
-      }
-    }
 
-    const origSegments = [];
-    for (const [fileName, segs] of origGroupedMap.entries()) {
-      // Sort segments of this original file chronologically just in case
-      segs.sort((a, b) => a.startTime - b.startTime);
 
-      const minStartTime = Math.min(...segs.map(s => s.startTime));
-      const maxEndTime = Math.max(...segs.map(s => s.startTime + s.duration));
-      
-      const spanDuration = maxEndTime - minStartTime;
 
-      // Extract original file duration from the properties of the imported segment pieces
-      const fileDuration = segs.find(s => s.fileDuration !== undefined && s.fileDuration > 0)?.fileDuration || 0;
 
-      // Search matching subtitle line duration
-      const matchingSub = project.subtitles.find(sub => 
-        (sub.role === 'Original' || sub.role === 'original') && 
-        Math.abs(sub.start - minStartTime) < 0.2
-      );
-      const subDuration = matchingSub ? (matchingSub.end - matchingSub.start) : 0;
 
-      // Determine authoritative duration using precise priority
-      let finalDuration = fileDuration;
-      let durationSource = "оригинальному файлу";
-
-      if (finalDuration <= 0) {
-        finalDuration = subDuration;
-        durationSource = "субтитрам";
-      }
-      if (finalDuration <= 0) {
-        finalDuration = spanDuration;
-        durationSource = "таймлайну (длине выделения)";
-      }
-
-      logger.info(`Пакетный экспорт [${fileName}]: реплика начинается с ${minStartTime.toFixed(4)}с. Длины: по таймлайну=${spanDuration.toFixed(4)}с, по файлу=${fileDuration.toFixed(4)}с, по сабам=${subDuration.toFixed(4)}с. Итоговая длина: ${finalDuration.toFixed(4)}с (выбрано по ${durationSource}).`);
-
-      origSegments.push({
-        startTime: minStartTime,
-        duration: finalDuration,
-        originalFileName: fileName
-      });
-    }
-
-    if (origSegments.length === 0) {
-      alert("Не найдено оригинальных сегментов реплик с информацией об имени файла на треке 'Оригинал'.");
-      return;
-    }
-
-    // 2. Collect all active recorded dub segments across other tracks
-    const dubTracks = project.tracks.filter(t => t.id !== origTrack.id && !t.isMuted);
-    const dubSegmentsList = [];
-
-    for (const track of dubTracks) {
-      for (const segment of track.segments) {
-        if (segment.filePath) {
-          dubSegmentsList.push({
-            filePath: segment.filePath,
-            startTime: segment.startTime,
-            duration: segment.duration,
-            fileOffset: segment.fileOffset || 0,
-            gain: segment.gain ?? 1,
-            playbackRate: segment.playbackRate ?? 1
-          });
-        }
-      }
-    }
-
-    if (dubSegmentsList.length === 0) {
-      const confirmSilence = window.confirm("На дорожках дубляжа не обнаружено записанных фрагментов. Экспортировать пустые аудиофайлы (тишину) оригинальной длины с исходными именами?");
-      if (!confirmSilence) return;
-    }
-
-    // 3. Ask destination folder
-    const folderRes = await window.electronAPI.openFolder();
-    if (!folderRes.success || !folderRes.data) return;
-    const outDir = folderRes.data;
-
-    setIsExporting(true);
-    setExportProgress(0);
-    setExportOperation(`Сборка и рендеринг ${origSegments.length} реплик...`);
-
-    try {
-      logger.info(`Starting batch render-export of ${origSegments.length} replicas to ${outDir}`);
-      const exportedFilesRes = await window.electronAPI.batchExport({
-        outDir,
-        origSegments,
-        dubSegments: dubSegmentsList,
-      });
-
-      if (exportedFilesRes.success && exportedFilesRes.data) {
-        alert(`Успешно рендерировано и экспортировано ${exportedFilesRes.data.length} файлов в папку: ${outDir}\nВсе файлы соответствуют точной длине и именам оригиналов!`);
-        logger.info("Batch render export successful.");
-      } else {
-        alert(`Ошибка пакетного рендеринга/экспорта: ${exportedFilesRes.error}`);
-        logger.error("Batch render export failed:", exportedFilesRes.error);
-      }
-    } catch (error) {
-      console.error("Batch render export failed:", error);
-      alert("Ошибка при пакетном экспорте и рендеринге.");
-    } finally {
-      setIsExporting(false);
-      setExportOperation('');
-    }
-  };
-
-  const handleExportAudioBook = async (gapSeconds: number = 1.5) => {
-    if (!project || !project.projectPath || !window.electronAPI) return;
-    const dubTrack = project.tracks.find(t => t.name === 'Dubs');
-    if (!dubTrack || dubTrack.segments.length === 0) {
-      alert("Не найдено фрагментов Dubs для экспорта.");
-      return;
-    }
-
-    const saveRes = await window.electronAPI.saveFile({
-        title: 'Экспорт аудиокниги',
-        defaultPath: `${project.name}_audiobook.wav`,
-        filters: [{ name: 'Audio', extensions: ['wav'] }]
-    });
-
-    if (!saveRes.success || !saveRes.data) return;
-    const outputPath = saveRes.data;
-
-    setIsExporting(true);
-    setExportProgress(0);
-    setExportOperation('Preparing audiobook segments...');
-    
-    try {
-      logger.info(`Starting audiobook export to ${outputPath}`);
-      const resultRes = await window.electronAPI.exportAudioBook({
-        projectPath: project.projectPath,
-        outputPath: outputPath,
-        format: 'wav',
-        gapDuration: gapSeconds,
-        normalizeLUFS: true,
-        segments: dubTrack.segments.filter(s => s.filePath).map(s => ({
-          filePath: s.filePath!,
-          gain: s.gain * (dubTrack.volume ?? 1)
-        }))
-      });
-
-      if (resultRes.success && resultRes.data) {
-        alert(`Аудиокнига успешно экспортирована: ${outputPath}`);
-        logger.info("Audiobook export successful.");
-      } else {
-        alert(`Ошибка при экспорте аудиокниги: ${resultRes.error}`);
-        logger.error("Audiobook export failed:", resultRes.error);
-      }
-    } catch (error) {
-      console.error("Audio Book export failed:", error);
-      alert(`Ошибка экспорта: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setIsExporting(false);
-      setExportOperation('');
-    }
-  };
-
-  const handleExportStems = async () => {
-    if (!project || !project.projectPath || !window.electronAPI) return;
-    
-    const folderRes = await window.electronAPI.openFolder();
-    if (!folderRes.success || !folderRes.data) return;
-    const outDir = folderRes.data;
-
-    setIsExporting(true);
-    setExportProgress(0);
-    setExportOperation('Initializing stem export...');
-
-    const unsubscribe = window.electronAPI.onStemProgress((data) => {
-      const pct = (data.current / data.total) * 100;
-      setExportProgress(pct);
-      setExportOperation(`Stem ${data.current}/${data.total}: ${data.trackName}`);
-    });
-
-    try {
-      logger.info(`Starting stem export to ${outDir}`);
-      const resultRes = await window.electronAPI.exportStems({
-        projectData: {
-          tracks: project.tracks.map(t => ({
-            name: t.name,
-            isMuted: t.isMuted,
-            isSolo: t.isSolo,
-            segments: t.segments.map(s => ({
-              id: s.id,
-              startTime: s.startTime,
-              duration: s.duration,
-              filePath: s.filePath,
-              gain: s.gain,
-              fileOffset: s.fileOffset || 0,
-              playbackRate: s.playbackRate
-            }))
-          })),
-          audioOffsetMs: project.audioOffsetMs || 0
-        },
-        outputDir: outDir,
-        bitDepth: project.audioSettings?.bitDepth?.toString() || '16'
-      });
-      if (resultRes.success) {
-        alert(`Экспорт стемов завершен в папку: ${outDir}`);
-        logger.info("Stem export successful.");
-      } else {
-        alert(`Ошибка при экспорте стемов: ${resultRes.error}`);
-        logger.error("Stem export failed:", resultRes.error);
-      }
-    } catch (error) {
-      console.error("Stem export failed:", error);
-      alert(`Ошибка при экспорте: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      unsubscribe();
-      setIsExporting(false);
-      setExportOperation('');
-    }
-  };
-
-  const handleExportAllStemsZip = async () => {
-    if (!project || !project.id || !window.electronAPI) return;
-    
-    const saveRes = await window.electronAPI.saveFile({
-        title: 'Экспорт всех дорожек в ZIP',
-        defaultPath: `${project.name}_stems.zip`,
-        filters: [{ name: 'ZIP Archive', extensions: ['zip'] }]
-    });
-
-    if (!saveRes.success || !saveRes.data) return;
-    const outputPath = saveRes.data;
-
-    setIsExporting(true);
-    setExportProgress(0);
-    setExportOperation('Saving project...');
-    await window.electronAPI.saveProjectJson({ projectPath: project.projectPath || '', projectData: project });
-
-    setExportOperation('Exporting all tracks as ZIP...');
-
-    try {
-      logger.info(`Starting all stems ZIP export to ${outputPath}`);
-      const resultRes = await window.electronAPI.exportAllStems({
-        projectId: project.id,
-        projectName: project.name || 'Project',
-        outputPath: outputPath
-      });
-      if (resultRes.success) {
-        alert(`Проект успешно упакован в ZIP: ${resultRes.data}`);
-        logger.info("ZIP export successful.");
-      } else {
-        alert(`Ошибка при экспорте ZIP: ${resultRes.error}`);
-        logger.error("ZIP export failed:", resultRes.error);
-      }
-    } catch (error) {
-      console.error("ZIP export failed:", error);
-      alert(`Ошибка при экспорте ZIP: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setIsExporting(false);
-      setExportOperation('');
-    }
-  };
 
   const handleQuickImport = () => {
     if (!project) return;
@@ -2095,6 +1796,22 @@ export default function App() {
     setShowQuickImport(false);
     setQuickImportText('');
   };
+
+  useEffect(() => {
+    // Prevent default browser reload shortcuts which would close the project
+    const handleBeforeReload = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.code === 'KeyR' || e.key.toLowerCase() === 'r')) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      if (e.code === 'F5') {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener('keydown', handleBeforeReload, { capture: true });
+    return () => window.removeEventListener('keydown', handleBeforeReload, { capture: true });
+  }, []);
 
   useEffect(() => {
     if (typeof project?.projectPath === 'string' && project.projectPath.endsWith('.dubstudio')) {
@@ -2131,12 +1848,12 @@ export default function App() {
             if (!prev) return prev;
             return {
               ...prev,
-              tracks: prev.tracks.map(track => {
+              tracks: (prev.tracks || []).map(track => {
                 const updatesForTrack = validUpdates.filter(u => u.trackId === track.id);
                 if (updatesForTrack.length === 0) return track;
                 return {
                   ...track,
-                  segments: track.segments.map(seg => {
+                  segments: (track.segments || []).map(seg => {
                     const update = updatesForTrack.find(u => u.segId === seg.id);
                     if (update) {
                       return { ...seg, waveform: update.waveform };
@@ -2150,7 +1867,9 @@ export default function App() {
         }
       });
     }
-  }, [project?.id, project?.tracks.map(t => t.segments.length).join(',')]);
+  }, [project?.id, (project?.tracks || []).map(t => (t.segments || []).length).join(',')]);
+
+  const lastSavedProjectStateRef = useRef<string>("");
 
   useEffect(() => {
     if (project) {
@@ -2161,10 +1880,26 @@ export default function App() {
         // Debounce auto-save to disk/db to avoid high frequency I/O (e.g. during dragging)
         const saveTimer = setTimeout(() => {
           if (window.electronAPI && project.projectPath) {
+            const projectToSave = { ...project };
+            delete projectToSave.audioSettings;
+            const currentHash = JSON.stringify(projectToSave);
+            
+            if (currentHash === lastSavedProjectStateRef.current) {
+              return; // Skip writing to disk if no project data actually changed
+            }
+            
+            logger.debug(`Auto-saving project: ${project.name} at ${project.projectPath}`);
+            lastSavedProjectStateRef.current = currentHash;
             window.electronAPI.saveProjectJson({
               projectPath: project.projectPath,
-              projectData: project
-            }).catch(err => console.error("Auto-save failed:", err));
+              projectData: projectToSave
+            })
+            .then(() => {
+                logger.debug(`Auto-save completed for project: ${project.name}`);
+            })
+            .catch(err => {
+                logger.error(`Auto-save failed: ${err}`);
+            });
           }
         }, 1500); // 1.5s delay for stability
 
@@ -2177,28 +1912,37 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const content = await file.text();
-    let parsed: ParsedSubtitles;
-    
-    if (file.name.endsWith('.ass')) {
-      parsed = SubtitleService.parseASS(content);
-    } else if (file.name.endsWith('.srt')) {
-      parsed = SubtitleService.parseSRT(content);
-    } else {
-      alert("Unsupported subtitle format. Please use .ass or .srt");
-      return;
+    try {
+      const content = await file.text();
+      let parsed: ParsedSubtitles;
+      
+      if (file.name.endsWith('.ass')) {
+        parsed = SubtitleService.parseASS(content);
+      } else if (file.name.endsWith('.srt')) {
+        parsed = SubtitleService.parseSRT(content);
+      } else {
+        alert("Unsupported subtitle format. Please use .ass or .srt");
+        return;
+      }
+
+      if (!parsed || !parsed.subtitles || parsed.subtitles.length === 0) {
+        throw new Error("Файл не содержит реплик или формат не распознан.");
+      }
+
+      setProject(prev => {
+        const baseProject = prev || createDefaultProject(file.name.replace(/\.[^/.]+$/, ""));
+
+        return {
+          ...baseProject,
+          subtitles: parsed.subtitles,
+          roles: parsed.roles,
+          selectedRole: parsed.roles[0] || 'Default'
+        };
+      });
+    } catch (parseErr) {
+      const msg = getFriendlySubtitleErrorMessage(parseErr, file.name);
+      alert(msg);
     }
-
-    setProject(prev => {
-      const baseProject = prev || createDefaultProject(file.name.replace(/\.[^/.]+$/, ""));
-
-      return {
-        ...baseProject,
-        subtitles: parsed.subtitles,
-        roles: parsed.roles,
-        selectedRole: parsed.roles[0] || 'Default'
-      };
-    });
   };
 
   const triggerVideoPicker = async () => {
@@ -2227,7 +1971,7 @@ export default function App() {
 
     if (!file.type.startsWith('video/')) {
       logger.warn(`Invalid video file type: ${file.type}`);
-      setVideoError("Please select a valid video file (e.g., .mp4, .webm).");
+      setVideoError("Please select a valid video file (e.g., .mp4, .mkv, .hevc, .webm).");
       return;
     }
 
@@ -2524,7 +2268,7 @@ export default function App() {
 
       if (newSegmentsMap.size === 0) return;
 
-      const updatedTracks = project.tracks.map(t => {
+      const updatedTracks = (project.tracks || []).map(t => {
         if (newSegmentsMap.has(t.id)) {
           return {
             ...t,
@@ -2582,134 +2326,225 @@ export default function App() {
   }, [project?.tracks, isAutoHeight, setTimelineHeight]);
 
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [isCastingModalOpen, setIsCastingModalOpen] = useState(false);
+  const [isDocumentModalOpen, setIsDocumentModalOpen] = useState(false);
   const [pendingExportFormat, setPendingExportFormat] = useState<'WAV' | 'MP3' | 'FLAC'>('WAV');
 
-  const handleExport = async (options: { 
-    format: 'WAV' | 'MP3' | 'FLAC', 
-    includeVideo: boolean, 
-    includeOriginalAudio: boolean,
-    forceMono: boolean 
-  }) => {
-    logger.info("handleExport triggered with options:", options);
-    if (!project || !project.projectPath) {
-      alert("Настройте или сохраните проект перед экспортом.");
-      return;
-    }
-
-    const { format, includeVideo, includeOriginalAudio, forceMono } = options;
-    const safeFormat = format || 'WAV';
-
-    const exportTracks = project.tracks.filter(t => {
-      if (t.name === 'Оригинал') return includeOriginalAudio;
-      return !t.isMuted; // Only include unmuted tracks by default for export if requested
-    }).map(track => ({
-      id: track.id,
-      volume: track.volume,
-      isMuted: track.isMuted,
-      isSolo: track.isSolo,
-      segments: track.segments.map(seg => ({
-        id: seg.id || `seg-${Date.now()}-${Math.random()}`,
-        filePath: seg.filePath || '',
-        startTime: seg.startTime,
-        duration: seg.duration,
-        fileOffset: seg.fileOffset || 0,
-        fileDuration: seg.fileDuration || seg.duration,
-        gain: seg.gain,
-        playbackRate: seg.playbackRate,
-      })).filter(s => s.filePath !== '')
-    }));
-
-    const hasSegments = exportTracks.some(t => t.segments.length > 0);
-
-    if (!hasSegments) {
-      alert("Нет сегментов (или все дорожки заглушены) для экспорта.");
-      return;
-    }
-    
-    let videoName = '';
-    if (project.videoPath) {
-      const base = project.videoPath.split(/[/\\]/).pop() || '';
-      const extIdx = base.lastIndexOf('.');
-      videoName = extIdx !== -1 ? base.substring(0, extIdx) : base;
-    } else if (project.videoUrl) {
-      const base = project.videoUrl.split('/').pop()?.split('?')[0] || '';
-      const extIdx = base.lastIndexOf('.');
-      videoName = extIdx !== -1 ? base.substring(0, extIdx) : base;
-    }
-    if (!videoName) {
-      videoName = project.name || 'project';
-    }
-
-    const activeRole = project.selectedRole || 'Default';
-    const hasLoadedFixes = !!(project.fixes && project.fixes.length > 0);
-    const filePrefix = hasLoadedFixes ? 'fix_' : '';
-    const exportFileName = `${filePrefix}${activeRole}_${videoName}.${safeFormat.toLowerCase()}`;
-
-    const saveFileRes = await window.electronAPI.saveFile({
-      title: 'Export Audio',
-      defaultPath: exportFileName,
-      filters: [{ name: safeFormat, extensions: [safeFormat.toLowerCase()] }]
-    });
-
-    if (!saveFileRes.success || !saveFileRes.data) return;
-    const outputPath = saveFileRes.data;
-    
-    setIsExporting(true);
-    setExportProgress(0);
-    setIsExportModalOpen(false);
-
-    let unsubscribe: (() => void) | undefined;
-
-    if (window.electronAPI) {
-      unsubscribe = window.electronAPI.onExportProgress((percent) => {
-        setExportProgress(percent);
-      });
-
-      try {
-        logger.info(`Starting audio export to ${outputPath} in format ${safeFormat}`);
-        const resultRes = await window.electronAPI.exportAudio({ 
-          projectJson: JSON.stringify({
-            tracks: exportTracks.map(t => ({
-              name: project.tracks.find(pt => pt.id === t.id)?.name || 'Track',
-              isMuted: t.isMuted,
-              isSolo: t.isSolo,
-              segments: t.segments
-            })),
-            audioOffsetMs: project.audioOffsetMs || 0
-          }),
-          outputPath,
-          format: safeFormat.toLowerCase() as any,
-          bitDepth: project.audioSettings?.bitDepth?.toString() || '16',
-          ...(project.audioSettings?.exportSettings && {
-            bitrate: `${project.audioSettings.exportSettings.mp3Bitrate}k`
-          })
-        });
-
-        if (resultRes.success) {
-          alert(`Экспорт успешно завершен: ${outputPath}`);
-          logger.info("Audio export successful.");
-        } else {
-          throw new Error(resultRes.error || 'Unknown export error');
-        }
-      } catch (error) {
-        console.error("Export failed:", error);
-        alert(`Ошибка экспорта: ${error instanceof Error ? error.message : String(error)}`);
-        logger.error("Audio export operation failed:", error);
-      } finally {
-        if (unsubscribe) unsubscribe();
-        setIsExporting(false);
-      }
-      return;
-    }
+  const handleUpdateDubberNick = (nick: string) => {
+    localStorage.setItem('dubstudio_dubber_nick', nick);
+    setProject(prev => prev ? { ...prev, dubberNick: nick } : prev);
   };
+
+  const handleImportDocumentData = async (data: {
+    filePath?: string;
+    fileName?: string;
+    fileContent?: string;
+    subtitles: SubtitleLine[];
+    defaultRole: string;
+  }) => {
+    let finalProjectRoot = project?.projectPath;
+    const baseName = data.fileName ? data.fileName.replace(/\.[^/.]+$/, "") : "Document_Project";
+    if (!finalProjectRoot) {
+      finalProjectRoot = `${baseName}_Project`;
+      if (window.electronAPI) {
+        await window.electronAPI.initProject(finalProjectRoot);
+      }
+    }
+
+    const roles = Array.from(new Set(data.subtitles.map(s => s.role)));
+    const maxEnd = data.subtitles.length > 0 ? Math.max(...data.subtitles.map(s => s.end)) : 60;
+
+    let videoPath = project?.videoPath || '';
+    let videoUrl = project?.videoUrl || '';
+
+    if (!videoPath && finalProjectRoot) {
+      const blank = await ensureBlankVideoForProject(finalProjectRoot, Math.max(maxEnd, 60));
+      videoPath = blank.videoPath;
+      videoUrl = blank.videoUrl;
+    }
+
+    setProject(prev => {
+      const currentProject = prev || createDefaultProject(baseName, finalProjectRoot || "");
+      return {
+        ...currentProject,
+        videoPath,
+        videoUrl,
+        subtitles: data.subtitles,
+        roles: roles.length > 0 ? roles : [data.defaultRole || 'Narrator'],
+        selectedRole: roles[0] || data.defaultRole || 'Narrator',
+        documentPath: data.filePath,
+        documentContent: data.fileContent
+      };
+    });
+  };
+
+  const handleImportCasting = async (data: {
+    mediaPath?: string;
+    mediaFile?: File;
+    textSourceType: 'subtitles_file' | 'text_file' | 'clipboard' | 'none';
+    textFilePath?: string;
+    textFileContent?: string;
+    clipboardText?: string;
+    dubberNick?: string;
+    roleName?: string;
+  }) => {
+    if (data.dubberNick) {
+      localStorage.setItem('dubstudio_dubber_nick', data.dubberNick);
+    }
+
+    let parsedSubtitles: SubtitleLine[] = [];
+    const roleName = data.roleName || 'Кастинг';
+
+    if (data.textSourceType === 'subtitles_file' || data.textSourceType === 'text_file') {
+      if (data.textFileContent && data.textFilePath) {
+        parsedSubtitles = await UniversalParserService.parse(data.textFileContent, data.textFilePath);
+      }
+    } else if (data.textSourceType === 'clipboard' && data.clipboardText) {
+      parsedSubtitles = TextImportService.parseRawText(data.clipboardText);
+    }
+
+    let mediaPath = data.mediaPath || '';
+    let mediaName = mediaPath ? (mediaPath.split(/[/\\]/).pop() || 'Casting_Media') : 'Casting_Media';
+    let baseName = mediaName.substring(0, mediaName.lastIndexOf('.')) || mediaName;
+
+    const isWin = mediaPath.includes('\\') || (data.textFilePath ? data.textFilePath.includes('\\') : false);
+    const sep = isWin ? '\\' : '/';
+    const sourcePath = mediaPath || data.textFilePath || '';
+    const lastSep = sourcePath.lastIndexOf(sep);
+    const fileDir = lastSep !== -1 ? sourcePath.substring(0, lastSep) : '';
+    const projPath = project?.projectPath || (fileDir ? `${fileDir}${sep}${baseName}_Project` : `${baseName}_Project`);
+
+    if (window.electronAPI && typeof window.electronAPI.initProject === 'function') {
+      await window.electronAPI.initProject(projPath);
+    }
+
+    const ext = mediaPath.split('.').pop()?.toLowerCase() || '';
+    const isAudio = ['wav', 'mp3', 'flac', 'm4a', 'aac', 'ogg', 'wma'].includes(ext);
+
+    let mediaDuration = 60;
+    if (mediaPath && window.electronAPI) {
+      try {
+        const infoRes = await window.electronAPI.getFileInfo(mediaPath);
+        if (infoRes.success && infoRes.data?.duration) {
+          mediaDuration = infoRes.data.duration;
+        }
+      } catch (e) {
+        console.warn('Could not get casting media duration:', e);
+      }
+    }
+
+    let finalVideoPath = mediaPath;
+    let finalVideoUrl = mediaPath ? getSafeFileUrl(mediaPath) : '';
+
+    if (!mediaPath || isAudio) {
+      const blank = await ensureBlankVideoForProject(projPath, Math.max(mediaDuration, 60));
+      finalVideoPath = blank.videoPath;
+      finalVideoUrl = blank.videoUrl;
+    }
+
+    const dubTrack: AudioTrack = {
+      id: 'track-dubs',
+      name: 'Dubs',
+      volume: 1.0,
+      isMuted: false,
+      isSolo: false,
+      segments: []
+    };
+
+    const tracks: AudioTrack[] = [];
+
+    // If media is audio, add an original reference segment and waveform
+    if (isAudio && mediaPath) {
+      let waveform: number[] | undefined;
+      try {
+        const pts = Math.max(1000, Math.floor(mediaDuration * 50));
+        const peaksRes = await window.electronAPI?.generateWaveformPeaks({ filePath: mediaPath, points: pts });
+        if (peaksRes?.success && peaksRes.data) {
+          waveform = peaksRes.data;
+        }
+      } catch (e) {
+        console.warn('Could not generate casting waveform:', e);
+      }
+
+      const refSegment: AudioSegment = {
+        id: `seg-ref-${Date.now()}`,
+        startTime: 0,
+        duration: mediaDuration,
+        filePath: mediaPath,
+        blobUrl: getSafeFileUrl(mediaPath),
+        fileOffset: 0,
+        fileDuration: mediaDuration,
+        gain: 1.0,
+        playbackRate: 1.0,
+        text: mediaName,
+        waveform
+      };
+
+      tracks.push({
+        id: 'track-original',
+        name: 'Оригинал',
+        volume: 1.0,
+        isMuted: false,
+        isSolo: false,
+        segments: [refSegment]
+      });
+    }
+
+    tracks.push(dubTrack);
+
+    const maxSubEnd = parsedSubtitles.length > 0 
+      ? Math.max(...parsedSubtitles.map(s => s.end))
+      : mediaDuration;
+    const finalDuration = Math.max(mediaDuration, maxSubEnd, 10);
+
+    const newProject: Project = {
+      id: `casting-${Date.now()}`,
+      name: `Casting_${baseName}`,
+      videoPath: finalVideoPath,
+      videoUrl: finalVideoUrl,
+      referenceAudioPath: isAudio ? mediaPath : undefined,
+      projectPath: projPath,
+      subtitles: parsedSubtitles.length > 0 ? parsedSubtitles : [
+        {
+          id: `sub-${Date.now()}`,
+          start: 0,
+          end: Math.min(10, finalDuration),
+          text: `[${roleName}] Текст реплики для кастинга...`,
+          role: roleName
+        }
+      ],
+      roles: [roleName],
+      selectedRole: roleName,
+      selectedRoles: [roleName],
+      dubberNick: data.dubberNick || localStorage.getItem('dubstudio_dubber_nick') || '',
+      tracks,
+      latencyOffset: project?.latencyOffset || 0,
+      audioOffsetMs: project?.audioOffsetMs || 0,
+      audioSettings: {
+        ...(project?.audioSettings || getGlobalAudioSettings()),
+        playOriginalTrackSegments: true
+      }
+    };
+
+    setDuration(finalDuration);
+    setProject(newProject);
+    logger.info(`Casting session initialized successfully: ${newProject.name}, duration: ${finalDuration}s`);
+  };
+
+  const {
+    handleBatchExport,
+    handleExportAudioBook,
+    handleExportStems,
+    handleExportAllStemsZip,
+    handleExport,
+    handleMuxVideo,
+    handleMergeBackstage,
+    handleSaveBlooper,
+    handleQuickPreview
+  } = useAppExport(project, setIsExporting, setExportProgress, setExportOperation, setIsExportModalOpen, isRecording, selectedSegmentIds);
 
   const handleImportAudioTrack = async () => {
     logger.info("handleImportAudioTrack: Start");
-    if (!project || !project.projectPath) {
-      logger.warn("handleImportAudioTrack: No active project or projectPath.");
-      alert("Настройте или сохраните проект перед импортом аудио.");
-      return;
-    }
 
     if (!window.electronAPI) {
       logger.error("handleImportAudioTrack: window.electronAPI is missing.");
@@ -2720,7 +2555,7 @@ export default function App() {
     const res = await window.electronAPI.openFile({
       title: 'Выберите аудиофайл для импорта',
       filters: [
-        { name: 'Audio Files', extensions: ['wav', 'mp3', 'flac', 'm4a', 'aac', 'ogg'] }
+        { name: 'Audio Files', extensions: ['wav', 'mp3', 'flac', 'm4a', 'aac', 'ogg', 'wma'] }
       ]
     });
 
@@ -2747,14 +2582,30 @@ export default function App() {
 
     try {
       logger.info(`Starting Import Audio Track: ${filePath}`);
-      // Get duration
-      const infoRes = await window.electronAPI.getFileInfo(filePath);
-      if (!infoRes.success || !infoRes.data) {
-        logger.error(`Import Error: Failed to get file info for ${filePath}`);
-        throw new Error("Не удалось получить информацию о длительности файла.");
+      const baseName = fileName.replace(/\.[^/.]+$/, "");
+      const isWin = filePath.includes('\\');
+      const sep = isWin ? '\\' : '/';
+      const lastSepIndex = filePath.lastIndexOf(sep);
+      const fileDir = lastSepIndex !== -1 ? filePath.substring(0, lastSepIndex) : '';
+
+      let currentProject = project;
+      let finalProjectRoot = currentProject?.projectPath;
+
+      if (!finalProjectRoot) {
+        finalProjectRoot = fileDir ? `${fileDir}${sep}${baseName}_Project` : `${baseName}_Project`;
+        logger.info(`Auto-initializing project root for imported audio at: ${finalProjectRoot}`);
+        if (window.electronAPI && typeof window.electronAPI.initProject === 'function') {
+          await window.electronAPI.initProject(finalProjectRoot);
+        }
+        currentProject = createDefaultProject(baseName, finalProjectRoot);
       }
 
-      let duration = infoRes.data.duration;
+      // Get duration
+      let duration = 0;
+      const infoRes = await window.electronAPI.getFileInfo(filePath);
+      if (infoRes.success && infoRes.data?.duration) {
+        duration = infoRes.data.duration;
+      }
       
       if (!duration || duration <= 0) {
           logger.info(`Duration not provided by backend, falling back to HTMLAudioElement for ${filePath}`);
@@ -2766,14 +2617,14 @@ export default function App() {
               };
               audioInfo.onerror = (e) => {
                   logger.error(`Failed to load audio metadata for ${filePath}`, e);
-                  resolve(0); // Cannot get duration
+                  resolve(0);
               };
-              audioInfo.src = fileUrl;
+              audioInfo.src = fileUrl || '';
           });
       }
       
-      if (!duration) {
-          throw new Error("Не удалось получить информацию о длительности файла (" + filePath + ").");
+      if (!duration || duration <= 0) {
+          duration = 60; // Safe fallback
       }
 
       logger.info(`Imported file info: duration=${duration}s`);
@@ -2819,10 +2670,25 @@ export default function App() {
         isSolo: false
       };
 
-      setProject({
-        ...project,
-        tracks: [...project.tracks, newTrack]
-      });
+      // Ensure blank video if project has no videoPath
+      let videoPath = currentProject.videoPath;
+      let videoUrl = currentProject.videoUrl;
+      if (!videoPath && finalProjectRoot) {
+        const blank = await ensureBlankVideoForProject(finalProjectRoot, Math.max(duration, 60));
+        videoPath = blank.videoPath;
+        videoUrl = blank.videoUrl;
+      }
+
+      const updatedProject: Project = {
+        ...currentProject,
+        videoPath,
+        videoUrl,
+        projectPath: finalProjectRoot,
+        tracks: [...(currentProject.tracks || []), newTrack]
+      };
+
+      setDuration(prev => Math.max(prev || 0, duration));
+      setProject(updatedProject);
       
       logger.info(`Imported audio track: ${fileName} (${duration}s)`);
     } catch (err) {
@@ -2892,7 +2758,7 @@ export default function App() {
         // Update project: remove old segments, add new one
         setProject(prev => {
           if (!prev) return prev;
-          const newTracks = prev.tracks.map(track => {
+          const newTracks = (prev.tracks || []).map(track => {
             if (track.id !== targetTrackId) return track;
             const filtered = track.segments.filter(s => !selectedSegmentIds.includes(s.id));
             return { ...track, segments: [...filtered, newSeg] };
@@ -2911,103 +2777,7 @@ export default function App() {
     }
   }, [project, selectedSegmentIds]);
 
-  const handleMuxVideo = async () => {
-    if (!project || !project.projectPath || !project.videoPath) {
-      alert("Сначала настройте проект и выберите видео.");
-      return;
-    }
 
-    let videoName = '';
-    if (project.videoPath) {
-      const base = project.videoPath.split(/[/\\]/).pop() || '';
-      const extIdx = base.lastIndexOf('.');
-      videoName = extIdx !== -1 ? base.substring(0, extIdx) : base;
-    } else if (project.videoUrl) {
-      const base = project.videoUrl.split('/').pop()?.split('?')[0] || '';
-      const extIdx = base.lastIndexOf('.');
-      videoName = extIdx !== -1 ? base.substring(0, extIdx) : base;
-    }
-    if (!videoName) {
-      videoName = project.name || 'project';
-    }
-
-    const activeRole = project.selectedRole || 'Default';
-    const hasLoadedFixes = !!(project.fixes && project.fixes.length > 0);
-    const filePrefix = hasLoadedFixes ? 'fix_' : '';
-    const exportFileName = `${filePrefix}${activeRole}_${videoName}_final.mp4`;
-
-    const saveRes = await window.electronAPI.saveFile({
-        title: 'Экспорт финального видео (Mix)',
-        defaultPath: exportFileName,
-        filters: [{ name: 'Video', extensions: ['mp4'] }]
-    });
-
-    if (!saveRes.success || !saveRes.data) return;
-    const finalOutputPath = saveRes.data;
-    
-    setIsExporting(true);
-    setExportProgress(0);
-    setExportOperation('Initializing video mix...');
-
-    if (window.electronAPI) {
-      const unsubscribe = window.electronAPI.onExportProgress((percent) => {
-        setExportProgress(percent);
-      });
-
-      try {
-        const tempAudioPath = `${project.projectPath}/temp_master_mux.wav`.replace(/\\/g, '/');
-        
-        // 1. Export current mix to a temp WAV first, because muxing needs one.
-        setExportOperation('Mixing project audio...');
-        logger.info(`Mixing project audio to ${tempAudioPath}`);
-        
-        const audioRes = await window.electronAPI.exportAudio({ 
-          projectJson: JSON.stringify({
-            tracks: project.tracks.map(t => ({
-              name: t.name,
-              isMuted: t.isMuted,
-              isSolo: t.isSolo,
-              segments: t.segments
-            })),
-            audioOffsetMs: project.audioOffsetMs || 0
-          }),
-          outputPath: tempAudioPath,
-          format: 'wav',
-          bitDepth: '16'
-        });
-
-        if (!audioRes.success) {
-          throw new Error(`Ошибка сведения аудио: ${audioRes.error}`);
-        }
-
-        // 2. Mux video with the newly created temp audio
-        setExportOperation('Muxing video with audio...');
-        logger.info(`Muxing video from ${project.videoPath} with audio ${tempAudioPath} to ${finalOutputPath}`);
-        
-        const resultRes = await window.electronAPI.muxVideo({ 
-          videoPath: project.videoPath,
-          audioPath: tempAudioPath,
-          outputPath: finalOutputPath
-        });
-
-        if (resultRes.success) {
-          alert(`Финальное видео успешно сохранено: ${finalOutputPath}`);
-          logger.info("Video muxing successful.");
-        } else {
-          throw new Error(resultRes.error || 'Unknown mux error');
-        }
-      } catch (error) {
-        console.error("Muxing failed:", error);
-        alert(`Ошибка при создании видео: ${error instanceof Error ? error.message : String(error)}`);
-        logger.error("Muxing failed:", error);
-      } finally {
-        unsubscribe();
-        setIsExporting(false);
-        setExportOperation('');
-      }
-      return;
-    }
-  };
 
   useEffect(() => {
     if (videoRef.current && project) {
@@ -3018,41 +2788,10 @@ export default function App() {
     }
   }, [project, videoRef, referenceAudioRef, isPopoutOpen]);
 
-  const handleQuickPreview = async (segmentId: string) => {
-    if (!project || !project.projectPath) {
-      alert("Please save the project first.");
-      return;
-    }
-    
-    setIsExporting(true);
-    setExportProgress(0);
 
-    if (window.electronAPI) {
-      const unsubscribe = window.electronAPI.onExportProgress((percent) => {
-        setExportProgress(percent);
-      });
 
-      try {
-        const result = await window.electronAPI.quickPreviewExport({ 
-          projectPath: project.projectPath,
-          segmentId
-        });
-        if (result) {
-          alert(`Экспорт превью завершен: ${result}`);
-        }
-      } catch (error) {
-        console.error("Quick Preview failed:", error);
-        alert(`Ошибка превью: ${error instanceof Error ? error.message : String(error)}`);
-      } finally {
-        unsubscribe();
-        setIsExporting(false);
-      }
-      return;
-    }
-  };
-
-  const currentLine = project?.subtitles.find(l => currentTime >= l.start - 0.5 && currentTime <= l.end);
-  const nextLine = project?.subtitles.find(l => l.start > currentTime);
+  const currentLine = project?.subtitles?.find(l => currentTime >= l.start - 0.5 && currentTime <= l.end);
+  const nextLine = project?.subtitles?.find(l => l.start > currentTime);
 
   const studioSyncDataRef = useRef({
     project, currentTime, currentLine, nextLine, showWebcam, isRecording,
@@ -3233,13 +2972,15 @@ export default function App() {
 
   const projectContextValue = {
     project, setProject, recentProjects, handleNewProject, handleOpenProject, handleSaveProject, handleCloseProject, onLoadProject,
-    undo, redo, canUndo, canRedo
+    undo, redo, canUndo, canRedo, saveSnapshot
   };
   const timelineContextValue = {
     currentTime, duration, isPlaying, zoomLevel, timelineHeight, isAutoHeight, sidebarWidth,
     isRippleEnabled, selectedSegmentIds, isLooping, loopRange, currentTimeRef, videoRef, referenceAudioRef,
+    isHighlightingMissingSubtitles,
     setCurrentTime, setDuration, setIsPlaying, setZoomLevel, setTimelineHeight, setIsAutoHeight, setSidebarWidth,
-    setIsRippleEnabled, setSelectedSegmentIds, setIsLooping, setLoopRange, togglePlay, handleSeek
+    setIsRippleEnabled, setSelectedSegmentIds, setIsLooping, setLoopRange, togglePlay, handleSeek,
+    setIsHighlightingMissingSubtitles
   };
 
   let resolvedMainVideoPath = project?.videoPath;
@@ -3282,7 +3023,7 @@ export default function App() {
             <h2 className="text-3xl font-black mb-2">Загрузить файл</h2>
             <p className="text-indigo-200 font-bold">Видео, аудио, книги или субтитры</p>
             <p className="text-zinc-400 text-sm mt-2">
-              (Поддерживается: mp4, wav, flac, ass, srt, vtt, fb2, txt, csv и др.)
+              (Поддерживается: mp4, mkv, hevc, mov, wav, flac, ass, srt, vtt, fb2, txt, csv и др.)
             </p>
           </motion.div>
         )}
@@ -3309,6 +3050,9 @@ export default function App() {
         isBackstageSessionRecording={isBackstageSessionRecording}
         hasBackstageSessions={hasBackstageSessions}
         onOpenBackstageEditor={() => setShowBackstageEditor(true)}
+        onOpenCastingModal={() => setIsCastingModalOpen(true)}
+        onOpenDocumentModal={() => setIsDocumentModalOpen(true)}
+        onUpdateDubberNick={handleUpdateDubberNick}
         handleBatchExport={handleBatchExport}
         handleMuxVideo={handleMuxVideo}
         handleExportAudioBook={handleExportAudioBook}
@@ -3345,17 +3089,78 @@ export default function App() {
 
         {/* Center: Video & Teleprompter */}
         <section className="flex-1 min-w-0 min-h-0 flex flex-col bg-black relative">
+          <MissingSubtitlesBanner
+            project={project}
+            currentTime={currentTime}
+            onSeek={handleSeek}
+            isActive={isHighlightingMissingSubtitles}
+            onClose={() => setIsHighlightingMissingSubtitles(false)}
+          />
           <div className="flex-1 min-h-0 relative flex items-center justify-center group">
-            {!project || (!project.videoPath && !project.videoUrl) ? (
+            {!project ? (
               <div className="flex flex-col items-center justify-center gap-6">
                 <div className="w-24 h-24 bg-zinc-900 rounded-full flex items-center justify-center border border-white/5">
                   <FileVideo className="w-10 h-10 text-zinc-700" />
                 </div>
                 <div className="text-center">
                   <h3 className="text-xl font-bold text-zinc-400 mb-2">Рабочая область готова</h3>
-                  <p className="text-sm text-zinc-600">Перетащите видео или субтитры, чтобы начать</p>
+                  <p className="text-sm text-zinc-600">Выберите существующий проект или создайте новый, чтобы начать</p>
                 </div>
               </div>
+            ) : (!project.videoPath && !project.videoUrl) ? (
+              <AudioDAWView 
+                project={project}
+                isPlaying={isPlaying}
+                isRecording={isRecording}
+                currentTime={currentTime}
+                onSelectVideo={handleSelectVideo}
+                onImportAudioTrack={handleImportAudioTrack}
+                onImportSubtitles={async () => {
+                  if (!window.electronAPI) return;
+                  const res = await window.electronAPI.openFile({
+                    title: 'Импортировать субтитры',
+                    filters: [{ name: 'Субтитры', extensions: ['srt', 'ass', 'vtt', 'txt'] }]
+                  });
+                  if (res.success && res.data) {
+                    const textRes = await window.electronAPI.readTextFile(res.data.path);
+                    if (textRes.success && textRes.data) {
+                      try {
+                        const subtitles = await UniversalParserService.parse(textRes.data, res.data.name);
+                        if (!subtitles || subtitles.length === 0) {
+                          throw new Error("Файл пуст или имеет неверную структуру.");
+                        }
+                        const roles = Array.from(new Set(subtitles.map(s => s.role)));
+                        setProject(prev => {
+                          if (!prev) return prev;
+                          return {
+                            ...prev,
+                            subtitles,
+                            roles,
+                            selectedRole: roles[0] || 'Default'
+                          };
+                        });
+                      } catch (parseErr) {
+                        const msg = getFriendlySubtitleErrorMessage(parseErr, res.data.name);
+                        alert(msg);
+                      }
+                    }
+                  }
+                }}
+                onAddTrack={() => {
+                  setProject(p => {
+                    if (!p) return p;
+                    const newTrackId = `track-${Date.now()}`;
+                    const newTrackNum = p.tracks.length + 1;
+                    return {
+                      ...p,
+                      tracks: [
+                        ...p.tracks,
+                        { id: newTrackId, name: `Дорожка ${newTrackNum}`, segments: [], volume: 1, isMuted: false }
+                      ]
+                    };
+                  });
+                }}
+              />
             ) : popupBlocked ? (
               <div className="flex flex-col items-center justify-center p-8 text-center bg-zinc-900 border border-amber-500/30 rounded-2xl max-w-lg mx-auto shadow-2xl relative overflow-hidden backdrop-blur-sm">
                 <div className="absolute top-0 left-0 w-full h-1 bg-amber-500" />
@@ -3443,11 +3248,11 @@ export default function App() {
                   // Update Оригинал track duration if it exists
                   setProject(p => {
                     if (!p) return p;
-                    const tracks = p.tracks.map(t => {
+                    const tracks = (p.tracks).map(t => {
                       if (t.name === 'Оригинал') {
                         return {
                           ...t,
-                          segments: t.segments.map(s => 
+                          segments: (t.segments || []).map(s => 
                             s.id === 'original-audio-seg' ? { ...s, duration: newDuration, fileDuration: newDuration } : s
                           )
                         };
@@ -3464,11 +3269,11 @@ export default function App() {
                     // Also update Оригинал track duration here to keep it in sync
                     setProject(p => {
                       if (!p) return p;
-                      const tracks = p.tracks.map(t => {
+                      const tracks = (p.tracks).map(t => {
                         if (t.name === 'Оригинал') {
                           return {
                             ...t,
-                            segments: t.segments.map(s => 
+                            segments: (t.segments || []).map(s => 
                               s.id === 'original-audio-seg' ? { ...s, duration: newDuration, fileDuration: newDuration } : s
                             )
                           };
@@ -3545,6 +3350,9 @@ export default function App() {
                 previewStream={previewStream}
                 isWebcamSimulated={isWebcamSimulated}
                 duration={duration}
+                onSettingsChange={(newSettings) => {
+                  setProject(p => p ? { ...p, audioSettings: newSettings } : null);
+                }}
                 onClipping={(clipping) => {
                   if (isRecording) setClippingDetected(clipping);
                 }}
@@ -3565,7 +3373,6 @@ export default function App() {
                 isBackstageRecording={isRecording && isBackstageRecording}
                 activeRole={project.selectedRole || ''}
                 project={project}
-                onSettingsChange={(newSettings) => setProject({ ...project, audioSettings: newSettings })}
                 onSeek={handleSeek}
               />
             )}
@@ -3630,6 +3437,9 @@ export default function App() {
                     previewStream={previewStream}
                     isWebcamSimulated={isWebcamSimulated}
                     duration={duration}
+                    onSettingsChange={(newSettings) => {
+                      setProject(p => p ? { ...p, audioSettings: newSettings } : null);
+                    }}
                     onClipping={(clipping) => {
                       if (isRecording) setClippingDetected(clipping);
                     }}
@@ -3650,7 +3460,6 @@ export default function App() {
                     isBackstageRecording={isRecording && isBackstageRecording}
                     activeRole={project.selectedRole || ''}
                     project={project}
-                    onSettingsChange={(newSettings) => setProject({ ...project, audioSettings: newSettings })}
                     onSeek={handleSeek}
                     isPopout={true}
                   />
@@ -3762,40 +3571,12 @@ export default function App() {
                     <span className="text-xs mt-2 block opacity-60 italic">Для лучшей совместимости используйте MP4 (H.264).</span>
                   </p>
                   <div className="flex flex-wrap gap-3 justify-center">
-                    {window.electronAPI && project?.videoPath && project?.projectPath && (
+                    {window.electronAPI && (project?.videoPath || project?.projectPath) && (
                       <button 
-                        onClick={async () => {
-                          try {
-                            setVideoError("Создание прокси-видео (это может занять время)...");
-                            const proxyRes = await window.electronAPI.createProxyVideo(project.videoPath!, project.projectPath!);
-                            const proxyPath = proxyRes.success && proxyRes.data ? proxyRes.data : project.videoPath;
-                            
-                            // Also ensure peaks/audio are extracted if not already
-                            if (!project.referenceAudioPath) {
-                              const res = await window.electronAPI.extractAudioPeaks(project.videoPath!, project.projectPath!);
-                              if (res.success && res.data) {
-                                const audioData = res.data;
-                                const refPath = audioData.filePath;
-                                setProject({ 
-                                  ...project, 
-                                  videoPath: proxyPath,
-                                  originalPeaks: audioData.peaks,
-                                  referenceAudioPath: refPath
-                                });
-                              }
-                            } else {
-                              setProject({ 
-                                ...project, 
-                                videoPath: proxyPath
-                              });
-                            }
-                            setVideoError(null);
-                          } catch (err) {
-                            setVideoError(`Ошибка создания прокси: ${err}`);
-                          }
-                        }} 
-                        className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-sm font-bold transition-all shadow-lg shadow-indigo-600/20"
+                        onClick={() => handleCreateProxyVideo()} 
+                        className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-sm font-bold transition-all shadow-lg shadow-indigo-600/20 flex items-center gap-2 cursor-pointer active:scale-95"
                       >
+                        <Film className="w-4 h-4" />
                         Исправить воспроизведение (Прокси)
                       </button>
                     )}
@@ -3848,14 +3629,40 @@ export default function App() {
                 </div>
                 <div className="flex items-center gap-2">
                   <button 
-                    onClick={() => setTeleprompterMode(m => m === 'compact' ? 'expanded' : 'compact')}
+                    onClick={() => {
+                      const modeCycle: Record<TeleprompterMode, TeleprompterMode> = {
+                        left: 'right',
+                        right: 'bottom',
+                        bottom: 'compact',
+                        compact: 'expanded',
+                        expanded: 'left',
+                      };
+                      const next = modeCycle[teleprompterMode] || 'left';
+                      setTeleprompterMode(next);
+                      saveTeleprompterPref({ mode: next });
+                    }}
                     className={cn(
-                      "p-2 rounded-lg transition-colors",
-                      teleprompterMode === 'expanded' ? "bg-indigo-600 text-white" : "hover:bg-white/10 text-zinc-400"
+                      "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-all border text-xs font-bold",
+                      teleprompterMode === 'expanded' 
+                        ? "bg-indigo-600 border-indigo-500 text-white shadow-sm" 
+                        : teleprompterMode === 'left' || teleprompterMode === 'right' || teleprompterMode === 'bottom'
+                          ? "bg-indigo-950/80 border-indigo-500/50 text-indigo-200"
+                          : "hover:bg-white/10 text-zinc-400 border-transparent"
                     )}
-                    title="Переключить режим телесуфлера"
+                    title={`Суфлер: ${
+                      teleprompterMode === 'left' ? 'Привязан слева (клик: переключить)' :
+                      teleprompterMode === 'right' ? 'Привязан справа (клик: переключить)' :
+                      teleprompterMode === 'bottom' ? 'Привязан снизу (клик: переключить)' :
+                      teleprompterMode === 'expanded' ? 'Во весь экран (клик: переключить)' : 'Плавающий (клик: переключить)'
+                    }`}
                   >
-                    <LayoutTemplate className="w-5 h-5" />
+                    <LayoutTemplate className="w-4 h-4" />
+                    <span className="hidden sm:inline text-[10px]">
+                      {teleprompterMode === 'left' ? 'Слева' :
+                       teleprompterMode === 'right' ? 'Справа' :
+                       teleprompterMode === 'bottom' ? 'Снизу' :
+                       teleprompterMode === 'expanded' ? 'Экран' : 'Суфлер'}
+                    </span>
                   </button>
                   <button className="p-2 hover:bg-white/10 rounded-lg transition-colors" title="Настройки громкости"><Volume2 className="w-5 h-5" /></button>
                   <button 
@@ -3904,7 +3711,19 @@ export default function App() {
           >
             <TransportControls 
               isRecording={isRecording}
-              onToggleRecord={handleToggleRecord}
+              onToggleRecord={async () => {
+                if (isRecording) {
+                  handleToggleRecord();
+                  if (isBackstageSessionRecording) {
+                    stopBackstageSession();
+                  }
+                } else {
+                  if (project?.audioSettings?.isBackstageEnabled && !isBackstageSessionRecording) {
+                    await startBackstageSession(project?.videoPath || '');
+                  }
+                  handleToggleRecord();
+                }
+              }}
               recordingStream={backstageStream || recordingStream}
               showWebcam={showWebcam}
               onToggleWebcam={() => {
@@ -3938,40 +3757,9 @@ export default function App() {
               onToggleBackstageSession={async () => {
                 if (isBackstageSessionRecording) {
                   const session = await stopBackstageSession();
-                  if (session) {
-                    // Open backstage editor automatically when session stops?
-                    setShowBackstageEditor(true);
-                  }
+                  if (session) setShowBackstageEditor(true);
                 } else {
-                  if (!project?.projectPath) {
-                    setVideoError("Для записи бекстейджа необходимо сначала сохранить проект на диск.");
-                    return;
-                  }
-                  
-                  if (!project?.audioSettings?.isBackstageEnabled) {
-                    if (project) {
-                      setProject({
-                        ...project,
-                        audioSettings: {
-                          ...project.audioSettings,
-                          isBackstageEnabled: true
-                        }
-                      });
-                    }
-                  }
-                  
-                  // Wait for camera to initialize if it hasn't already
-                  let attempts = 0;
-                  const waitForCamera = setInterval(async () => {
-                    if (webcamRef.current?.srcObject) {
-                      clearInterval(waitForCamera);
-                      await startBackstageSession(project?.videoPath || '');
-                    } else if (attempts >= 50) {
-                      clearInterval(waitForCamera);
-                      console.error("Timeout waiting for camera initialization");
-                    }
-                    attempts++;
-                  }, 100);
+                  await startBackstageSession(project?.videoPath || '');
                 }
               }}
               onSaveBlooper={handleSaveBlooper}
@@ -4036,7 +3824,11 @@ export default function App() {
                   onGlueSegments={handleGlueSegments}
                   onUpdateTrack={(trackId, updates) => {
                     if (!project) return;
-                    const updatedTracks = project.tracks.map(t => t.id === trackId ? { ...t, ...updates } : t);
+                    const shouldSave = ('segments' in updates) || ('processing' in updates);
+                    if (shouldSave) {
+                      saveSnapshot();
+                    }
+                    const updatedTracks = (project.tracks || []).map(t => t.id === trackId ? { ...t, ...updates } : t);
                     const newProject = { ...project, tracks: updatedTracks };
                     setProject(newProject);
                     
@@ -4061,7 +3853,7 @@ export default function App() {
                   onUpdateAllTracks={(updates) => {
                     updateAllTracks(updates);
                     if (isPlayingRef.current && project) {
-                      const updatedTracks = project.tracks.map(track => ({ ...track, ...updates }));
+                      const updatedTracks = (project.tracks || []).map(track => ({ ...track, ...updates }));
                       playbackEngine.updateTracks(updatedTracks);
                     }
                   }}
@@ -4116,18 +3908,42 @@ export default function App() {
       <ModalsManager />
       
       {showBackstageEditor && project && (
-        <BackstageEditor 
+        <BackstageErrorBoundary 
           projectPath={project.projectPath} 
-          projectSubtitles={project.subtitles || []}
-          onClose={() => setShowBackstageEditor(false)} 
-        />
+          onClose={() => setShowBackstageEditor(false)}
+        >
+          <BackstageEditor 
+            projectPath={project.projectPath} 
+            projectSubtitles={project.subtitles || []}
+            onClose={() => setShowBackstageEditor(false)} 
+          />
+        </BackstageErrorBoundary>
       )}
 
       {isExportModalOpen && (
         <ExportModal 
+          project={project}
           onExport={(options) => handleExport(options)} 
           onCancel={() => setIsExportModalOpen(false)} 
           initialFormat={pendingExportFormat}
+          onStartRecordingMissing={handleStartRecordingMissing}
+        />
+      )}
+
+      {isCastingModalOpen && (
+        <CastingImportModal
+          isDesktop={isDesktop}
+          onClose={() => setIsCastingModalOpen(false)}
+          onImportCasting={handleImportCasting}
+        />
+      )}
+
+      {isDocumentModalOpen && (
+        <DocumentImportModal
+          isDesktop={isDesktop}
+          projectDuration={duration}
+          onClose={() => setIsDocumentModalOpen(false)}
+          onImportDocument={handleImportDocumentData}
         />
       )}
       
@@ -4135,6 +3951,17 @@ export default function App() {
         isExporting={isExporting} 
         exportProgress={exportProgress} 
         exportOperation={exportOperation} 
+      />
+
+      <VideoPreparationModal
+        isOpen={videoPreparation.isOpen}
+        progress={videoPreparation.progress}
+        time={videoPreparation.time}
+        statusText={videoPreparation.statusText}
+        error={videoPreparation.error}
+        isSuccess={videoPreparation.isSuccess}
+        onClose={() => setVideoPreparation(prev => ({ ...prev, isOpen: false, error: null }))}
+        onRetry={() => handleCreateProxyVideo()}
       />
 
       {audioSilenceError && (

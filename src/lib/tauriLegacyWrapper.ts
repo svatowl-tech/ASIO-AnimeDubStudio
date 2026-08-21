@@ -335,6 +335,10 @@ export const tauriAPI = {
         // Update projectPath to the context of the .dub file
         const projectPath = actualPath.replace(/\\/g, '/').substring(0, actualPath.replace(/\\/g, '/').lastIndexOf('/'));
         projectData.projectPath = projectPath;
+        
+        if (!projectData.tracks) projectData.tracks = [];
+        if (!projectData.subtitles) projectData.subtitles = [];
+        if (!projectData.roles) projectData.roles = [];
 
         // Auto-resolve studio workspace path references to the local structure
         projectData = resolveStudioWorkspacePaths(projectData, actualPath);
@@ -744,24 +748,44 @@ export const tauriAPI = {
   },
 
   createProxyVideo: async (videoPath: string, projectPath: string, duration?: number): Promise<BridgeResponse<string>> => {
-    if (!IS_TAURI) return { success: true, data: videoPath };
-    const fileName = videoPath.split(/[/\\]/).pop();
-    const proxyPath = `${projectPath}/proxies/proxy_${fileName}`;
+    const rawFileName = videoPath.split(/[/\\]/).pop() || 'video';
+    const baseName = rawFileName.replace(/\.[^/.]+$/, "");
+    const proxyPath = `${projectPath}/proxies/proxy_${baseName}.mp4`.replace(/\\/g, '/');
+    
+    if (!IS_TAURI) {
+      // Browser preview simulation with progress events
+      const listeners = (window as any).__mediaProgressListeners || [];
+      const totalSteps = 10;
+      for (let i = 1; i <= totalSteps; i++) {
+        await new Promise(r => setTimeout(r, 120));
+        const percent = Math.round((i / totalSteps) * 100);
+        const time = `00:00:${String(i * 3).padStart(2, '0')}`;
+        listeners.forEach((cb: any) => cb({ time, percent, operation: 'Подготовка видео' }));
+      }
+      return { success: true, data: proxyPath };
+    }
     
     try {
         const result = await invokeWithWatchdog<string>('create_proxy_video', { 
             inputPath: videoPath, 
             outputPath: proxyPath,
             duration: duration
-        }, { progressEvent: 'media-progress' });
-        return { success: true, data: result };
+        }, { progressEvent: 'media-progress', timeoutMs: 600000 });
+        return { success: true, data: result || proxyPath };
     } catch(err) {
         return { success: false, data: videoPath, error: String(err) };
     }
   },
 
   onMediaProgress: (cb: (data: { time: string, percent: number, operation: string }) => void): (() => void) => {
-      if (!IS_TAURI) return () => {};
+      if (!IS_TAURI) {
+        const arr = (window as any).__mediaProgressListeners = (window as any).__mediaProgressListeners || [];
+        arr.push(cb);
+        return () => {
+          const idx = arr.indexOf(cb);
+          if (idx !== -1) arr.splice(idx, 1);
+        };
+      }
       let unlisten: UnlistenFn | null = null;
       let isCancelled = false;
       
@@ -894,7 +918,7 @@ export const tauriAPI = {
     console.log("[Bridge] openVideo called");
     try {
         const path = await open({
-            filters: [{ name: 'Media', extensions: ['mp4', 'mkv', 'avi', 'mov', 'mp3', 'wav', 'ogg', 'flac'] }]
+            filters: [{ name: 'Media', extensions: ['mp4', 'mkv', 'avi', 'mov', 'hevc', 'h265', '265', 'ts', 'm2ts', 'webm', 'mp3', 'wav', 'ogg', 'flac'] }]
         });
         if (!path || Array.isArray(path)) return { success: false, error: 'Cancelled' };
         
@@ -930,7 +954,7 @@ export const tauriAPI = {
             content = await invoke<string>('read_text_file', { path });
         } catch (e) {
             // Suppress binary warning for audio/video files
-            if (!/\.(wav|mp3|flac|m4a|aac|ogg|mp4|mkv|avi|mov|webm)$/i.test(path)) {
+            if (!/\.(wav|mp3|flac|m4a|aac|ogg|mp4|mkv|avi|mov|webm|hevc|h265|265|ts|m2ts)$/i.test(path)) {
                 console.warn("[Bridge] openFile could not read text file:", e);
             }
         }
@@ -1140,10 +1164,18 @@ export const tauriAPI = {
     }
   },
 
-  exportBlooper: async (args: { videoPath: string, audioPath: string, startTime: number, endTime: number, voiceOffset: number, outputPath: string }): Promise<BridgeResponse<string>> => {
+  exportBlooper: async (args: { videoPath: string, audioPath: string, startTime: number, endTime: number, audioDelay: number, audioTrimStart: number, outputPath: string }): Promise<BridgeResponse<string>> => {
     if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
     try {
-        const result = await invoke<string>('export_blooper', args);
+        const result = await invoke<string>('export_blooper', {
+          videoPath: args.videoPath,
+          audioPath: args.audioPath,
+          startTime: args.startTime,
+          endTime: args.endTime,
+          audioDelay: args.audioDelay,
+          audioTrimStart: args.audioTrimStart,
+          outputPath: args.outputPath
+        });
         return { success: true, data: result };
     } catch(err) {
         return { success: false, error: String(err) };

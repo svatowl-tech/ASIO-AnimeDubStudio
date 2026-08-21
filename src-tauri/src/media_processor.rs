@@ -47,7 +47,7 @@ pub async fn concat_backstage_videos(
 
     // Склеиваем видео без перекодирования (stream copy), если это возможно
     // Внимание: это работает стабильно, если все исходники имеют одинаковые параметры (кодек, разрешение)
-    let output = tokio::process::Command::new("ffmpeg")
+    let output = tokio::process::Command::new(crate::get_ffmpeg_path())
         .args(&[
             "-nostdin",
             "-y",
@@ -457,16 +457,22 @@ pub async fn extract_mkv_assets(
     args.push("-map".to_string());
     args.push("0:v:0".to_string());
 
-    // Map the selected audio stream
-    args.push("-map".to_string());
-    args.push(format!("0:{}", audio_index));
+    // Map the selected audio stream if valid
+    if audio_index < 9000 {
+        args.push("-map".to_string());
+        args.push(format!("0:{}", audio_index));
+        args.push("-c:a".to_string());
+        args.push("aac".to_string());
+    } else {
+        args.push("-an".to_string());
+    }
 
     args.push("-c:v".to_string());
     args.push("copy".to_string());
-    args.push("-c:a".to_string());
-    args.push("aac".to_string()); 
+    args.push("-tag:v".to_string());
+    args.push("hvc1".to_string());
     args.push("-movflags".to_string());
-    args.push("faststart".to_string());
+    args.push("+faststart".to_string());
     args.push(video_output.clone());
 
     // If subtitles are selected, extract them to a separate file in the same ffmpeg run
@@ -502,42 +508,59 @@ pub async fn create_proxy_video(
     output_path: String,
     duration: Option<f64>,
 ) -> Result<String, String> {
-    log_debug(&format!("create_proxy_video called for: {}", input_path));
+    log_debug(&format!("create_proxy_video called for: {} -> {}", input_path, output_path));
+    
+    // Ensure parent directory (e.g. /proxies) exists
+    if let Some(parent) = std::path::Path::new(&output_path).parent() {
+        if !parent.exists() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+
     // Smart Switch: If proxy exists, return path immediately
     if std::path::Path::new(&output_path).exists() {
+        if let Ok(canonical) = fs::canonicalize(&output_path) {
+            let mut p = canonical.to_string_lossy().to_string();
+            if p.starts_with(r"\\?\") {
+                p = p[4..].to_string();
+            }
+            return Ok(p.replace('\\', "/"));
+        }
         return Ok(output_path);
     }
 
-    // Otherwise, spawn background task for generation
-    let app_handle_spawn = app_handle.clone();
-    let input_path_spawn = input_path.clone();
-    let output_path_spawn = output_path.clone();
+    let args = vec![
+        "-y".to_string(), // Overwrite
+        "-i".to_string(), input_path.clone(),
+        "-c:v".to_string(), "libx264".to_string(),
+        "-preset".to_string(), "ultrafast".to_string(),
+        "-crf".to_string(), "26".to_string(),
+        "-pix_fmt".to_string(), "yuv420p".to_string(),
+        "-vf".to_string(), "scale='min(1280,iw)':-2".to_string(), // Keep aspect ratio, even dimensions, max 720p/1280w
+        "-c:a".to_string(), "aac".to_string(), 
+        "-b:a".to_string(), "192k".to_string(),
+        "-movflags".to_string(), "+faststart".to_string(),
+        output_path.clone(),
+    ];
 
-    tokio::spawn(async move {
-        let args = vec![
-            "-y".to_string(), // Overwrite
-            "-i".to_string(), input_path_spawn,
-            "-c:v".to_string(), "libx264".to_string(),
-            "-preset".to_string(), "ultrafast".to_string(),
-            "-crf".to_string(), "30".to_string(), // Updated CRF to 30 as requested
-            "-vf".to_string(), "scale=-2:360".to_string(), // Using -2 for even dimensions
-            "-c:a".to_string(), "aac".to_string(), 
-            "-b:a".to_string(), "128k".to_string(),
-            output_path_spawn.clone(),
-        ];
+    if let Err(e) = run_ffmpeg_with_progress(app_handle.clone(), args, "Подготовка видео".to_string(), duration).await {
+        eprintln!("FFmpeg error during proxy generation: {}", e);
+        let _ = app_handle.emit("proxy-error", &e);
+        return Err(e);
+    }
 
-        if let Err(e) = run_ffmpeg_with_progress(app_handle_spawn.clone(), args, "Proxy Generation".to_string(), duration).await {
-            eprintln!("FFmpeg error during proxy generation: {}", e);
-            // Optionally emit an error event to the frontend
-            let _ = app_handle_spawn.emit("proxy-error", e);
-        } else {
-            // Emit success to trigger Smart Switch in frontend
-            let _ = app_handle_spawn.emit("proxy-ready", &output_path_spawn);
+    if let Ok(canonical) = fs::canonicalize(&output_path) {
+        let mut p = canonical.to_string_lossy().to_string();
+        if p.starts_with(r"\\?\") {
+            p = p[4..].to_string();
         }
-    });
+        let clean = p.replace('\\', "/");
+        let _ = app_handle.emit("proxy-ready", &clean);
+        return Ok(clean);
+    }
 
-    // Immediately return "Generating" status to the frontend
-    Ok("Generating".to_string())
+    let _ = app_handle.emit("proxy-ready", &output_path);
+    Ok(output_path)
 }
 
 #[tauri::command]
@@ -572,7 +595,11 @@ pub async fn create_blank_video(
     duration: f64,
     output_path: String,
 ) -> Result<String, String> {
-    let output = tokio::process::Command::new("ffmpeg")
+    if let Some(parent) = std::path::Path::new(&output_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let output = tokio::process::Command::new(crate::get_ffmpeg_path())
         .args(&[
             "-nostdin",
             "-y",
@@ -592,6 +619,15 @@ pub async fn create_blank_video(
 
     if !output.status.success() {
         return Err(format!("FFmpeg failed to create blank video: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+
+    if let Ok(canonical) = std::fs::canonicalize(&output_path) {
+        let mut p = canonical.to_string_lossy().to_string();
+        // Remove Windows \\?\ prefix if present
+        if p.starts_with(r"\\?\") {
+            p = p[4..].to_string();
+        }
+        return Ok(p.replace('\\', "/"));
     }
 
     Ok(output_path)

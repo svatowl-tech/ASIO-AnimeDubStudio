@@ -14,6 +14,15 @@ export const ScrollingWaveform: React.FC<ScrollingWaveformProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [dimensions, setDimensions] = React.useState({ w: window.innerWidth });
 
+  const scaleFactor = React.useMemo(() => {
+    if (!peaks || peaks.length === 0) return 1;
+    let maxPeak = 0.0001;
+    for (let i = 0; i < peaks.length; i++) {
+      if (peaks[i] > maxPeak) maxPeak = peaks[i];
+    }
+    return 1 / maxPeak;
+  }, [peaks]);
+
   useEffect(() => {
     let resizeTimer: NodeJS.Timeout;
     const handleResize = () => {
@@ -62,12 +71,6 @@ export const ScrollingWaveform: React.FC<ScrollingWaveformProps> = ({
     const visibleStart = currentTime - (windowSeconds / 2);
     const visibleEnd = currentTime + (windowSeconds / 2);
 
-    let maxPeak = 0.0001;
-    for (let i = 0; i < peaks.length; i++) {
-      if (peaks[i] > maxPeak) maxPeak = peaks[i];
-    }
-    const scaleFactor = 1 / maxPeak;
-
     const totalPeaks = peaks.length;
     const peaksPerSecond = totalPeaks / duration;
 
@@ -113,7 +116,7 @@ export const ScrollingWaveform: React.FC<ScrollingWaveformProps> = ({
     // Draw center line (playhead)
     ctx.fillStyle = 'rgba(255, 0, 0, 0.8)';
     ctx.fillRect(width / 2, 0, 2, height);
-  }, [peaks, currentTime, duration, dimensions]);
+  }, [peaks, currentTime, duration, dimensions, scaleFactor]);
 
   return (
     <div className="absolute bottom-10 left-0 right-0 h-[80px] pointer-events-none z-40 flex items-center justify-center">

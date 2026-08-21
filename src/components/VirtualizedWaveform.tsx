@@ -22,6 +22,15 @@ export const VirtualizedWaveform = ({
   audioOffsetMs?: number // global project offset
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const scaleFactor = React.useMemo(() => {
+    if (!peaks || peaks.length === 0) return 1;
+    let maxPeak = 0.0001;
+    for (let i = 0; i < peaks.length; i++) {
+      if (peaks[i] > maxPeak) maxPeak = peaks[i];
+    }
+    return 1 / maxPeak;
+  }, [peaks]);
   
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -86,14 +95,6 @@ export const VirtualizedWaveform = ({
     
     if (!peaks || peaks.length === 0 || duration <= 0) return;
     
-    // Find the maximum peak for normalization
-    let maxPeak = 0.0001; 
-    for(let i = 0; i < peaks.length; i++) { 
-        if (peaks[i] > maxPeak) maxPeak = peaks[i]; 
-    }
-    
-    const scaleFactor = 1 / maxPeak;
-
     ctx.fillStyle = color;
     
     const totalPeaks = peaks.length;
@@ -138,7 +139,7 @@ export const VirtualizedWaveform = ({
       
       ctx.fillRect(x, y, barWidth, h);
     }
-  }, [peaks, zoom, duration, color, vRange, isRelative, segmentOffset, segmentStartTime, audioOffsetMs]);
+  }, [peaks, zoom, duration, color, vRange, isRelative, segmentOffset, segmentStartTime, audioOffsetMs, scaleFactor]);
   
   return <canvas ref={canvasRef} className="absolute top-0 h-full pointer-events-none" />;
 };

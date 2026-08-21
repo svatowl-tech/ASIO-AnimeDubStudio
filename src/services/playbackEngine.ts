@@ -1,4 +1,14 @@
-import { getSafeFileUrl } from '../lib/utils';
+import { getSafeFileUrl, getFriendlyFileLoadErrorMessage, getTrackLinearVolume, getSegmentLinearGain } from '../lib/utils';
+
+const getSegmentUrl = (seg: any): string | null => {
+  if (!seg) return null;
+  if ((seg as any).url) return (seg as any).url;
+  if (seg.filePath) {
+    const safeUrl = getSafeFileUrl(seg.filePath);
+    if (safeUrl) return safeUrl;
+  }
+  return seg.blobUrl || null;
+};
 
 export class PlaybackEngine {
   private audioContext: AudioContext | null = null;
@@ -34,6 +44,20 @@ export class PlaybackEngine {
   }> = new Map();
 
   constructor() {}
+
+  public async setOutputDevice(deviceId: string) {
+    const ctx = this.getContext();
+    if (typeof (ctx as any).setSinkId === 'function') {
+      try {
+        await (ctx as any).setSinkId(deviceId === 'default' ? '' : deviceId);
+        console.log(`[PlaybackEngine] Output device set to: ${deviceId}`);
+      } catch (e) {
+        console.error(`[PlaybackEngine] Failed to set output device:`, e);
+      }
+    } else {
+      console.warn(`[PlaybackEngine] setSinkId not supported in this browser.`);
+    }
+  }
 
   public setPlayOriginalTrackSegments(play: boolean) {
     this.playOriginalTrackSegments = play;
@@ -195,14 +219,14 @@ export class PlaybackEngine {
       const currentVideoTime = this.boundVideoElement ? this.boundVideoElement.currentTime : 0;
       
       this.playingMetadata.forEach((meta) => {
-        const activeUrl = (meta.seg as any).url || meta.seg.blobUrl || (meta.seg.filePath ? getSafeFileUrl(meta.seg.filePath) : null);
+        const activeUrl = getSegmentUrl(meta.seg);
         if (activeUrl) activeUrls.add(activeUrl);
       });
 
       this.currentTracks.forEach(track => {
         track.segments.forEach((seg: any) => {
            if (seg.startTime <= currentVideoTime + 5 && seg.startTime + seg.duration >= currentVideoTime) {
-               const activeUrl = seg.url || seg.blobUrl || (seg.filePath ? getSafeFileUrl(seg.filePath) : null);
+               const activeUrl = getSegmentUrl(seg);
                if (activeUrl) activeUrls.add(activeUrl);
            }
         });
@@ -257,7 +281,8 @@ export class PlaybackEngine {
         this.bufferCache.set(url, audioBuffer);
         return audioBuffer;
       } catch (e) {
-        console.error("[PlaybackEngine] Failed to load audio buffer:", url, e);
+        const friendlyMsg = getFriendlyFileLoadErrorMessage(e, filePath || url);
+        console.error("[PlaybackEngine] Failed to load audio buffer:\n" + friendlyMsg);
         return null;
       } finally {
         this.pendingBuffers.delete(url);
@@ -289,11 +314,13 @@ export class PlaybackEngine {
   }
 
   private performSync() {
-    if (!this.boundVideoElement || !this.isPlaying) return;
+    if (!this.boundVideoElement || !this.isPlaying || this.boundVideoElement.paused || this.boundVideoElement.error || this.boundVideoElement.readyState < 2) {
+      return;
+    }
     
     const ctx = this.getContext();
     const videoTime = this.boundVideoElement.currentTime;
-    const videoRate = this.boundVideoElement.playbackRate;
+    const videoRate = this.boundVideoElement.playbackRate || 1.0;
 
     this.sources.forEach((source, segId) => {
       const meta = this.playingMetadata.get(segId);
@@ -362,25 +389,28 @@ export class PlaybackEngine {
       const gain = this.gainNodes.get(seg.id);
       const meta = this.playingMetadata.get(seg.id);
       
-      // Implement micro-fade out (crossfade support)
-      const fadeOutTime = 0.01; // 10ms
-      if (gain) {
-        gain.gain.setTargetAtTime(0, now, fadeOutTime / 2);
-      }
-      
-      // Cleanup after fade out
+      // Implement clean stop via Web Audio scheduling to avoid timing desync
+      try {
+        if (gain) {
+          gain.gain.setValueAtTime(gain.gain.value, now);
+          gain.gain.linearRampToValueAtTime(0, now + 0.005);
+        }
+        source.stop(now + 0.008);
+      } catch (e) {}
+
       setTimeout(() => {
-        try { source.stop(); source.disconnect(); } catch(e) {}
+        try { source.disconnect(); } catch(e) {}
         if (meta?.monoNode) { try { meta.monoNode.disconnect(); } catch(e) {} }
         if (gain) { try { gain.disconnect(); } catch(e) {} }
-      }, fadeOutTime * 1000 + 50);
+      }, 30);
 
       this.sources.delete(seg.id);
       this.gainNodes.delete(seg.id);
       this.playingMetadata.delete(seg.id);
       this.scheduledSegments.delete(seg.id);
+    } else {
+      this.scheduledSegments.delete(seg.id);
     }
-    // tick will naturally reschedule it if it's still in the window
   }
 
   public async tick(currentVideoTime: number, tracks: any[]) {
@@ -392,9 +422,13 @@ export class PlaybackEngine {
     const sessionId = this.currentSessionId;
     const now = ctx.currentTime;
     
-    // Use the most up-to-date time from the element if available to reduce latency
-    const liveVideoTime = this.boundVideoElement ? this.boundVideoElement.currentTime : currentVideoTime;
-    const playbackRate = this.boundVideoElement ? this.boundVideoElement.playbackRate : 1.0;
+    // Use the most up-to-date time from the element if available and playing to reduce latency
+    const isVideoActive = this.boundVideoElement && 
+      !this.boundVideoElement.paused && 
+      !this.boundVideoElement.error && 
+      this.boundVideoElement.readyState >= 2;
+    const liveVideoTime = isVideoActive ? this.boundVideoElement!.currentTime : currentVideoTime;
+    const playbackRate = isVideoActive ? (this.boundVideoElement!.playbackRate || 1.0) : 1.0;
     
     // Cleanup segments that have passed
     this.sources.forEach((source, segId) => {
@@ -428,7 +462,7 @@ export class PlaybackEngine {
       const isOriginalActive = anySolo 
         ? (originalTrack?.isSolo || false) 
         : !(originalTrack?.isMuted || false);
-      const targetVolume = isOriginalActive ? (originalTrack?.volume ?? 1) : 0;
+      const targetVolume = isOriginalActive ? getTrackLinearVolume(originalTrack?.volume) : 0;
       this.videoGain.gain.setTargetAtTime(targetVolume, now, 0.03);
     }
 
@@ -436,7 +470,7 @@ export class PlaybackEngine {
       const isRefActive = anySolo
         ? (referenceTrack?.isSolo || false)
         : !(referenceTrack?.isMuted || false);
-      const targetVolume = isRefActive ? (referenceTrack?.volume ?? 1) : 0;
+      const targetVolume = isRefActive ? getTrackLinearVolume(referenceTrack?.volume) : 0;
       this.referenceGain.gain.setTargetAtTime(targetVolume, now, 0.03);
     }
 
@@ -457,11 +491,27 @@ export class PlaybackEngine {
         if (seg.startTime <= lookaheadEnd && segmentEnd > liveVideoTime && !this.scheduledSegments.has(seg.id)) {
           this.scheduledSegments.add(seg.id);
           
-          const urlToLoad = (seg as any).url || seg.blobUrl || (seg.filePath ? getSafeFileUrl(seg.filePath) : null);
+          const urlToLoad = getSegmentUrl(seg);
           if (!urlToLoad) continue;
 
           this.loadBuffer(urlToLoad, seg.filePath).then(buffer => {
             if (!buffer || !this.isPlaying || sessionId !== this.currentSessionId) return;
+
+            // Make sure segment hasn't been cancelled or removed while buffer was loading
+            if (!this.scheduledSegments.has(seg.id)) return;
+
+            // Clean up any existing active source for this segment ID before creating a new one
+            const existingSource = this.sources.get(seg.id);
+            if (existingSource) {
+              try { existingSource.stop(); existingSource.disconnect(); } catch(e) {}
+              const existingGain = this.gainNodes.get(seg.id);
+              if (existingGain) { try { existingGain.disconnect(); } catch(e) {} }
+              const existingMeta = this.playingMetadata.get(seg.id);
+              if (existingMeta?.monoNode) { try { existingMeta.monoNode.disconnect(); } catch(e) {} }
+              this.sources.delete(seg.id);
+              this.gainNodes.delete(seg.id);
+              this.playingMetadata.delete(seg.id);
+            }
 
             // Use the captured 'now' for start time calculation to ensure uniformity 
             // but we might need a fresh read if Buffer loading was LONG. 
@@ -517,7 +567,7 @@ export class PlaybackEngine {
             source.playbackRate.value = baseRate * currentVideoRate;
 
             const gainNode = ctx.createGain();
-            const baseVolume = (seg.gain || 1) * (track.volume !== undefined ? track.volume : 1);
+            const baseVolume = getSegmentLinearGain(seg.gain) * getTrackLinearVolume(track.volume);
             const FADE_TIME = 0.003;
             
             // Micro-fade in at start
@@ -609,30 +659,49 @@ export class PlaybackEngine {
     const ctx = this.getContext();
     const liveVideoTime = this.boundVideoElement ? this.boundVideoElement.currentTime : 0;
     
-    // 1. Find segments that are no longer present in tracks and stop them
-    const activeSegmentIds = new Set<string>();
+    // 1. Build map of current active segments in updated tracks
+    const activeSegmentsMap = new Map<string, { seg: any; track: any }>();
     tracks.forEach(track => {
-      track.segments.forEach((seg: any) => activeSegmentIds.add(String(seg.id)));
+      track.segments.forEach((seg: any) => activeSegmentsMap.set(String(seg.id), { seg, track }));
     });
 
+    // 2. Find segments that are no longer present in tracks and stop them
     this.sources.forEach((source, segId) => {
-      if (!activeSegmentIds.has(segId)) {
+      if (!activeSegmentsMap.has(segId)) {
         console.log(`[PlaybackEngine] Reconcile: Stopping removed segment ${segId}`);
         this.restartSegment(null, { id: segId });
       }
     });
 
-    // 2. Cleanup scheduledSegments set for segments that were removed but not yet playing
+    // 3. Cleanup scheduledSegments set for segments that were removed but not yet playing
     this.scheduledSegments.forEach(segId => {
-      if (!activeSegmentIds.has(segId)) {
+      if (!activeSegmentsMap.has(segId)) {
         this.scheduledSegments.delete(segId);
       }
     });
 
-    // 3. Update gains and rates for existing segments
+    // 4. Detect playing segments whose boundary/offset changed and restart them
+    this.playingMetadata.forEach((meta, segId) => {
+      const updatedInfo = activeSegmentsMap.get(segId);
+      if (updatedInfo) {
+        const oldSeg = meta.seg;
+        const newSeg = updatedInfo.seg;
+        const positionChanged = 
+          Math.abs((oldSeg.startTime || 0) - (newSeg.startTime || 0)) > 0.001 ||
+          Math.abs((oldSeg.duration || 0) - (newSeg.duration || 0)) > 0.001 ||
+          Math.abs((oldSeg.fileOffset || 0) - (newSeg.fileOffset || 0)) > 0.001;
+        
+        if (positionChanged) {
+          console.log(`[PlaybackEngine] Reconcile: Restarting modified segment ${segId}`);
+          this.restartSegment(updatedInfo.track, newSeg);
+        }
+      }
+    });
+
+    // 5. Update gains and rates for existing segments
     this.updateTracks(tracks);
 
-    // 4. Tick once to schedule any newly added segments (like the second part of a split)
+    // 6. Tick once to schedule any newly added or modified segments
     this.tick(liveVideoTime, tracks);
     
     console.log("[PlaybackEngine] Reconciliation complete");
@@ -670,7 +739,7 @@ export class PlaybackEngine {
       const isOriginalActive = anySolo 
         ? (originalTrack?.isSolo || false) 
         : !(originalTrack?.isMuted || false);
-      const targetVolume = isOriginalActive ? (originalTrack?.volume ?? 1) : 0;
+      const targetVolume = isOriginalActive ? getTrackLinearVolume(originalTrack?.volume) : 0;
       this.videoGain.gain.setTargetAtTime(targetVolume, ctx.currentTime, 0.03);
     }
 
@@ -678,7 +747,7 @@ export class PlaybackEngine {
       const isRefActive = anySolo
         ? (referenceTrack?.isSolo || false)
         : !(referenceTrack?.isMuted || false);
-      const targetVolume = isRefActive ? (referenceTrack?.volume ?? 1) : 0;
+      const targetVolume = isRefActive ? getTrackLinearVolume(referenceTrack?.volume) : 0;
       this.referenceGain.gain.setTargetAtTime(targetVolume, ctx.currentTime, 0.03);
     }
 
@@ -690,7 +759,7 @@ export class PlaybackEngine {
       track.segments.forEach((seg: any) => {
         const gainNode = this.gainNodes.get(seg.id);
         if (gainNode) {
-          const targetGain = isTrackActive ? (seg.gain || 1) * (track.volume !== undefined ? track.volume : 1) : 0;
+          const targetGain = isTrackActive ? getSegmentLinearGain(seg.gain) * getTrackLinearVolume(track.volume) : 0;
           gainNode.gain.setTargetAtTime(targetGain, this.getContext().currentTime, 0.02);
         }
 

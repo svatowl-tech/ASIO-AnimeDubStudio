@@ -33,7 +33,7 @@ export const BackstageCamera: React.FC<BackstageCameraProps> = ({
       initial={{ opacity: 0, x: 20, scale: 0.8 }}
       animate={{ opacity: 1, x: 0, scale: 1 }}
       exit={{ opacity: 0, x: 20, scale: 0.8 }}
-      className="absolute flex flex-col bottom-8 right-8 w-72 bg-zinc-900 rounded-2xl border border-white/20 overflow-hidden shadow-2xl pointer-events-auto group cursor-grab active:cursor-grabbing"
+      className="absolute flex flex-col bottom-8 right-8 w-72 bg-zinc-900 rounded-2xl border border-white/20 overflow-hidden shadow-2xl pointer-events-auto group cursor-grab active:cursor-grabbing z-50"
     >
       <div className="relative aspect-video w-full bg-black">
         <video 

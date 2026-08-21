@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { GripVertical, Trash2, RotateCcw, Scissors, Edit3, Maximize, Volume2, Video, Copy, ClipboardPaste } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { AudioSegment } from '../types';
@@ -6,6 +6,7 @@ import { VirtualizedWaveform } from './VirtualizedWaveform';
 import { SmartAlignService } from '../services/smartAlignService';
 import { ContextMenu } from './ContextMenu';
 import { logger } from '../lib/logger';
+import { useProjectData } from '../contexts/ProjectContext';
 
 export const AudioSegmentView = React.memo(({ 
   seg, 
@@ -51,10 +52,66 @@ export const AudioSegmentView = React.memo(({
   autoFadeOut?: number,
   key?: string | number
 }) => {
+  const { saveSnapshot } = useProjectData();
   const [isResizing, setIsResizing] = useState<'left' | 'right' | 'drag' | 'slip' | null>(null);
   const [showVolume, setShowVolume] = useState(false);
   const [isAligning, setIsAligning] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number } | null>(null);
+  const [isDraggingGain, setIsDraggingGain] = useState(false);
+
+  const handleGainLineMouseDown = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+
+    if (e.button !== 0 || e.detail > 1) {
+      return;
+    }
+
+    const startY = e.clientY;
+    const initialGain = (seg.gain === undefined) ? 0 : seg.gain;
+    
+    // Находим высоту контейнера сегмента, чтобы рассчитать шаг изменения dB на пиксель
+    const container = e.currentTarget.closest('.audio-segment-container') || e.currentTarget.parentElement;
+    const containerHeight = container ? container.getBoundingClientRect().height : 80;
+
+    let hasDragged = false;
+    
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaY = moveEvent.clientY - startY;
+      
+      if (!hasDragged && Math.abs(deltaY) < 3) {
+        return;
+      }
+
+      if (!hasDragged) {
+        hasDragged = true;
+        saveSnapshot();
+        setIsDraggingGain(true);
+      }
+
+      // Относительное изменение громкости: полный перетаскиваемый диапазон составляет 30 дБ (-15 до 15)
+      // Масштабируем так, чтобы перетаскивание на 80% высоты контейнера давало изменение в 30 дБ.
+      const scaleFactor = containerHeight > 0 ? containerHeight * 0.8 : 64;
+      const deltaDb = -(deltaY / scaleFactor) * 30;
+      
+      let newGain = initialGain + deltaDb;
+      // Ограничиваем шаг в 0.5 дБ и диапазон от -15 до 15 дБ
+      newGain = Math.max(-15, Math.min(15, Math.round(newGain * 2) / 2));
+      
+      onUpdateSegment(trackId, seg.id, { gain: newGain });
+    };
+    
+    const handleMouseUp = () => {
+      if (hasDragged) {
+        setIsDraggingGain(false);
+      }
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+    
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -67,6 +124,7 @@ export const AudioSegmentView = React.memo(({
 
   const handleMouseDown = (e: React.MouseEvent, side: 'left' | 'right' | 'drag') => {
     e.stopPropagation();
+    saveSnapshot();
     
     let currentMode: 'left' | 'right' | 'drag' | 'slip' = side;
     if (side === 'drag' && e.altKey) {
@@ -199,6 +257,7 @@ export const AudioSegmentView = React.memo(({
 
   const handleFadeMouseDown = (e: React.MouseEvent, type: 'in' | 'out') => {
     e.stopPropagation();
+    saveSnapshot();
     const startX = e.clientX;
     const initialFade = type === 'in' ? (seg.fadeIn || 0) : (seg.fadeOut || 0);
 
@@ -241,6 +300,54 @@ export const AudioSegmentView = React.memo(({
       );
     }
   }
+
+  const currentGainVal = (seg.gain === undefined) ? 0 : seg.gain;
+  
+  const gainToPercent = (g: number) => {
+    const minDb = -15;
+    const maxDb = 15;
+    const clamped = Math.max(minDb, Math.min(maxDb, g));
+    const frac = (clamped - minDb) / (maxDb - minDb);
+    // Мапим -15 dB на 90% (низ), +15 dB на 10% (верх)
+    return 90 - frac * 80;
+  };
+
+  const gY = gainToPercent(currentGainVal);
+  const effFadeIn = Math.max(seg.fadeIn || 0, autoFadeIn || 0);
+  const effFadeOut = Math.max(seg.fadeOut || 0, autoFadeOut || 0);
+
+  const fadeInX = Math.min(100, (effFadeIn / seg.duration) * 100);
+  const rawFadeOutX = 100 - (effFadeOut / seg.duration) * 100;
+  const fadeOutX = Math.max(fadeInX, Math.min(100, rawFadeOutX));
+
+  const averageDb = useMemo(() => {
+    if (!seg.waveform || seg.waveform.length === 0) {
+      // По умолчанию, если нет волны, берем среднюю громкость -20 дБ
+      return -20 + currentGainVal;
+    }
+    const sum = seg.waveform.reduce((acc, val) => acc + Math.abs(val), 0);
+    const avgAmp = sum / seg.waveform.length;
+    // Переводим амплитуду [0..1] в децибелы (dBFS)
+    const baseDb = avgAmp > 0.001 ? 20 * Math.log10(avgAmp) : -60;
+    // Оцениваем RMS (обычно на ~12 дБ ниже пикового значения)
+    const estimatedRmsDb = baseDb - 12;
+    const realDb = estimatedRmsDb + currentGainVal;
+    return Math.max(-60, Math.min(6, realDb));
+  }, [seg.waveform, currentGainVal]);
+
+  const getVolumeColorClass = (db: number) => {
+    if (db > -3) return "text-red-400 bg-red-950/85 border-red-500/30";
+    if (db > -10) return "text-amber-400 bg-amber-950/80 border-amber-500/30";
+    if (db > -24) return "text-emerald-400 bg-emerald-950/85 border-emerald-500/30";
+    return "text-zinc-400 bg-zinc-950/85 border-zinc-500/20";
+  };
+
+  const getMeterPercent = (db: number) => {
+    const minDb = -45;
+    const maxDb = 0;
+    const clamped = Math.max(minDb, Math.min(maxDb, db));
+    return ((clamped - minDb) / (maxDb - minDb)) * 100;
+  };
 
   return (
     <div 
@@ -286,9 +393,9 @@ export const AudioSegmentView = React.memo(({
               {seg.text}
             </span>
           )}
-          {seg.gain !== 1 && (
+          {seg.gain !== 0 && seg.gain !== undefined && (
             <span className="text-[7px] font-black bg-emerald-600/60 px-1 rounded text-white">
-              {Math.round(seg.gain * 100)}%
+              {seg.gain > 0 ? `+${seg.gain.toFixed(1)}` : seg.gain.toFixed(1)} dB
             </span>
           )}
         </div>
@@ -302,7 +409,7 @@ export const AudioSegmentView = React.memo(({
               }}
               className={cn(
                 "p-0.5 rounded hover:bg-white/10 transition-colors",
-                seg.gain !== 1 ? "text-emerald-400" : "text-zinc-500"
+                seg.gain !== 0 && seg.gain !== undefined ? "text-emerald-400" : "text-zinc-500"
               )}
               title="Громкость фразы"
             >
@@ -312,13 +419,24 @@ export const AudioSegmentView = React.memo(({
               <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-2 bg-zinc-900 border border-white/10 rounded-lg shadow-2xl z-50 flex flex-col items-center gap-2">
                 <div className="text-[8px] font-bold text-zinc-500 uppercase tracking-widest">Громкость</div>
                 <input 
-                  type="range" min="0" max="2" step="0.05"
-                  value={seg.gain}
+                  type="range" min="-15" max="15" step="0.5"
+                  value={seg.gain === undefined ? 0 : seg.gain}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    saveSnapshot();
+                  }}
                   onChange={(e) => onUpdateSegment(trackId, seg.id, { gain: parseFloat(e.target.value) })}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    saveSnapshot();
+                    onUpdateSegment(trackId, seg.id, { gain: 0 });
+                  }}
                   className="h-24 appearance-none bg-zinc-800 rounded-full w-1 accent-indigo-500 cursor-pointer"
                   style={{ writingMode: 'vertical-lr' }}
                 />
-                <div className="text-[8px] font-mono text-indigo-400">{Math.round(seg.gain * 100)}%</div>
+                <div className="text-[8px] font-mono text-indigo-400">
+                  {(((seg.gain === undefined ? 0 : seg.gain) > 0) ? '+' : '') + (seg.gain === undefined ? 0 : seg.gain).toFixed(1)} dB
+                </div>
               </div>
             )}
           </div>
@@ -359,25 +477,139 @@ export const AudioSegmentView = React.memo(({
         <div className="w-1.5 h-1.5 bg-white rounded-full shadow-sm" />
       </div>
           
-      {/* Fade Visualizers */}
-      {(seg.fadeIn || autoFadeIn) > 0 && (
+      {/* Fade Background Overlays */}
+      {effFadeIn > 0 && (
         <div 
-          className="absolute top-0 bottom-0 left-0 bg-gradient-to-r from-black/50 to-transparent pointer-events-none z-10"
-          style={{ width: `${Math.max(seg.fadeIn || 0, autoFadeIn) * zoom}px` }}
+          className="absolute top-0 bottom-0 left-0 bg-gradient-to-r from-black/40 to-transparent pointer-events-none z-0"
+          style={{ width: `${effFadeIn * zoom}px` }}
+        />
+      )}
+      {effFadeOut > 0 && (
+        <div 
+          className="absolute top-0 bottom-0 right-0 bg-gradient-to-l from-black/40 to-transparent pointer-events-none z-0"
+          style={{ width: `${effFadeOut * zoom}px` }}
+        />
+      )}
+
+      {/* Yellow Volume Envelope (Interactive & Anti-Scaling) */}
+      <svg 
+        className="absolute inset-0 w-full h-full pointer-events-none z-15 select-none" 
+        viewBox="0 0 100 100"
+        preserveAspectRatio="none"
+      >
+        {/* Filled translucent volume shape */}
+        <path
+          d={`M 0,100 L ${fadeInX},${gY} L ${fadeOutX},${gY} L 100,100 Z`}
+          fill="#eab308"
+          fillOpacity="0.08"
+        />
+
+        {/* Left Fade line */}
+        <line
+          x1={0}
+          y1={100}
+          x2={fadeInX}
+          y2={gY}
+          stroke="#eab308"
+          strokeWidth={1.5}
+          vectorEffect="non-scaling-stroke"
+          strokeDasharray={effFadeIn > 0 ? undefined : "2,2"}
+          className="opacity-40"
+        />
+
+        {/* Right Fade line */}
+        <line
+          x1={fadeOutX}
+          y1={gY}
+          x2={100}
+          y2={100}
+          stroke="#eab308"
+          strokeWidth={1.5}
+          vectorEffect="non-scaling-stroke"
+          strokeDasharray={effFadeOut > 0 ? undefined : "2,2"}
+          className="opacity-40"
+        />
+
+        {/* Main Volume Level Line */}
+        <line
+          x1={fadeInX}
+          y1={gY}
+          x2={fadeOutX}
+          y2={gY}
+          stroke="#facc15"
+          strokeWidth={2}
+          vectorEffect="non-scaling-stroke"
+        />
+
+        {/* Grab trigger area (makes dragging easy) */}
+        <g 
+          className="group/gain cursor-ns-resize pointer-events-auto" 
+          onMouseDown={handleGainLineMouseDown}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            setIsDraggingGain(false);
+            saveSnapshot();
+            onUpdateSegment(trackId, seg.id, { gain: 0 });
+          }}
         >
-          <svg className="w-full h-full opacity-50">
-            <line x1="0" y1="100%" x2="100%" y2="0" stroke="white" strokeWidth="1" strokeDasharray="2,2" />
-          </svg>
+          <line
+            x1={fadeInX}
+            y1={gY}
+            x2={fadeOutX}
+            y2={gY}
+            stroke="transparent"
+            strokeWidth={12}
+            vectorEffect="non-scaling-stroke"
+          />
+          {/* Highlight Glow line on hover */}
+          <line
+            x1={fadeInX}
+            y1={gY}
+            x2={fadeOutX}
+            y2={gY}
+            stroke="#facc15"
+            strokeWidth={4.5}
+            vectorEffect="non-scaling-stroke"
+            className="opacity-0 group-hover/gain:opacity-30 transition-opacity duration-100"
+          />
+        </g>
+      </svg>
+
+      {/* Floating real-time dB Badge while dragging */}
+      {isDraggingGain && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-30 animate-pulse">
+          <div className="bg-yellow-500 text-zinc-950 font-black px-2 py-0.5 rounded text-[9px] shadow-xl border border-yellow-300/30 flex items-center gap-1">
+            <Volume2 className="w-2.5 h-2.5" />
+            <span>{currentGainVal > 0 ? `+${currentGainVal.toFixed(1)}` : currentGainVal.toFixed(1)} dB</span>
+          </div>
         </div>
       )}
-      {(seg.fadeOut || autoFadeOut) > 0 && (
+
+      {/* Real-time RMS volume indicator badge */}
+      {seg.duration * zoom > 40 && (
         <div 
-          className="absolute top-0 bottom-0 right-0 bg-gradient-to-l from-black/50 to-transparent pointer-events-none z-10"
-          style={{ width: `${Math.max(seg.fadeOut || 0, autoFadeOut) * zoom}px` }}
+          className={cn(
+            "absolute bottom-1 right-2 px-1.5 py-0.5 rounded text-[8px] font-mono select-none z-10 border flex items-center gap-1 shadow-md bg-zinc-950/85",
+            getVolumeColorClass(averageDb)
+          )}
+          title={`Реальная средняя громкость: ${averageDb.toFixed(1)} dB`}
         >
-          <svg className="w-full h-full opacity-50">
-            <line x1="0" y1="0" x2="100%" y2="100%" stroke="white" strokeWidth="1" strokeDasharray="2,2" />
-          </svg>
+          <span className="font-bold uppercase tracking-wider text-[7px] opacity-75">RMS</span>
+          {seg.duration * zoom > 90 && (
+            <div className="w-10 h-1 bg-zinc-800 rounded-full overflow-hidden relative">
+              <div 
+                className={cn(
+                  "h-full rounded-full transition-all duration-100",
+                  averageDb > -3 ? "bg-red-500" : averageDb > -10 ? "bg-amber-500" : "bg-emerald-500"
+                )}
+                style={{ width: `${getMeterPercent(averageDb)}%` }}
+              />
+            </div>
+          )}
+          <span className="font-black text-[8px] min-w-[32px] text-right">
+            {averageDb > 0 ? `+${averageDb.toFixed(1)}` : averageDb.toFixed(1)} dB
+          </span>
         </div>
       )}
 
@@ -406,9 +638,12 @@ export const AudioSegmentView = React.memo(({
               onClick: () => onPasteSegments?.()
             },
             {
-              label: "Нормализовать громкость",
+              label: "Громкость по умолчанию",
               icon: <Maximize className="w-3.5 h-3.5 text-emerald-400" />,
-              onClick: () => onUpdateSegment(trackId, seg.id, { gain: 1.0 })
+              onClick: () => {
+                saveSnapshot();
+                onUpdateSegment(trackId, seg.id, { gain: 0.0 });
+              }
             },
             {
               label: "Разделить (в плейхеде)",
@@ -425,7 +660,10 @@ export const AudioSegmentView = React.memo(({
               icon: <Edit3 className="w-3.5 h-3.5 text-zinc-400" />,
               onClick: () => {
                 const newText = prompt("Введите комментарий к дублю:", seg.text || "");
-                if (newText !== null) onUpdateSegment(trackId, seg.id, { text: newText });
+                if (newText !== null) {
+                  saveSnapshot();
+                  onUpdateSegment(trackId, seg.id, { text: newText });
+                }
               }
             },
             ...(onGlueSegments ? [{

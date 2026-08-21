@@ -49,7 +49,7 @@ export const MkvTrackSelectorModal: React.FC<MkvTrackSelectorModalProps> = ({
       >
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
-            Выбор дорожек MKV
+            Выбор дорожек видео (MKV / HEVC)
           </h2>
           <button onClick={onCancel} className="p-2 hover:bg-white/10 rounded-lg transition-colors text-zinc-400 hover:text-white">
             <X className="w-5 h-5" />
@@ -147,11 +147,10 @@ export const MkvTrackSelectorModal: React.FC<MkvTrackSelectorModalProps> = ({
             </button>
             <button 
               onClick={() => {
-                if (selectedAudio !== null) {
-                  onConfirm(selectedAudio, selectedSub !== null ? selectedSub : undefined);
-                }
+                const audioIdx = selectedAudio !== null ? selectedAudio : 999999;
+                onConfirm(audioIdx, selectedSub !== null ? selectedSub : undefined);
               }}
-              disabled={selectedAudio === null}
+              disabled={selectedAudio === null && audioStreams.length > 0}
               className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 text-white flex items-center gap-2"
             >
               <Check className="w-4 h-4" /> Использовать выбранные

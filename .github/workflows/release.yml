@@ -1,48 +1,142 @@
-name: "Release"
+name: "Release DubStudio Pro"
+
 on:
   push:
+    branches:
+      - main
+      - master
     tags:
       - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  publish:
+  prepare-release:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.get_version.outputs.VERSION }}
+      tag_name: ${{ steps.get_version.outputs.TAG_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Sync configuration versions
+        run: node scripts/sync-version.js
+
+      - name: Extract version from package.json
+        id: get_version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG_NAME="${{ github.ref_name }}"
+          else
+            TAG_NAME="v$VERSION"
+          fi
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "Building DubStudio Pro version: $VERSION with tag: $TAG_NAME"
+
+      - name: Create Git tag if missing
+        if: startsWith(github.ref, 'refs/heads/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${{ steps.get_version.outputs.TAG_NAME }}"
+          if ! git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Tag $TAG_NAME does not exist locally or on remote. Creating tag $TAG_NAME..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG_NAME" -m "Release DubStudio Pro $TAG_NAME"
+            git push origin "$TAG_NAME" || true
+          else
+            echo "Tag $TAG_NAME already exists."
+          fi
+
+  build-and-release:
+    needs: prepare-release
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
-        platform: [macos-latest, ubuntu-22.04, windows-latest]
+        include:
+          - platform: 'windows-latest'
+            args: ''
+          - platform: 'macos-latest'
+            args: '--target universal-apple-darwin'
+          - platform: 'ubuntu-22.04'
+            args: ''
 
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: setup node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
 
-      - name: install Rust stable
+      - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'x86_64-apple-darwin,aarch64-apple-darwin' || '' }}
 
-      - name: install dependencies (ubuntu only)
+      - name: Cache Rust build dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libasound2-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav
 
-      - name: install frontend dependencies
-        run: npm install
+      - name: Install npm dependencies and setup FFmpeg sidecars
+        run: npm ci || npm install
 
-      - uses: tauri-apps/tauri-action@v0
+      - name: Sync configuration files
+        run: node scripts/sync-version.js
+
+      - name: Build Desktop Application & Create GitHub Release
+        uses: tauri-apps/tauri-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
-          releaseName: "DubStudio Pro v__VERSION__"
-          releaseBody: "See the assets below to download the latest version."
-          releaseDraft: true
+          tagName: ${{ needs.prepare-release.outputs.tag_name }}
+          releaseName: "DubStudio Pro ${{ needs.prepare-release.outputs.tag_name }}"
+          releaseBody: |
+            🎙️ **DubStudio Pro ${{ needs.prepare-release.outputs.tag_name }} Release**
+            
+            Профессиональное программное обеспечение для дубляжа, закадрового озвучивания и фандаба.
+
+            ### 📦 Готовые сборки для установки:
+            - **Windows**: `.exe` (NSIS Installer) и `.msi`
+            - **macOS**: `.dmg` и `.app` (Universal Binary for Apple Silicon M1-M4 & Intel)
+            - **Linux**: `.AppImage` и `.deb`
+
+            ---
+            *Автоматически собрано с помощью GitHub Actions.*
+          releaseDraft: false
           prerelease: false
+          args: ${{ matrix.args }}

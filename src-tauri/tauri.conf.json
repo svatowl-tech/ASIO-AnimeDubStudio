@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DubStudio Pro",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "identifier": "com.dubstudio.pro",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -59,9 +59,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": [
-      "bin/ffmpeg",
-      "bin/ffprobe"
+    "resources": [
+      "bin/ffmpeg*",
+      "bin/ffprobe*"
     ],
     "icon": [
       "icons/32x32.png",
@@ -77,11 +77,11 @@
   },
   "plugins": {
     "updater": {
-      "active": true,
+      "active": false,
       "endpoints": [
         "https://api.dubstudio.pro/update/{{target}}/{{current_version}}"
       ],
-      "pubkey": "DWN7/17...REPLACE_WITH_REAL_PUBKEY..."
+      "pubkey": "dW51c2VkcHVia2V5ZHVtbXlmb3Jub3c="
     }
   }
 }

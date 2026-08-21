@@ -91,6 +91,7 @@ export interface ExportSettings {
   professionalEditing: boolean;
   onlyFavorites?: boolean; // Только избранное
   useAudioTransitions?: boolean; // Использование J/L катов
+  pipCamera?: boolean; // PIP бекстейдж
 }
 
 export interface ExportPreset {
@@ -125,11 +126,13 @@ export interface Marker {
   color?: string;
 }
 
+export type TeleprompterMode = 'compact' | 'expanded' | 'left' | 'right' | 'bottom';
+
 export interface ProjectUIState {
   zoomLevel?: number;
   timelineHeight?: number;
   sidebarWidth?: number;
-  teleprompterMode?: 'compact' | 'expanded';
+  teleprompterMode?: TeleprompterMode;
   teleprompterFontSize?: number;
   teleprompterLineHeight?: number;
   teleprompterPacing?: 'auto' | 'manual';
@@ -152,6 +155,8 @@ export interface Project {
   subtitles: SubtitleLine[];
   roles: string[];
   selectedRole?: string;
+  selectedRoles?: string[];
+  dubberNick?: string; // Ник даббера для экспортных имен файлов
   tracks: AudioTrack[];
   markers?: Marker[]; // Timeline bookmarks
   latencyOffset: number; // ms
@@ -230,7 +235,7 @@ declare global {
   interface Window {
     electronAPI: {
       openVideo: () => Promise<BridgeResponse<{ path: string, name: string, projectPath: string, size: number }>>;
-      createProxyVideo: (videoPath: string, projectPath: string) => Promise<BridgeResponse<string>>;
+      createProxyVideo: (videoPath: string, projectPath: string, duration?: number) => Promise<BridgeResponse<string>>;
       openSubtitles: () => Promise<BridgeResponse<{ path: string, name: string, parsed: { roles: string[], subtitles: any[] } }>>;
       extractAudioPeaks: (videoPath: string, projectPath: string) => Promise<BridgeResponse<{ filePath: string, peaks: Float32Array, duration: number }>>;
       saveTake: (data: { projectPath: string, role: string, startTime: number, audioData: Uint8Array }) => Promise<BridgeResponse<{ filePath: string, peaks: Float32Array }>>;
@@ -282,7 +287,7 @@ declare global {
       cleanupOrphanedFiles: (files: string[]) => Promise<BridgeResponse<void>>;
       concatBackstageVideos: (data: { videoPaths: string[], outputPath: string, backstageMode?: string, isBackstageEnabled?: boolean }) => Promise<BridgeResponse<string>>;
       exportBackstageVideo: (data: { mainVideoPath: string, backstageVideoPath: string, finalAudioPath: string, outputPath: string, webcamExportOverlay?: boolean }) => Promise<BridgeResponse<string>>;
-      exportBlooper: (data: { videoPath: string, audioPath: string, startTime: number, endTime: number, voiceOffset: number, outputPath: string }) => Promise<BridgeResponse<string>>;
+      exportBlooper: (data: { videoPath: string, audioPath: string, startTime: number, endTime: number, audioDelay: number, audioTrimStart: number, outputPath: string }) => Promise<BridgeResponse<string>>;
       processBackstageShorts: (data: { videoPath: string, outputPath: string }) => Promise<BridgeResponse<string>>;
       processBackstageRemoveSilence: (data: { videoPath: string, dubs: {start: number, end: number}[], outputPath: string }) => Promise<BridgeResponse<string>>;
       exportBackstageAssemble: (data: { videoPath: string, originalVideoPath?: string, subtitles: {start: number, end: number, text: string}[], blocks: TimelineBlock[], settings: ExportSettings, outputPath: string }) => Promise<BridgeResponse<string>>;

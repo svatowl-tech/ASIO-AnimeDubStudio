@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect, Dispatch, SetStateAction, RefObject, MutableRefObject } from 'react';
 import { Project, AudioSegment } from '../types';
 import { logger } from '../lib/logger';
-import { getSafeFileUrl, getGlobalAudioSettings } from '../lib/utils';
+import { getSafeFileUrl, getGlobalAudioSettings, getFriendlyAudioErrorMessage } from '../lib/utils';
 import { punchInSegment } from '../lib/timelineUtils';
 
 export const useAudioEngine = (
@@ -11,7 +11,8 @@ export const useAudioEngine = (
   currentTimeRef: MutableRefObject<number>,
   isPlayingRef: MutableRefObject<boolean>,
   togglePlay: () => Promise<void>,
-  previewStream?: MediaStream | null
+  previewStream?: MediaStream | null,
+  saveSnapshot?: () => void
 ) => {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingStream, setRecordingStream] = useState<MediaStream | null>(null);
@@ -102,26 +103,68 @@ export const useAudioEngine = (
 
       let audioTrack = processedAudioTrack;
       const backstageAudioId = project?.audioSettings?.backstageAudioDeviceId;
+      const mainAudioId = project?.audioSettings?.deviceId;
+      
+      console.log(`[AudioEngine Routing] startBackstageRecording setup:`);
+      console.log(`- Incoming processedAudioTrack provided: ${!!processedAudioTrack}`);
+      console.log(`- Project backstageAudioDeviceId: ${backstageAudioId}`);
+      console.log(`- Project main deviceId: ${mainAudioId}`);
       
       if (!audioTrack && backstageAudioId !== "none") {
-        const audioConstraint = backstageAudioId && backstageAudioId !== 'default' 
-          ? { deviceId: { ideal: backstageAudioId } } 
-          : project?.audioSettings?.deviceId ? { deviceId: { ideal: project.audioSettings.deviceId } } : true;
+        let audioConstraint: any = true;
+        
+        if (backstageAudioId && backstageAudioId !== 'default') {
+            try {
+              const devices = await navigator.mediaDevices.enumerateDevices();
+              const audioDevices = devices.filter(d => d.kind === 'audioinput');
+              const matchedDevice = audioDevices.find(d => d.deviceId === backstageAudioId || d.label === backstageAudioId);
+              
+              if (matchedDevice) {
+                audioConstraint = { deviceId: { ideal: matchedDevice.deviceId } };
+                console.log(`[AudioEngine Routing] Resolved device: ${matchedDevice.label} (ID: ${matchedDevice.deviceId})`);
+              } else {
+                audioConstraint = { deviceId: { ideal: backstageAudioId } };
+                console.log(`[AudioEngine Routing] Device not found in enumerateDevices, using as-is: ${backstageAudioId}`);
+              }
+            } catch (e) {
+              audioConstraint = { deviceId: { ideal: backstageAudioId } };
+              console.log(`[AudioEngine Routing] Using explicit backstage mic: ${backstageAudioId}`);
+            }
+        } else {
+            audioConstraint = true;
+            console.log(`[AudioEngine Routing] Using system default mic for backstage (avoiding conflict with main mic)`);
+        }
+
+        console.log(`[AudioEngine Routing] Final getUserMedia constraint:`, JSON.stringify(audioConstraint));
           
         let stream: MediaStream;
         try {
           stream = await navigator.mediaDevices.getUserMedia({ 
             audio: audioConstraint 
           });
+          const track = stream.getAudioTracks()[0];
+          console.log(`[AudioEngine Routing] Successfully acquired track: ${track.label} (${track.id})`);
         } catch (err: any) {
+          console.error(`[AudioEngine Routing] Error acquiring track with constraint:`, err);
           if (err.name === 'OverconstrainedError' && audioConstraint !== true) {
             logger.warn("[AudioEngine] Specific audio device failed, falling back to default");
+            console.log(`[AudioEngine Routing] OverconstrainedError, falling back to audio: true`);
             stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const track = stream.getAudioTracks()[0];
+            console.log(`[AudioEngine Routing] Successfully acquired fallback track: ${track.label} (${track.id})`);
           } else {
             throw err;
           }
         }
         audioTrack = stream.getAudioTracks()[0];
+        if (!audioTrack) {
+          logger.error("[AudioEngine] No audio track could be obtained for backstage recording.");
+          throw new Error("Не удалось получить доступ к микрофону для видео-записи");
+        }
+      } else if (audioTrack) {
+          console.log(`[AudioEngine Routing] Using provided processedAudioTrack: ${audioTrack.label} (${audioTrack.id})`);
+      } else {
+          console.log(`[AudioEngine Routing] Backstage audio is disabled (none).`);
       }
       
       // Clone all tracks so we don't accidentally stop original preview streams
@@ -184,12 +227,12 @@ export const useAudioEngine = (
 
               // Also link to segment if it already exists
               setProject(prev => {
-                if (!prev) return null;
+                if (!prev || !prev.tracks) return prev;
                 return {
                   ...prev,
-                  tracks: prev.tracks.map(t => ({
+                  tracks: (prev.tracks || []).map(t => ({
                     ...t,
-                    segments: t.segments.map(s => s.id === segmentId ? { ...s, backstageVideoPath: videoPath } : s)
+                    segments: (t.segments || []).map(s => s.id === segmentId ? { ...s, backstageVideoPath: videoPath } : s)
                   }))
                 };
               });
@@ -309,7 +352,9 @@ export const useAudioEngine = (
           setIsRecording(false);
           isRecordingRef.current = false;
           if (isPlayingRef.current) togglePlay();
-          alert("Не удалось запустить ASIO устройство: " + res.error);
+          
+          const friendlyMessage = getFriendlyAudioErrorMessage(`asio: ${res.error}`);
+          alert(friendlyMessage);
         }
         return;
       }
@@ -418,7 +463,8 @@ export const useAudioEngine = (
 
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
         const tempAudio = document.createElement('audio');
-        tempAudio.src = URL.createObjectURL(audioBlob);
+        const tempUrl = URL.createObjectURL(audioBlob);
+        tempAudio.src = tempUrl;
         
         await new Promise((resolve) => {
           tempAudio.onloadedmetadata = () => resolve(true);
@@ -428,6 +474,8 @@ export const useAudioEngine = (
         const recordedDuration = tempAudio.duration && isFinite(tempAudio.duration) 
           ? tempAudio.duration 
           : (audioBlob.size / 48000 / 2);
+
+        URL.revokeObjectURL(tempUrl);
 
         const arrayBuffer = await audioBlob.arrayBuffer();
         
@@ -452,7 +500,16 @@ export const useAudioEngine = (
                 finalWaveform = Array.from(result.peaks || []);
               } else if (isMounted.current) {
                 logger.error("Failed to save take:", resultRes?.error);
-                alert("Ошибка сохранения записи: " + (resultRes?.error || 'Unknown error'));
+                const saveError = resultRes?.error || 'Unknown error';
+                alert([
+                  "❌ Ошибка сохранения записи на диск.",
+                  `Детали: ${saveError}`,
+                  "",
+                  "💡 Решение:",
+                  "1. Проверьте, достаточно ли свободного места на жестком диске.",
+                  "2. Убедитесь, что папка проекта доступна для записи и у приложения есть права на изменение файлов в этой директории.",
+                  "3. Попробуйте перезапустить приложение от имени администратора."
+                ].join('\n'));
               }
             }
             
@@ -495,6 +552,7 @@ export const useAudioEngine = (
                 originalFileName: matchedOriginalFileName
               };
             
+            if (saveSnapshot) saveSnapshot();
             setProject(prev => {
               if (!prev || prev.tracks.length === 0) return prev;
               
@@ -545,7 +603,8 @@ export const useAudioEngine = (
       }
     } catch (err) {
       logger.error("Error accessing microphone:", err);
-      alert("Не удалось получить доступ к микрофону. Проверьте разрешения или выберите другое устройство. Ошибка: " + err);
+      const friendlyMessage = getFriendlyAudioErrorMessage(err);
+      alert(friendlyMessage);
       setIsRecording(false);
       isRecordingRef.current = false;
       if (isPlayingRef.current) togglePlay();
@@ -575,11 +634,10 @@ export const useAudioEngine = (
             recordingStartTimeRef.current <= line.end + 0.5
           );
 
-          const offsetSec = (project.audioOffsetMs || 0) / 1000;
           const segmentId = recordingSegmentIdRef.current || Math.random().toString(36).substr(2, 9);
           const newSegment: AudioSegment = {
             id: segmentId,
-            startTime: Math.max(0, recordingStartTimeRef.current - offsetSec),
+            startTime: recordingStartTimeRef.current,
             duration: metadata.duration,
             fileOffset: 0,
             fileDuration: metadata.duration,
@@ -593,6 +651,7 @@ export const useAudioEngine = (
             recordedAt: Date.now()
           };
           
+          if (saveSnapshot) saveSnapshot();
           setProject(prev => {
             if (!prev || prev.tracks.length === 0) return prev;
             

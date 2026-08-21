@@ -24,6 +24,16 @@ pub fn get_file_info(path: String) -> Result<FileInfo, String> {
     let p = Path::new(&path);
     let metadata = fs::metadata(p).map_err(|e| e.to_string())?;
     
+    let resolved_path = if let Ok(canonical) = fs::canonicalize(p) {
+        let mut s = canonical.to_string_lossy().to_string();
+        if s.starts_with(r"\\?\") {
+            s = s[4..].to_string();
+        }
+        s.replace('\\', "/")
+    } else {
+        path.clone().replace('\\', "/")
+    };
+
     let mut duration = None;
     if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
         if ext.to_lowercase() == "wav" {
@@ -35,7 +45,7 @@ pub fn get_file_info(path: String) -> Result<FileInfo, String> {
     }
 
     Ok(FileInfo {
-        path: path.clone(),
+        path: resolved_path,
         name: p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string(),
         size: metadata.len(),
         duration,
@@ -148,15 +158,20 @@ pub async fn finalize_backstage_session(project_path: String, session_id: String
         return Err("Session file not found".to_string());
     }
     
-    let mp4_name = format!("backstage_session_{}_fixed.webm", session_id);
+    let mp4_name = format!("backstage_session_{}_fixed.mp4", session_id);
     let mp4_path = takes_dir.join(&mp4_name);
     
-    let mut cmd = std::process::Command::new("ffmpeg");
+    let mut cmd = std::process::Command::new(crate::get_ffmpeg_path());
     cmd.args(&[
         "-nostdin",
         "-y",
         "-i", webm_path.to_str().unwrap(),
-        "-c", "copy",
+        "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-preset", "ultrafast",
+        "-c:a", "aac",
+        "-b:a", "192k",
         mp4_path.to_str().unwrap()
     ]);
     
@@ -203,7 +218,7 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
     // Use FFmpeg to convert
     // If backstage, convert to MP4 with consistent specs for later concatenation
     // If not backstage (audio), convert to WAV
-    let mut command = std::process::Command::new("ffmpeg");
+    let mut command = std::process::Command::new(crate::get_ffmpeg_path());
     command.arg("-nostdin").arg("-y").arg("-i").arg(temp_path.to_str().unwrap());
     
     if is_backstage {

@@ -35,12 +35,21 @@ export class BulkImportService {
       const segmentId = Math.random().toString(36).substr(2, 9);
       const safeUrl = getSafeFileUrl(file.path) || '';
 
+      let safeDuration = (Number.isFinite(file.duration) && !Number.isNaN(file.duration) && file.duration > 0) ? file.duration : 0;
+      if (safeDuration === 0) {
+        if (file.peaks && file.peaks.length > 0) {
+          safeDuration = file.peaks.length / 50.0;
+        } else {
+          safeDuration = 5.0; // Fallback 5 sec per clip
+        }
+      }
+
       const segment: AudioSegment = {
         id: segmentId,
         startTime: currentTime,
-        duration: file.duration,
+        duration: safeDuration,
         fileOffset: 0,
-        fileDuration: file.duration,
+        fileDuration: safeDuration,
         blobUrl: safeUrl,
         filePath: file.path,
         waveform: file.peaks,
@@ -54,12 +63,12 @@ export class BulkImportService {
       subtitles.push({
         id: 'sub-' + segmentId,
         start: currentTime,
-        end: currentTime + file.duration,
+        end: currentTime + safeDuration,
         text: file.name, // Use filename as text
         role: 'Original'
       });
 
-      currentTime += file.duration + gap;
+      currentTime += safeDuration + gap;
     });
 
     return {

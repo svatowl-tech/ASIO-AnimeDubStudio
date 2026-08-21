@@ -56,10 +56,15 @@ export class UniversalParserService {
           .replace(/\\h/g, ' ')
           .trim();
 
+        const rawStart = Number(dialogue.Start ?? dialogue.start ?? 0);
+        const rawEnd = Number(dialogue.End ?? dialogue.end ?? 0);
+        const start = Number.isFinite(rawStart) && !Number.isNaN(rawStart) && rawStart >= 0 ? rawStart : 0;
+        const end = Number.isFinite(rawEnd) && !Number.isNaN(rawEnd) && rawEnd >= start ? rawEnd : start;
+
         return {
           id: `ass-${index}-${Date.now()}`,
-          start: dialogue.Start || dialogue.start || 0,
-          end: dialogue.End || dialogue.end || 0,
+          start,
+          end,
           text: cleanText,
           role: dialogue.Name || dialogue.who || 'Default',
         };
@@ -78,10 +83,14 @@ export class UniversalParserService {
     while ((match = srtRegex.exec(content)) !== null) {
       const [ , startStr, endStr, text] = match;
       const cleanText = text.replace(/<[^>]+>/g, '').replace(/\{[^}]+\}/g, '').trim().replace(/\\N/g, ' ').replace(/\\n/g, ' ').replace(/\n/g, ' ');
+      const start = this.srtTimeToSeconds(startStr);
+      let end = this.srtTimeToSeconds(endStr);
+      if (end < start) end = start;
+
       lines.push({
         id: `srt-${lines.length}-${Date.now()}`,
-        start: this.srtTimeToSeconds(startStr),
-        end: this.srtTimeToSeconds(endStr),
+        start,
+        end,
         text: cleanText,
         role: 'Default',
       });
@@ -101,11 +110,14 @@ export class UniversalParserService {
 
       // Strip VTT tags like <v Speaker> or <c.class>
       const cleanText = text.replace(/<[^>]+>/g, '').trim().replace(/\\N/g, ' ').replace(/\\n/g, ' ').replace(/\n/g, ' ');
+      const start = this.vttTimeToSeconds(startStr);
+      let end = this.vttTimeToSeconds(endStr);
+      if (end < start) end = start;
       
       lines.push({
         id: `vtt-${lines.length}-${Date.now()}`,
-        start: this.vttTimeToSeconds(startStr),
-        end: this.vttTimeToSeconds(endStr),
+        start,
+        end,
         text: cleanText,
         role: 'Default',
       });
@@ -255,22 +267,31 @@ export class UniversalParserService {
   }
 
   private static srtTimeToSeconds(time: string): number {
+    if (!time) return 0;
     const [hms, ms] = time.split(',');
-    const [h, m, s] = hms.split(':').map(Number);
-    return h * 3600 + m * 60 + s + Number(ms) / 1000;
+    if (!hms) return 0;
+    const timeParts = hms.split(':').map(Number);
+    const h = timeParts[0] || 0;
+    const m = timeParts[1] || 0;
+    const s = timeParts[2] || 0;
+    const millis = ms ? Number(ms) / 1000 : 0;
+    const val = h * 3600 + m * 60 + s + (Number.isFinite(millis) ? millis : 0);
+    return Number.isFinite(val) && !Number.isNaN(val) && val >= 0 ? val : 0;
   }
 
   private static vttTimeToSeconds(time: string): number {
+    if (!time) return 0;
     const parts = time.split('.');
     const hms = parts[0];
     const ms = parts[1] ? Number(parts[1]) / 1000 : 0;
     
     const timeParts = hms.split(':').map(Number);
+    let val = 0;
     if (timeParts.length === 3) { // HH:MM:SS
-      return timeParts[0] * 3600 + timeParts[1] * 60 + timeParts[2] + ms;
+      val = (timeParts[0] || 0) * 3600 + (timeParts[1] || 0) * 60 + (timeParts[2] || 0) + (Number.isFinite(ms) ? ms : 0);
     } else if (timeParts.length === 2) { // MM:SS
-      return timeParts[0] * 60 + timeParts[1] + ms;
+      val = (timeParts[0] || 0) * 60 + (timeParts[1] || 0) + (Number.isFinite(ms) ? ms : 0);
     }
-    return 0;
+    return Number.isFinite(val) && !Number.isNaN(val) && val >= 0 ? val : 0;
   }
 }

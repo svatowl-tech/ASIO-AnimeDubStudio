@@ -253,7 +253,7 @@ export function useProjectActions({
       let hasChanges = false;
       const newTracks = prevProject.tracks.map(track => {
         let segmentsConfigured = false;
-        const newSegments = track.segments.map(seg => {
+        const newSegments = (track.segments || []).map(seg => {
           if (String(seg.id) === String(id)) {
             hasChanges = true;
             segmentsConfigured = true;

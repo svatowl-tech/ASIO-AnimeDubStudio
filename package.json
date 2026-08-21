@@ -1,7 +1,7 @@
 {
   "name": "dubstudio-pro-electron",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "DubStudio Pro - Professional Dubbing and Fan-dubbing Software",
   "author": "DubStudio Team",
   "main": "dist-electron/main.js",
@@ -12,6 +12,7 @@
     "clean": "rm -rf dist src-tauri/target",
     "lint": "tsc --noEmit",
     "tauri": "tauri",
+    "version:sync": "node scripts/sync-version.js",
     "postinstall": "node scripts/setup-ffmpeg.js"
   },
   "build": {
@@ -19,7 +20,7 @@
     "productName": "DubStudio Pro",
     "copyright": "Copyright © 2026 DubStudio",
     "asar": true,
-    "icon": "assets/icon.ico",
+    "icon": "src-tauri/icons/icon.ico",
     "directories": {
       "output": "release",
       "buildResources": "build"

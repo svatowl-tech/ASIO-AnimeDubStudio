@@ -9,6 +9,7 @@ export const useSyncScriptScroll = (
 ) => {
   const [isSyncEnabled, setIsSyncEnabled] = useState(true);
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastActiveSubIdRef = useRef<string | undefined>(undefined);
 
   const performSyncScroll = useCallback((instant: boolean = false) => {
     // Small delay to allow state to settle after seek/update
@@ -37,16 +38,23 @@ export const useSyncScriptScroll = (
       
       if (!activeSub) return;
 
+      const activeId = activeSub.id || `sub-${activeSub.start.toFixed(3)}`;
+
+      // OPTIMIZATION: If the active subtitle ID hasn't changed, and this is not a forced instant scroll,
+      // skip all DOM queries and layout calculations.
+      if (!instant && activeId === lastActiveSubIdRef.current) {
+        return;
+      }
+
       // If instant is true (from event) or we are very close to subtitle start 
       // (accounting for potential preroll jumps or normal entry)
       const isActuallyInstant = instant;
 
       // Resolve Element
-      const activeId = activeSub.id;
-      let element = activeId ? document.getElementById(`${idPrefix}sub-${activeId}`) : null;
+      let element = activeSub.id ? document.getElementById(`${idPrefix}sub-${activeSub.id}`) : null;
       
-      if (!element && activeId) {
-        element = document.getElementById(`${idPrefix}${activeId}`);
+      if (!element && activeSub.id) {
+        element = document.getElementById(`${idPrefix}${activeSub.id}`);
       }
       if (!element) {
         const timeId = `sub-${activeSub.start.toFixed(3)}`;
@@ -69,6 +77,9 @@ export const useSyncScriptScroll = (
             block: 'center'
           });
         }
+        
+        // Cache the last scrolled active subtitle ID
+        lastActiveSubIdRef.current = activeId;
       }
     }, 20);
   }, [currentTime, subtitles, containerRef, idPrefix]);
@@ -91,6 +102,8 @@ export const useSyncScriptScroll = (
 
   const handleManualInteraction = () => {
     setIsSyncEnabled(false);
+    // Clear cached ID so that when sync is re-enabled, it will force scroll back to active
+    lastActiveSubIdRef.current = undefined;
     if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
     hoverTimeoutRef.current = setTimeout(() => {
       setIsSyncEnabled(true);

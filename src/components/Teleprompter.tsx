@@ -1,16 +1,20 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Minus, Plus, ArrowUp, ArrowDown, Maximize2, Minimize2 } from 'lucide-react';
+import { Minus, Plus, ArrowUp, ArrowDown, GripHorizontal } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { SubtitleLine } from '../types';
+import { SubtitleLine, TeleprompterMode } from '../types';
+import { TeleprompterDockControls } from './teleprompter/TeleprompterDockControls';
+import { TeleprompterResizer } from './teleprompter/TeleprompterResizer';
+import { saveTeleprompterPref } from './teleprompter/useTeleprompterLayout';
 
 export const Teleprompter = ({ 
   subtitles, 
   currentTime, 
-  mode,
+  mode = 'compact',
   fontSize,
   lineHeight,
   pacing,
   activeRole,
+  dragControls,
   onFontSizeChange,
   onLineHeightChange,
   onPacingChange,
@@ -20,26 +24,31 @@ export const Teleprompter = ({
 }: { 
   subtitles: SubtitleLine[], 
   currentTime: number,
-  mode: 'compact' | 'expanded',
+  mode?: TeleprompterMode,
   fontSize: number,
   lineHeight: number,
   pacing: 'auto' | 'manual',
   activeRole: string,
+  dragControls?: any,
   onFontSizeChange: (size: number) => void,
   onLineHeightChange: (height: number) => void,
   onPacingChange: (pacing: 'auto' | 'manual') => void,
-  onModeChange: (mode: 'compact' | 'expanded') => void,
+  onModeChange: (mode: TeleprompterMode) => void,
   onResize?: (width: number, height: number) => void,
   onSeek?: (time: number) => void
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [manualOffset, setManualOffset] = useState(0);
-  const [isResizing, setIsResizing] = useState(false);
   const [userInteracting, setUserInteracting] = useState(false);
   const interactionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const activeLine = subtitles.find(s => currentTime >= s.start && currentTime <= s.end && s.role === activeRole);
-  const nextActiveLine = subtitles.find(s => s.start > currentTime && s.role === activeRole);
+  const activeLine = (subtitles || []).find(
+    s => currentTime >= s.start && currentTime <= s.end && (!activeRole || s.role === activeRole)
+  );
+  const nextActiveLine = (subtitles || []).find(
+    s => s.start > currentTime && (!activeRole || s.role === activeRole)
+  );
 
   const handleInteraction = () => {
     setUserInteracting(true);
@@ -51,44 +60,14 @@ export const Teleprompter = ({
 
   const timeToNext = nextActiveLine ? Math.max(0, nextActiveLine.start - currentTime) : null;
 
-  const handleResizeStart = (e: React.MouseEvent | React.PointerEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsResizing(true);
-
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const startWidth = containerRef.current?.parentElement?.clientWidth || 0;
-    const startHeight = containerRef.current?.parentElement?.clientHeight || 0;
-
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      if (onResize) {
-        const newWidth = startWidth + (moveEvent.clientX - startX);
-        const newHeight = startHeight + (moveEvent.clientY - startY);
-        onResize(Math.max(300, newWidth), Math.max(100, newHeight));
-      }
-    };
-
-    const onMouseUp = () => {
-      setIsResizing(false);
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-  };
-
   const activeLineIdRef = useRef<string | null>(null);
-
   const targetId = activeLine?.id || nextActiveLine?.id || null;
 
   // Auto-scroll logic (Optimized: trigger scroll only when active segment target ID changes)
   useEffect(() => {
-    if (pacing === 'auto' && containerRef.current && !userInteracting && targetId) {
+    if (pacing === 'auto' && scrollRef.current && !userInteracting && targetId) {
       if (targetId !== activeLineIdRef.current) {
         activeLineIdRef.current = targetId;
-        // Small delay to ensure node is rendered in React first
         setTimeout(() => {
           const element = document.getElementById(`tp-line-${targetId}`);
           if (element) {
@@ -121,7 +100,7 @@ export const Teleprompter = ({
   };
 
   useEffect(() => {
-    const container = containerRef.current?.parentElement;
+    const container = scrollRef.current;
     if (container) {
       container.addEventListener('wheel', handleWheel as any, { passive: false });
       return () => container.removeEventListener('wheel', handleWheel as any);
@@ -129,88 +108,162 @@ export const Teleprompter = ({
   }, [pacing]);
 
   // Find current line index (for optimization/virtualization)
-  const currentLineIndex = subtitles.findIndex(s => currentTime >= s.start && currentTime <= s.end && s.role === activeRole);
+  const currentLineIndex = (subtitles || []).findIndex(
+    s => currentTime >= s.start && currentTime <= s.end && (!activeRole || s.role === activeRole)
+  );
   
   let targetIndex = currentLineIndex;
   if (targetIndex === -1 && nextActiveLine) {
-    targetIndex = subtitles.findIndex(s => s.id === nextActiveLine.id);
+    targetIndex = (subtitles || []).findIndex(s => s.id === nextActiveLine.id);
   }
   if (targetIndex === -1) {
     targetIndex = 0;
   }
 
-  // Slice subtitles to keep only a small window around the active index
-  // This ensures lightning fast 60 fps rendering even with thousands of subtitles!
-  const visibleSubtitles = subtitles.slice(
-    Math.max(0, targetIndex - 6),
-    Math.min(subtitles.length, targetIndex + 10)
+  // Windowed subtitles slice for peak performance
+  const visibleSubtitles = (subtitles || []).slice(
+    Math.max(0, targetIndex - 8),
+    Math.min((subtitles || []).length, targetIndex + 14)
   );
+
+  const isDockedVertical = mode === 'left' || mode === 'right';
+
+  const handleModeSelect = (newMode: TeleprompterMode) => {
+    onModeChange(newMode);
+    saveTeleprompterPref({ mode: newMode });
+  };
 
   return (
     <div 
+      ref={containerRef}
       className={cn(
-        "relative overflow-hidden pointer-events-auto",
-        mode === 'expanded' ? "absolute inset-0 bg-black/60 backdrop-blur-sm z-[60] p-12 transition-all duration-500" : "w-full max-w-3xl mx-auto h-48 bg-black/70 backdrop-blur-md border border-white/10 rounded-2xl p-4 shadow-2xl"
+        "relative w-full h-full flex flex-col pointer-events-auto select-none overflow-hidden transition-colors",
+        mode === 'expanded' && "bg-black/80 backdrop-blur-md p-6",
+        mode === 'left' && "bg-zinc-950/92 backdrop-blur-lg border-r border-white/15 shadow-[10px_0_30px_rgba(0,0,0,0.8)]",
+        mode === 'right' && "bg-zinc-950/92 backdrop-blur-lg border-l border-white/15 shadow-[-10px_0_30px_rgba(0,0,0,0.8)]",
+        mode === 'bottom' && "bg-zinc-950/92 backdrop-blur-lg border-t border-white/15 shadow-[0_-10px_30px_rgba(0,0,0,0.8)]",
+        mode === 'compact' && "bg-zinc-950/90 backdrop-blur-lg border border-white/15 rounded-2xl shadow-2xl"
       )}
     >
-      {/* Controls Overlay */}
+      {/* Controls Top Header Bar */}
       <div 
-        className="absolute top-4 right-4 flex items-center gap-2 z-10"
-        onPointerDown={(e) => e.stopPropagation()}
-      >
-        {timeToNext !== null && (
-          <div className="bg-indigo-900/50 text-indigo-200 px-3 py-1 rounded-full text-xs font-mono font-bold mr-4">
-            Далее: {timeToNext.toFixed(1)}с
-          </div>
+        className={cn(
+          "shrink-0 flex items-center justify-between gap-2 p-2 bg-black/50 border-b border-white/10 z-20 flex-wrap select-none",
+          isDockedVertical ? "gap-y-2" : "",
+          mode === 'compact' ? "cursor-grab active:cursor-grabbing" : ""
         )}
-        <div className="flex bg-black/50 rounded-lg p-1 border border-white/10">
-          <button onClick={() => onFontSizeChange(Math.max(12, fontSize - 2))} className="p-1.5 hover:bg-white/10 rounded transition-colors"><Minus className="w-3.5 h-3.5 text-white/70" /></button>
-          <span className="flex items-center px-2 text-[10px] font-black text-white/50 w-10 justify-center">{fontSize}px</span>
-          <button onClick={() => onFontSizeChange(Math.min(120, fontSize + 2))} className="p-1.5 hover:bg-white/10 rounded transition-colors"><Plus className="w-3.5 h-3.5 text-white/70" /></button>
-        </div>
-        
-        <div className="flex bg-black/50 rounded-lg p-1 border border-white/10">
-          <button onClick={() => onLineHeightChange(Math.max(1, lineHeight - 0.1))} className="p-1.5 hover:bg-white/10 rounded transition-colors"><ArrowDown className="w-3.5 h-3.5 text-white/70" /></button>
-          <span className="flex items-center px-2 text-[10px] font-black text-white/50 w-8 justify-center">{lineHeight.toFixed(1)}</span>
-          <button onClick={() => onLineHeightChange(Math.min(3, lineHeight + 0.1))} className="p-1.5 hover:bg-white/10 rounded transition-colors"><ArrowUp className="w-3.5 h-3.5 text-white/70" /></button>
+        style={mode === 'compact' ? { touchAction: 'none' } : undefined}
+        onPointerDown={(e) => {
+          if (mode === 'compact' && dragControls) {
+            dragControls.start(e);
+          }
+        }}
+      >
+        {/* Left side: Dock controls + Drag grip */}
+        <div className="flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
+          {mode === 'compact' && (
+            <div 
+              className="p-1 text-zinc-500 hover:text-zinc-300 cursor-grab active:cursor-grabbing flex items-center"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                dragControls?.start(e);
+              }}
+              title="Зажмите и перетащите для перемещения окна"
+            >
+              <GripHorizontal className="w-4 h-4" />
+            </div>
+          )}
+          <TeleprompterDockControls 
+            mode={mode} 
+            onModeChange={handleModeSelect} 
+          />
+          {timeToNext !== null && (
+            <div className="hidden sm:inline-flex bg-indigo-900/50 text-indigo-300 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold whitespace-nowrap border border-indigo-500/20">
+              Далее: {timeToNext.toFixed(1)}с
+            </div>
+          )}
         </div>
 
-        <button 
-          onClick={() => onPacingChange(pacing === 'auto' ? 'manual' : 'auto')}
-          className={cn("px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all border", 
-            pacing === 'manual' ? "bg-orange-500 border-orange-400 text-white shadow-[0_0_15px_rgba(249,115,22,0.3)]" : "bg-black/50 border-white/10 text-white/50 hover:bg-white/10")}
-        >
-          {pacing === 'auto' ? 'Авто' : 'Ручн.'}
-        </button>
+        {/* Right side: Font, Line Height, Pacing */}
+        <div className="flex items-center gap-1.5 flex-wrap" onPointerDown={(e) => e.stopPropagation()}>
+          {/* Font Size Stepper */}
+          <div className="flex items-center bg-black/60 rounded-lg p-0.5 border border-white/10">
+            <button 
+              type="button"
+              onClick={() => onFontSizeChange(Math.max(12, fontSize - 2))} 
+              className="p-1 hover:bg-white/10 rounded text-white/70 hover:text-white transition-colors cursor-pointer"
+              title="Уменьшить шрифт"
+            >
+              <Minus className="w-3 h-3" />
+            </button>
+            <span className="flex items-center px-1.5 text-[10px] font-mono font-bold text-white/80 w-8 justify-center">
+              {fontSize}
+            </span>
+            <button 
+              type="button"
+              onClick={() => onFontSizeChange(Math.min(120, fontSize + 2))} 
+              className="p-1 hover:bg-white/10 rounded text-white/70 hover:text-white transition-colors cursor-pointer"
+              title="Увеличить шрифт"
+            >
+              <Plus className="w-3 h-3" />
+            </button>
+          </div>
+          
+          {/* Line Height Stepper */}
+          <div className="flex items-center bg-black/60 rounded-lg p-0.5 border border-white/10">
+            <button 
+              type="button"
+              onClick={() => onLineHeightChange(Math.max(1, Number((lineHeight - 0.1).toFixed(1))))} 
+              className="p-1 hover:bg-white/10 rounded text-white/70 hover:text-white transition-colors cursor-pointer"
+              title="Уменьшить межстрочный интервал"
+            >
+              <ArrowDown className="w-3 h-3" />
+            </button>
+            <span className="flex items-center px-1 text-[10px] font-mono font-bold text-white/80 w-7 justify-center">
+              {lineHeight.toFixed(1)}
+            </span>
+            <button 
+              type="button"
+              onClick={() => onLineHeightChange(Math.min(3, Number((lineHeight + 0.1).toFixed(1))))} 
+              className="p-1 hover:bg-white/10 rounded text-white/70 hover:text-white transition-colors cursor-pointer"
+              title="Увеличить межстрочный интервал"
+            >
+              <ArrowUp className="w-3 h-3" />
+            </button>
+          </div>
 
-        <button 
-          onClick={() => onModeChange(mode === 'compact' ? 'expanded' : 'compact')}
-          className="p-1.5 bg-black/50 border border-white/10 rounded-lg hover:bg-white/10 transition-colors text-white/70"
-        >
-          {mode === 'expanded' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-        </button>
+          {/* Auto / Manual Pacing */}
+          <button 
+            type="button"
+            onClick={() => onPacingChange(pacing === 'auto' ? 'manual' : 'auto')}
+            className={cn(
+              "px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all border cursor-pointer whitespace-nowrap", 
+              pacing === 'manual' 
+                ? "bg-orange-600 border-orange-500 text-white shadow-[0_0_12px_rgba(249,115,22,0.4)]" 
+                : "bg-black/60 border-white/10 text-zinc-400 hover:text-white hover:bg-white/10"
+            )}
+            title="Автопрокрутка по таймкоду или ручное управление стрелками/колесиком"
+          >
+            {pacing === 'auto' ? 'Авто' : 'Ручн.'}
+          </button>
+        </div>
       </div>
 
-      {/* Resize Handle */}
-      {mode === 'compact' && (
-        <div 
-          className="absolute bottom-0 right-0 w-6 h-6 cursor-nwse-resize z-20 flex items-center justify-center group/resize"
-          onPointerDown={handleResizeStart}
-        >
-          <div className="w-1.5 h-1.5 bg-white/20 rounded-full group-hover/resize:bg-indigo-500 transition-colors" />
+      {/* Focus Line (Reading guide) */}
+      <div className="absolute top-1/2 left-0 right-0 h-px bg-indigo-500/30 z-10 pointer-events-none flex items-center justify-between px-4 -translate-y-1/2">
+        <div className="text-[8px] font-black uppercase tracking-widest text-indigo-400/80 bg-zinc-950/80 px-1.5 py-0.5 rounded border border-indigo-500/30">
+          Фокус
         </div>
-      )}
-
-      {/* Focus Line */}
-      <div className="absolute top-1/2 left-0 right-0 h-px bg-indigo-500/40 z-10 pointer-events-none flex items-center justify-between px-4">
-        <div className="text-[8px] font-black uppercase tracking-widest text-indigo-400/60 bg-black/50 px-2 py-0.5 rounded border border-indigo-500/20">Фокус</div>
-        <div className="flex-1 mx-4 h-px bg-gradient-to-r from-transparent via-indigo-500/40 to-transparent" />
-        <div className="text-[8px] font-black uppercase tracking-widest text-indigo-400/60 bg-black/50 px-2 py-0.5 rounded border border-indigo-500/20">Фокус</div>
+        <div className="flex-1 mx-2 h-px bg-gradient-to-r from-indigo-500/20 via-indigo-500/40 to-indigo-500/20" />
+        <div className="text-[8px] font-black uppercase tracking-widest text-indigo-400/80 bg-zinc-950/80 px-1.5 py-0.5 rounded border border-indigo-500/30">
+          Фокус
+        </div>
       </div>
 
+      {/* Scrolling Text Subtitles Area */}
       <div 
-        ref={containerRef}
-        className="h-full overflow-y-auto no-scrollbar scroll-smooth"
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto no-scrollbar scroll-smooth relative"
         onWheel={() => {
           if (pacing === 'auto') handleInteraction();
         }}
@@ -220,15 +273,15 @@ export const Teleprompter = ({
       >
         <div 
           className={cn(
-            "space-y-8 max-w-4xl mx-auto text-center transition-transform duration-100 ease-out",
-            mode === 'expanded' ? "py-[50vh]" : "py-24"
+            "space-y-6 mx-auto text-center transition-transform duration-100 ease-out px-4",
+            mode === 'expanded' ? "max-w-4xl py-[40vh]" : "max-w-2xl py-32"
           )}
           style={{ 
             transform: pacing === 'manual' ? `translateY(${-manualOffset}px)` : 'none'
           }}
         >
           {visibleSubtitles.map(line => {
-            const isSelectedRole = line.role === activeRole;
+            const isSelectedRole = !activeRole || line.role === activeRole;
             const isCurrent = currentTime >= line.start && currentTime <= line.end && isSelectedRole;
             return (
               <div 
@@ -236,24 +289,47 @@ export const Teleprompter = ({
                 id={`tp-line-${line.id}`}
                 onClick={() => {
                   if (onSeek) onSeek(line.start);
+                  setTimeout(() => {
+                    window.dispatchEvent(new CustomEvent('syncScroll'));
+                  }, 50);
                 }}
                 className={cn(
-                  "transition-all duration-300 px-8 cursor-pointer hover:bg-white/5 rounded-lg",
-                  isSelectedRole 
-                    ? (isCurrent ? "text-white scale-110 opacity-100 drop-shadow-[0_0_20px_rgba(255,255,255,0.3)]" : "text-white/70 opacity-70") 
-                    : "text-zinc-600 opacity-30 scale-90"
+                  "transition-all duration-200 px-4 py-2 rounded-xl cursor-pointer select-text",
+                  isCurrent 
+                    ? "text-white font-semibold bg-indigo-600/25 border border-indigo-500/40 shadow-[0_0_25px_rgba(99,102,241,0.35)] scale-105" 
+                    : isSelectedRole
+                      ? "text-zinc-200/80 hover:text-white hover:bg-white/5 opacity-80"
+                      : "text-zinc-500 opacity-40 scale-95 hover:opacity-70"
                 )}
                 style={{ 
-                  fontSize: isSelectedRole ? `${fontSize}px` : `${fontSize * 0.7}px`, 
+                  fontSize: isSelectedRole ? `${fontSize}px` : `${Math.max(12, fontSize * 0.75)}px`, 
                   lineHeight: lineHeight 
                 }}
               >
-                {line.text}
+                {line.role && (
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-400 mb-1 opacity-75">
+                    {line.role}
+                  </div>
+                )}
+                <div>{line.text}</div>
               </div>
             );
           })}
+
+          {visibleSubtitles.length === 0 && (
+            <div className="text-zinc-500 text-sm italic py-8">
+              Нет реплик для отображения
+            </div>
+          )}
         </div>
       </div>
+
+      {/* Resize Handle (Dock Left/Right border, Bottom top border, or floating corner) */}
+      <TeleprompterResizer 
+        mode={mode} 
+        onResize={onResize} 
+        containerRef={containerRef} 
+      />
     </div>
   );
 };

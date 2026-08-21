@@ -9,7 +9,7 @@ import {
   Zap,
   Layout
 } from 'lucide-react';
-import { cn } from '../lib/utils';
+import { cn, formatTimeHms } from '../lib/utils';
 import { SubtitleLine } from '../types';
 import { useSyncScriptScroll } from '../hooks/useSyncScriptScroll';
 
@@ -148,7 +148,7 @@ export const DocumentViewer = ({
                     {line.role || 'Актёр'}
                   </span>
                   <span className="text-[10px] font-mono text-zinc-600">
-                    {Math.floor(line.start / 60)}:{(line.start % 60).toFixed(0).padStart(2, '0')}
+                    {formatTimeHms(line.start)}
                   </span>
                 </div>
                 {isActive && (

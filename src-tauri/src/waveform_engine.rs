@@ -24,7 +24,7 @@ async fn get_video_duration(app_handle: &AppHandle, file_path: &str) -> Result<f
 
     if !output.status.success() {
         // Fallback to system ffprobe
-        let fallback = tokio::process::Command::new("ffprobe")
+        let fallback = tokio::process::Command::new(crate::get_ffprobe_path())
             .args(&[
                 "-v", "error",
                 "-show_entries", "format=duration",
@@ -104,7 +104,7 @@ pub async fn extract_audio_peaks_bin(app_handle: AppHandle, file_path: String, o
         let err_msg = String::from_utf8_lossy(&output.stderr);
         log_debug(&format!("FFmpeg error during extraction: {}", err_msg));
         // Fallback to system ffmpeg
-        let fallback_output = tokio::process::Command::new("ffmpeg")
+        let fallback_output = tokio::process::Command::new(crate::get_ffmpeg_path())
             .args(&[
                 "-nostdin",
                 "-y",
@@ -192,10 +192,16 @@ pub fn generate_waveform_peaks_internal(file_path: &str, points: usize) -> Resul
         hound::SampleFormat::Int => {
             if spec.bits_per_sample == 16 {
                 reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / std::i16::MAX as f32).collect()
+            } else if spec.bits_per_sample == 24 {
+                // hound decodes 24-bit integers as i32
+                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 8388607.0).collect()
             } else if spec.bits_per_sample == 32 {
                 reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / std::i32::MAX as f32).collect()
             } else if spec.bits_per_sample == 8 {
                 reader.samples::<i8>().map(|s| s.unwrap_or(0) as f32 / std::i8::MAX as f32).collect()
+            } else if spec.bits_per_sample > 0 && spec.bits_per_sample <= 32 {
+                let max_val = ((1i64 << (spec.bits_per_sample - 1)) - 1).max(1) as f32;
+                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / max_val).collect()
             } else {
                 return Err(format!("Unsupported bit depth: {}", spec.bits_per_sample));
             }
@@ -278,7 +284,7 @@ pub async fn generate_waveform_peaks(app_handle: AppHandle, file_path: String, p
         }
         
         if !success {
-           let fallback = tokio::process::Command::new("ffmpeg")
+           let fallback = tokio::process::Command::new(crate::get_ffmpeg_path())
                .args(&["-nostdin", "-y", "-v", "quiet", "-i", &file_path, "-vn", "-ac", "1", "-ar", "48000", &temp_wav_str])
                .output().await;
                

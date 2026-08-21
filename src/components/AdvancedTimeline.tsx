@@ -68,6 +68,25 @@ export const TimelineAutoScroller = ({ timelineRef, isPlaying, zoom }: any) => {
       el.scrollLeft = Math.max(0, currentX - clientWidth * 0.1);
     }
   }, [currentTime, isPlaying, zoom, timelineRef]);
+
+  useEffect(() => {
+    const handleSyncScroll = () => {
+      if (!timelineRef.current) return;
+      const el = timelineRef.current;
+      const clientWidth = el.clientWidth;
+      const currentX = currentTime * zoom;
+      
+      // Center the playhead
+      el.scrollTo({
+        left: Math.max(0, currentX - clientWidth * 0.2),
+        behavior: 'smooth'
+      });
+    };
+    
+    window.addEventListener('syncScroll', handleSyncScroll);
+    return () => window.removeEventListener('syncScroll', handleSyncScroll);
+  }, [currentTime, zoom, timelineRef]);
+
   return null;
 };
 
@@ -186,7 +205,7 @@ const TrackRow = React.memo(({
 }: TrackRowProps) => {
   const segmentsWithFades = React.useMemo(() => {
     // 1. Sort all segments first
-    const sortedSegs = [...track.segments].sort((a: AudioSegment, b: AudioSegment) => a.startTime - b.startTime);
+    const sortedSegs = [...(track.segments || [])].sort((a: AudioSegment, b: AudioSegment) => a.startTime - b.startTime);
     
     // 2. Calculate fades linearly over sorted array
     const allSegmentsWithFades = sortedSegs.map((segment: AudioSegment, idxInSorted: number) => {
@@ -285,7 +304,8 @@ export const AdvancedTimeline = ({
   recordingPeaks,
   recordingStartTime,
   onOpenProcessing,
-  currentTimeRef
+  currentTimeRef,
+  isHighlightingMissingSubtitles
 }: { 
   project: Project, 
   duration: number, 
@@ -322,7 +342,8 @@ export const AdvancedTimeline = ({
   recordingPeaks?: number[],
   recordingStartTime?: number,
   onOpenProcessing?: (id: string) => void,
-  currentTimeRef: React.MutableRefObject<number>
+  currentTimeRef: React.MutableRefObject<number>,
+  isHighlightingMissingSubtitles?: boolean
 }) => {
   const handleSeek = (time: number, autoScroll: boolean = true) => {
     onSeek(time);
@@ -415,7 +436,7 @@ export const AdvancedTimeline = ({
       points.add(sub.end);
     });
     sortedTracks.forEach(track => {
-      track.segments.forEach(seg => {
+      (track.segments || []).forEach(seg => {
         if (seg.id !== excludeSegmentId) {
           points.add(seg.startTime);
           points.add(seg.startTime + seg.duration);
@@ -818,7 +839,7 @@ export const AdvancedTimeline = ({
                 const trackBottom = currentY + (track.height || 80);
                 
                 if (trackBottom > minY && trackTop < maxY) {
-                  track.segments.forEach(seg => {
+                  (track.segments || []).forEach(seg => {
                     const segLeft = seg.startTime * zoom;
                     const segRight = (seg.startTime + seg.duration) * zoom;
                     
@@ -888,6 +909,7 @@ export const AdvancedTimeline = ({
                 zoom={zoom} 
                 visibleRange={timelineVisibleRange}
                 loopRange={loopRange}
+                isHighlightingMissingSubtitles={isHighlightingMissingSubtitles}
               />
             </div>
 

@@ -226,9 +226,19 @@ pub fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
             }
         };
         
-        let host_name = match host_id {
-            cpal::HostId::Asio => "ASIO".to_string(),
-            _ => format!("{:?}", host_id),
+        let host_name = {
+            #[cfg(target_os = "windows")]
+            {
+                if host_id == cpal::HostId::Asio {
+                    "ASIO".to_string()
+                } else {
+                    format!("{:?}", host_id)
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                format!("{:?}", host_id)
+            }
         };
 
         log_debug(&format!("Enumerating devices for host: {}", host_name));
@@ -372,7 +382,7 @@ pub async fn start_recording(
                 ffmpeg_args.push("-y".to_string());
                 ffmpeg_args.push(video_path.to_str().ok_or("Invalid path")?.to_string());
 
-                let child = std::process::Command::new("ffmpeg")
+                let child = std::process::Command::new(crate::get_ffmpeg_path())
                     .args(&ffmpeg_args)
                     .stdin(std::process::Stdio::piped())
                     .stderr(stderr_file)
@@ -448,7 +458,7 @@ pub async fn start_recording(
                 args.push("-y".to_string());
                 args.push(video_path.to_str().ok_or("Invalid path")?.to_string());
 
-                let child = std::process::Command::new("ffmpeg")
+                let child = std::process::Command::new(crate::get_ffmpeg_path())
                     .args(&args)
                     .stdin(std::process::Stdio::piped())
                     .spawn();
@@ -614,9 +624,19 @@ pub async fn start_recording(
     // Search for the specific host requested by the frontend
     let mut host_id = cpal::default_host().id();
     for id in &available_hosts {
-        let id_name = match id {
-            cpal::HostId::Asio => "ASIO".to_string(),
-            _ => format!("{:?}", id),
+        let id_name = {
+            #[cfg(target_os = "windows")]
+            {
+                if *id == cpal::HostId::Asio {
+                    "ASIO".to_string()
+                } else {
+                    format!("{:?}", id)
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                format!("{:?}", id)
+            }
         };
         if id_name.to_uppercase() == host_name_c.to_uppercase() {
             host_id = *id;
@@ -906,10 +926,14 @@ pub async fn start_recording(
     }) {
         Ok(()) => {
             log_debug("init_rx returned OK! Front-end is good.");
-            // Spawn regular thread to forward events from channel to Tauri front-end
+            // Spawn regular thread to forward events from channel to Tauri front-end (throttled to ~30-40fps for smooth UI without IPC flooding)
             thread::spawn(move || {
+                let mut last_emit = std::time::Instant::now();
                 while let Ok(payload) = rx.recv() {
-                    let _ = app_handle.emit("vu-meter", payload);
+                    if last_emit.elapsed() >= std::time::Duration::from_millis(25) {
+                        let _ = app_handle.emit("vu-meter", payload);
+                        last_emit = std::time::Instant::now();
+                    }
                 }
             });
 

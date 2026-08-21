@@ -110,9 +110,9 @@ export const ProjectHealthManager: React.FC = () => {
     await window.electronAPI.relinkSegmentFile(segmentId, newPath);
     
     // 3. Update local state
-    const updatedTracks = project.tracks.map(t => ({
+    const updatedTracks = (project.tracks || []).map(t => ({
       ...t,
-      segments: t.segments.map(s => s.id === segmentId ? { ...s, filePath: newPath } : s)
+      segments: (t.segments || []).map(s => s.id === segmentId ? { ...s, filePath: newPath } : s)
     }));
     setProject({ ...project, tracks: updatedTracks });
     

@@ -58,7 +58,6 @@ pub async fn export_all_stems(
         
         let mut writer = WavWriter::create(&temp_stem_path, spec).map_err(|e| e.to_string())?;
         let mut current_pos_samples: u64 = 0;
-        let audio_offset_ms = project.audio_offset_ms.unwrap_or(0.0);
         let total_samples = (total_duration * 48000.0) as u64;
 
         let mut segments: Vec<_> = track.segments.iter()
@@ -67,7 +66,7 @@ pub async fn export_all_stems(
         segments.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap());
 
         for seg in segments {
-            let adjusted_start = seg.start_time + (audio_offset_ms / 1000.0);
+            let adjusted_start = seg.start_time;
             let seg_start_samples = (adjusted_start.max(0.0) * 48000.0) as u64;
             
             // Fill gap
@@ -164,6 +163,7 @@ pub struct ExportProjectData {
     #[serde(default)]
     pub tracks: Vec<ProjectTrack>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub audio_offset_ms: f64,
 }
 
@@ -213,7 +213,6 @@ pub async fn export_stems(
             let enc_clone = encoder.to_string();
             let out_dir_clone = output_dir.to_path_buf();
             let track_idx = i + 1;
-            let audio_offset_ms = project.audio_offset_ms;
 
             let handle = tokio::spawn(async move {
                 let _permit = sem_clone.acquire().await.map_err(|e| e.to_string())?;
@@ -238,7 +237,7 @@ pub async fn export_stems(
 
                 // --- FFmpeg Logic for Stem ---
                 // We use filter_complex to place each segment at its correct timeline position
-                let mut cmd = Command::new("ffmpeg");
+                let mut cmd = Command::new(crate::get_ffmpeg_path());
                 cmd.arg("-nostdin");
                 cmd.arg("-y");
 
@@ -248,7 +247,7 @@ pub async fn export_stems(
 
                 let mut filter = String::new();
                 for (idx, seg) in valid_segments.iter().enumerate() {
-                    let delay_ms = (seg.start_time * 1000.0 + audio_offset_ms) as i64;
+                    let delay_ms = (seg.start_time * 1000.0) as i64;
                     let playback_rate = seg.playback_rate.unwrap_or(1.0);
                     
                     // [idx:a]atrim=start:end,asetpts=PTS-STARTPTS,atempo=rate,adelay=ms|ms[a_idx]
@@ -344,7 +343,6 @@ pub async fn export_audio(
 
     emit_progress(0, total_tasks, &app_handle);
 
-    let audio_offset_ms = project.audio_offset_ms;
     let max_concurrent = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
@@ -360,7 +358,7 @@ pub async fn export_audio(
             let _permit = sem_clone.acquire().await.map_err(|e| e.to_string())?;
 
             let out_file = temp_dir_clone.join(format!("seg_{}.wav", i));
-            let delay_ms = (segment.start_time * 1000.0 + audio_offset_ms) as i64;
+            let delay_ms = (segment.start_time * 1000.0) as i64;
             let playback_rate = segment.playback_rate.unwrap_or(1.0);
             
             let mut filter = format!(
@@ -374,7 +372,7 @@ pub async fn export_audio(
             
             filter.push_str(&format!(",volume={},adelay={}|{}", segment.gain, delay_ms, delay_ms));
             
-            let status = Command::new("ffmpeg")
+            let status = Command::new(crate::get_ffmpeg_path())
                 .arg("-nostdin")
                 .arg("-y")
                 .arg("-i").arg(segment.file_path.as_ref().unwrap())
@@ -425,7 +423,7 @@ pub async fn export_audio(
             chunk_args.push("pcm_s16le".to_string());
             chunk_args.push(out_file.to_str().unwrap().to_string());
 
-            let status = Command::new("ffmpeg")
+            let status = Command::new(crate::get_ffmpeg_path())
                 .args(&chunk_args)
                 .output()
                 .await
@@ -602,7 +600,7 @@ pub async fn batch_export(
             }
 
             // 2. Build and run FFmpeg command for this replica
-            let mut cmd = Command::new("ffmpeg");
+            let mut cmd = Command::new(crate::get_ffmpeg_path());
             cmd.arg("-nostdin");
             cmd.arg("-y");
 
@@ -815,7 +813,7 @@ pub async fn export_backstage_video(
     webcam_export_overlay: Option<bool>,
 ) -> Result<String, String> {
     println!("[export_backstage_video] Начало. main: {}, backstage: {}, audio: {}, output: {}, overlay: {:?}", main_video_path, backstage_video_path, final_audio_path, output_path, webcam_export_overlay);
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = Command::new(crate::get_ffmpeg_path());
     cmd.arg("-nostdin");
     
     let is_overlay = webcam_export_overlay.unwrap_or(true);
@@ -881,6 +879,57 @@ pub async fn export_backstage_video(
     Ok(output_path)
 }
 
+async fn get_volume_stats(
+    path: &str,
+    start: Option<f64>,
+    duration: Option<f64>,
+) -> (Option<f64>, Option<f64>) {
+    use tokio::process::Command;
+    let mut cmd = Command::new(crate::get_ffmpeg_path());
+    cmd.arg("-nostdin").arg("-y");
+    if let Some(s) = start {
+        cmd.arg("-ss").arg(format!("{:.3}", s));
+    }
+    if let Some(d) = duration {
+        cmd.arg("-t").arg(format!("{:.3}", d));
+    }
+    cmd.arg("-i").arg(path);
+    cmd.arg("-filter:a").arg("volumedetect");
+    cmd.arg("-f").arg("null");
+    cmd.arg("-");
+
+    let mut mean_vol = None;
+    let mut max_vol = None;
+
+    if let Ok(output) = cmd.output().await {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        
+        // Parse mean_volume
+        if let Some(pos) = stderr.find("mean_volume:") {
+            let sub = &stderr[pos + "mean_volume:".len()..];
+            if let Some(end_pos) = sub.find("dB") {
+                let val_str = sub[..end_pos].trim();
+                if let Ok(val) = val_str.parse::<f64>() {
+                    mean_vol = Some(val);
+                }
+            }
+        }
+
+        // Parse max_volume
+        if let Some(pos) = stderr.find("max_volume:") {
+            let sub = &stderr[pos + "max_volume:".len()..];
+            if let Some(end_pos) = sub.find("dB") {
+                let val_str = sub[..end_pos].trim();
+                if let Ok(val) = val_str.parse::<f64>() {
+                    max_vol = Some(val);
+                }
+            }
+        }
+    }
+
+    (mean_vol, max_vol)
+}
+
 #[tauri::command]
 pub async fn export_blooper(
     app_handle: tauri::AppHandle,
@@ -888,17 +937,62 @@ pub async fn export_blooper(
     audio_path: String,
     start_time: f64,
     end_time: f64,
-    voice_offset: f64,
+    audio_delay: f64,
+    audio_trim_start: f64,
     output_path: String,
 ) -> Result<String, String> {
-    println!("[export_blooper] Начало. video: {}, audio: {}, start: {}, end: {}, output: {}", video_path, audio_path, start_time, end_time, output_path);
+    println!("[export_blooper] Начало. video: {}, audio: {}, start: {}, end: {}, delay: {}, trim: {}, output: {}", video_path, audio_path, start_time, end_time, audio_delay, audio_trim_start, output_path);
+
     let duration = end_time - start_time;
-    let voice_delay_ms = (voice_offset * 1000.0).max(0.0) as i64;
+    let voice_delay_ms = (audio_delay * 1000.0).max(0.0) as i64;
     
+    // Измерим среднюю и пиковую громкость оригинального аудио и записанного голоса
+    let (mean_orig, _) = get_volume_stats(&video_path, Some(start_time), Some(duration)).await;
+    let (mean_voice, max_voice) = get_volume_stats(&audio_path, None, None).await;
+
+    let mean_orig_val = mean_orig.unwrap_or(-20.0);
+    let mean_voice_val = mean_voice.unwrap_or(-25.0);
+    let max_voice_val = max_voice.unwrap_or(0.0);
+
+    println!("[export_blooper] Измеренная громкость: оригинал = {:.2} dB, голос (mean) = {:.2} dB, голос (max) = {:.2} dB", 
+             mean_orig_val, mean_voice_val, max_voice_val);
+
+    // Оригинальное аудио приглушается на volume=0.8.
+    // Коэффициент 0.8 в децибелах: 20 * log10(0.8) ≈ -1.94 dB
+    let orig_attenuation_db = 20.0 * 0.8_f64.log10();
+    let mean_orig_adjusted = mean_orig_val + orig_attenuation_db;
+
+    // Ограничиваем оригинальную громкость разумным диапазоном [-26.0, -14.0] dB для корректного баланса,
+    // чтобы голос не заглушался слишком сильно на тихих участках и не орал на громких.
+    let clamped_orig_mean = mean_orig_adjusted.clamp(-26.0, -14.0);
+
+    // Голос должен быть на 3.5 dB громче оригинального источника
+    let target_voice_mean = clamped_orig_mean + 3.5;
+    let mut needed_gain_db = target_voice_mean - mean_voice_val;
+
+    // Ограничения для усиления (gain)
+    if needed_gain_db > 24.0 {
+        needed_gain_db = 24.0;
+    }
+    if needed_gain_db < -12.0 {
+        needed_gain_db = -12.0;
+    }
+
+    // Защита от клиппинга: пиковое значение голоса не должно превышать -1.0 dB
+    let safe_gain_db = -1.0 - max_voice_val;
+    if needed_gain_db > safe_gain_db {
+        needed_gain_db = safe_gain_db;
+    }
+
+    // Переводим дБ в линейный коэффициент
+    let voice_gain_linear = 10.0_f64.powf(needed_gain_db / 20.0);
+    println!("[export_blooper] Рассчитанное усиление для голоса: {:.2} dB (линейный коэффициент: {:.3})", 
+             needed_gain_db, voice_gain_linear);
+
     // We will use a complex filter
     // 1. Video fade in/out
     // 2. Original audio volume=0.8, afade in/out
-    // 3. Voice audio loudnorm, adelay, afade in/out
+    // 3. Voice audio atrim, dynamic volume, adelay, afade in/out
     // 4. Mix them
     
     let fade_out_start = (duration - 0.2).max(0.0);
@@ -906,13 +1000,13 @@ pub async fn export_blooper(
     let filter_complex = format!(
         "[0:v]fade=t=in:st=0:d=0.2,fade=t=out:st={}:d=0.2[vout]; \
          [0:a]volume=0.8,afade=t=in:st=0:d=0.2,afade=t=out:st={}:d=0.2,aformat=sample_rates=48000:channel_layouts=stereo[a0]; \
-         [1:a]volume=1.5,aformat=sample_rates=48000:channel_layouts=stereo,adelay={}|{}[a1_delayed]; \
+         [1:a]atrim=start={:.3},asetpts=PTS-STARTPTS,volume={:.3},aformat=sample_rates=48000:channel_layouts=stereo,adelay={}|{}[a1_delayed]; \
          [a1_delayed]afade=t=in:st=0:d=0.2,afade=t=out:st={}:d=0.2[a1]; \
          [a0][a1]amix=inputs=2:duration=first:dropout_transition=2[aout]",
-         fade_out_start, fade_out_start, voice_delay_ms, voice_delay_ms, fade_out_start
+         fade_out_start, fade_out_start, audio_trim_start, voice_gain_linear, voice_delay_ms, voice_delay_ms, fade_out_start
     );
 
-    let mut cmd = tokio::process::Command::new("ffmpeg");
+    let mut cmd = tokio::process::Command::new(crate::get_ffmpeg_path());
     cmd.args([
         "-nostdin",
         "-y",
@@ -973,28 +1067,43 @@ pub async fn process_backstage_shorts(
     output_path: String,
 ) -> Result<String, String> {
     println!("[process_backstage_shorts] Начало работы. input: {}, output: {}", video_path, output_path);
-    let mut cmd = tokio::process::Command::new("ffmpeg");
+
+    let output_pattern = if output_path.to_lowercase().ends_with(".mp4") {
+        output_path.replace(".mp4", "_%03d.mp4")
+    } else {
+        format!("{}_%03d.mp4", output_path)
+    };
+
+    let filter = "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:20[bg];[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[out]";
+
+    let mut cmd = tokio::process::Command::new(crate::get_ffmpeg_path());
     cmd.args(&[
         "-nostdin",
         "-y",
         "-i", &video_path,
-        "-vf", "crop=ih*(9/16):ih",
+        "-filter_complex", filter,
+        "-map", "[out]",
+        "-map", "0:a",
         "-c:v", "libx264",
         "-c:a", "aac",
-        &output_path,
+        "-f", "segment",
+        "-segment_time", "30",
+        "-reset_timestamps", "1",
+        &output_pattern,
     ]);
 
     println!("[process_backstage_shorts] Запуск FFmpeg: {:?}", cmd);
     let output = cmd.output().await.map_err(|e| e.to_string())?;
     println!("[process_backstage_shorts] FFmpeg завершил работу. Exit status: {}", output.status);
+
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         eprintln!("[process_backstage_shorts] FFmpeg error: {}", err);
         return Err(format!("FFmpeg error: {}", err));
     }
     
-    println!("[process_backstage_shorts] Успешное завершение. Файл сохранен в: {}", output_path);
-    Ok(output_path)
+    println!("[process_backstage_shorts] Успешное завершение. Файлы сохранены по шаблону: {}", output_pattern);
+    Ok(output_pattern)
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]
@@ -1027,7 +1136,7 @@ pub async fn process_backstage_remove_silence(
     let vf_filter = format!("select='{}',setpts=N/FRAME_RATE/TB", select_expr);
     let af_filter = format!("aselect='{}',asetpts=N/SR/TB", select_expr);
     
-    let mut cmd = tokio::process::Command::new("ffmpeg");
+    let mut cmd = tokio::process::Command::new(crate::get_ffmpeg_path());
     cmd.args(&[
         "-nostdin",
         "-y",
@@ -1062,6 +1171,7 @@ pub struct ExportSettings {
     pub professional_editing: bool,
     pub only_favorites: Option<bool>,
     pub use_audio_transitions: Option<bool>,
+    pub pip_camera: Option<bool>,
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]
@@ -1120,9 +1230,10 @@ pub async fn export_backstage_assemble(
     let has_original = original_video_path.is_some();
     let is_9_16 = settings.aspect_ratio == "9:16";
     let professional = settings.professional_editing;
+    let use_pip = settings.pip_camera.unwrap_or(false);
 
     // Check camera audio
-    let probe_out = Command::new("ffprobe")
+    let probe_out = Command::new(crate::get_ffprobe_path())
         .args(["-i", &video_path, "-show_streams", "-select_streams", "a", "-loglevel", "error"])
         .output().await;
     let has_cam_audio = probe_out.map(|o| !o.stdout.is_empty()).unwrap_or(true);
@@ -1131,24 +1242,38 @@ pub async fn export_backstage_assemble(
         let chunk_name = format!("chunk_{:04}.mp4", i);
         let chunk_path = temp_dir.join(&chunk_name);
         
-        let start = block.start.unwrap_or(block.original_start.unwrap_or(0.0));
+        let start = block.original_start.unwrap_or(0.0);
         let duration = block.duration;
-        let end = block.end.unwrap_or(block.original_end.unwrap_or(start + duration));
+        let end = block.original_end.unwrap_or(start + duration);
 
-        let orig_start = block.original_start.unwrap_or(0.0);
-        let orig_end = block.original_end.unwrap_or(orig_start + duration);
+        let orig_start = block.video_ref_start.unwrap_or(0.0);
+        let orig_end = block.video_ref_end.unwrap_or(orig_start + duration);
 
         let mut filter_graph = String::new();
         
         // Video trim
-        if block.r#type == "dub" && has_original && professional {
+        if block.r#type == "dub" && has_original && (professional || use_pip) {
+            filter_graph.push_str(&format!("[1:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS[orig_v];\n", orig_start, orig_end));
+            if use_pip {
+                filter_graph.push_str(&format!("[0:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS[cam_v];\n", start, end));
+                let pip_w = if is_9_16 { "iw/3" } else { "iw/4" };
+                let pip_h = if is_9_16 { "ih/3" } else { "ih/4" };
+                let pip_x = if is_9_16 { "W-w-20" } else { "W-w-40" };
+                let pip_y = if is_9_16 { "20" } else { "40" };
+                filter_graph.push_str(&format!("[cam_v]scale={}:{}[pip_scaled];\n", pip_w, pip_h));
+                filter_graph.push_str(&format!("[orig_v][pip_scaled]overlay=x={}:y={}:format=yuv420[v_raw];\n", pip_x, pip_y));
+            } else {
+                filter_graph.push_str("[orig_v]format=yuv420p[v_raw];\n");
+            }
+        } else if has_original && use_pip {
+            // For non-dub blocks in PIP mode, we just show the original video (no PIP)
             filter_graph.push_str(&format!("[1:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS[orig_v];\n", orig_start, orig_end));
             filter_graph.push_str("[orig_v]format=yuv420p[v_raw];\n");
         } else {
             filter_graph.push_str(&format!("[0:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS[cam_v];\n", start, end));
             filter_graph.push_str("[cam_v]format=yuv420p[v_raw];\n");
         }
-        
+
         // Subtitles for this block
         let block_subs: Vec<_> = subtitles.iter().filter(|s| {
             s.end > orig_start && s.start < orig_end
@@ -1175,35 +1300,79 @@ pub async fn export_backstage_assemble(
             filter_graph.push_str(&format!("[{}]copy[v_sub];\n", current_v));
         }
 
-        // Crop if needed
+        // Crop if needed (ensure width and height are divisible by 2)
         if is_9_16 {
-            filter_graph.push_str("[v_sub]crop=ih*(9/16):ih[v_out];\n");
+            filter_graph.push_str("[v_sub]crop='w=2*floor(ih*(9/16)/2):h=2*floor(ih/2)'[v_out];\n");
         } else {
             filter_graph.push_str("[v_sub]copy[v_out];\n");
         }
 
         // Audio trim
-        if block.r#type == "dub" && has_original && professional {
+        if block.r#type == "dub" && has_original && (professional || use_pip) {
             filter_graph.push_str(&format!("[1:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[orig_a];\n", orig_start, orig_end));
-            filter_graph.push_str("[orig_a]volume=1.0[a_out]");
+            if use_pip && has_cam_audio {
+                filter_graph.push_str(&format!("[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[cam_a];\n", start, end));
+
+                // Проведем нормализацию для сборки (assemble)
+                let (mean_orig, _) = get_volume_stats(original_video_path.as_ref().unwrap(), Some(orig_start), Some(duration)).await;
+                let (mean_voice, max_voice) = get_volume_stats(&video_path, Some(start), Some(duration)).await;
+
+                let mean_orig_val = mean_orig.unwrap_or(-20.0);
+                let mean_voice_val = mean_voice.unwrap_or(-25.0);
+                let max_voice_val = max_voice.unwrap_or(0.0);
+
+                // Оригинальное аудио приглушается на volume=0.8 для лучшего баланса при микшировании
+                let orig_attenuation_db = 20.0 * 0.8_f64.log10();
+                let mean_orig_adjusted = mean_orig_val + orig_attenuation_db;
+
+                let clamped_orig_mean = mean_orig_adjusted.clamp(-26.0, -14.0);
+                let target_voice_mean = clamped_orig_mean + 3.5;
+                let mut needed_gain_db = target_voice_mean - mean_voice_val;
+
+                if needed_gain_db > 24.0 {
+                    needed_gain_db = 24.0;
+                }
+                if needed_gain_db < -12.0 {
+                    needed_gain_db = -12.0;
+                }
+
+                let safe_gain_db = -1.0 - max_voice_val;
+                if needed_gain_db > safe_gain_db {
+                    needed_gain_db = safe_gain_db;
+                }
+
+                let cam_gain_linear = 10.0_f64.powf(needed_gain_db / 20.0);
+                println!("[export_backstage_assemble] Блок {}: расчет громкости микрофона: {:.2} dB (линейный коэффициент: {:.3})", 
+                         i, needed_gain_db, cam_gain_linear);
+
+                filter_graph.push_str("[orig_a]volume=0.8[orig_a_norm];\n");
+                filter_graph.push_str(&format!("[cam_a]volume={:.3}[cam_a_norm];\n", cam_gain_linear));
+                filter_graph.push_str("[orig_a_norm][cam_a_norm]amix=inputs=2:duration=longest[a_out];\n");
+            } else {
+                filter_graph.push_str("[orig_a]volume=1.0[a_out];\n");
+            }
+        } else if has_original && use_pip {
+            // For non-dub blocks in PIP mode, we just play original audio
+            filter_graph.push_str(&format!("[1:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[orig_a];\n", orig_start, orig_end));
+            filter_graph.push_str("[orig_a]volume=1.0[a_out];\n");
         } else {
             if block.r#type == "silence" {
-                filter_graph.push_str(&format!("anullsrc=r=48000:cl=stereo:d={:.3}[a_out]", duration));
+                filter_graph.push_str(&format!("anullsrc=r=48000:cl=stereo:d={:.3}[a_out];\n", duration));
             } else {
                 if has_cam_audio {
                     filter_graph.push_str(&format!("[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[cam_a];\n", start, end));
-                    filter_graph.push_str("[cam_a]volume=1.0[a_out]");
+                    filter_graph.push_str("[cam_a]volume=1.0[a_out];\n");
                 } else {
-                    filter_graph.push_str(&format!("anullsrc=r=48000:cl=stereo:d={:.3}[a_out]", duration));
+                    filter_graph.push_str(&format!("anullsrc=r=48000:cl=stereo:d={:.3}[a_out];\n", duration));
                 }
             }
         }
 
-        let mut cmd = Command::new("ffmpeg");
+        let mut cmd = Command::new(crate::get_ffmpeg_path());
         cmd.arg("-nostdin").arg("-y");
         cmd.arg("-i").arg(&video_path);
         
-        if block.r#type == "dub" && has_original && professional {
+        if has_original {
             cmd.arg("-i").arg(original_video_path.as_ref().unwrap());
         }
         
@@ -1211,7 +1380,7 @@ pub async fn export_backstage_assemble(
         cmd.arg("-map").arg("[v_out]");
         cmd.arg("-map").arg("[a_out]");
         cmd.arg("-c:v").arg("libx264").arg("-preset").arg("fast").arg("-crf").arg("23");
-        cmd.arg("-c:a").arg("aac").arg("-b:a").arg("192k");
+        cmd.arg("-c:a").arg("aac").arg("-b:a").arg("192k").arg("-ar").arg("48000").arg("-ac").arg("2");
         cmd.arg(chunk_path.to_str().unwrap());
         
         println!("[export_backstage_assemble] Рендеринг блока {}/{}", i + 1, blocks.len());
@@ -1233,7 +1402,7 @@ pub async fn export_backstage_assemble(
     f.write_all(concat_list.as_bytes()).map_err(|e| e.to_string())?;
 
     println!("[export_backstage_assemble] Склеивание {} блоков...", chunk_files.len());
-    let mut concat_cmd = Command::new("ffmpeg");
+    let mut concat_cmd = Command::new(crate::get_ffmpeg_path());
     concat_cmd.args([
         "-nostdin",
         "-y",

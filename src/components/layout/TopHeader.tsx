@@ -29,6 +29,9 @@ interface TopHeaderProps {
   hasBackstageSessions?: boolean;
   setIsExporting: (v: boolean) => void;
   setExportOperation: (o: string) => void;
+  onOpenCastingModal?: () => void;
+  onOpenDocumentModal?: () => void;
+  onUpdateDubberNick?: (nick: string) => void;
 }
 
 export const TopHeader: React.FC<TopHeaderProps> = (props) => {
@@ -116,6 +119,9 @@ export const TopHeader: React.FC<TopHeaderProps> = (props) => {
       handleExportStems={props.handleExportStems}
       handleExportAllStemsZip={props.handleExportAllStemsZip}
       onLoadProject={onLoadProject}
+      onOpenCastingModal={props.onOpenCastingModal}
+      onOpenDocumentModal={props.onOpenDocumentModal}
+      onUpdateDubberNick={props.onUpdateDubberNick}
     />
   );
 };

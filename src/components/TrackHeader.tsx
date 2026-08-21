@@ -4,6 +4,7 @@ import { cn, safeConfirm } from '../lib/utils';
 import { AudioTrack, TrackProcessing } from '../types';
 import { ContextMenu } from './ContextMenu';
 import { TrackProcessingModal } from './TrackProcessingModal';
+import { useProjectData } from '../contexts/ProjectContext';
 
 export const TrackHeader = ({ 
   track, 
@@ -41,6 +42,7 @@ export const TrackHeader = ({
   onOpenProcessing?: (id: string) => void,
   key?: string | number
 }) => {
+  const { saveSnapshot } = useProjectData();
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number } | null>(null);
 
   const isArmed = track.isArmed;
@@ -99,7 +101,7 @@ export const TrackHeader = ({
       onContextMenu={handleContextMenu}
       onDoubleClick={(e) => {
         if (onSelectBatchSegments) {
-          onSelectBatchSegments(track.segments.map(seg => seg.id), e.shiftKey);
+          onSelectBatchSegments((track.segments || []).map(seg => seg.id), e.shiftKey);
         } else if (onSelectSegment) {
           track.segments.forEach(seg => onSelectSegment(seg.id, true));
         }
@@ -159,15 +161,24 @@ export const TrackHeader = ({
         <div className="flex items-center gap-2">
           <input 
             type="range" 
-            min="0" 
-            max="1" 
-            step="0.01" 
+            min="-15" 
+            max="15" 
+            step="0.5" 
             value={volume} 
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              saveSnapshot();
+            }}
             onChange={(e) => onVolumeChange(track.id, parseFloat(e.target.value))}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              saveSnapshot();
+              onVolumeChange(track.id, 0.0);
+            }}
             className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
           />
-          <span className="text-[8px] font-mono text-zinc-600 w-8 text-right">
-            {Math.round(volume * 100)}%
+          <span className="text-[8px] font-mono text-zinc-600 w-10 text-right">
+            {volume > 0 ? `+${volume.toFixed(1)}` : volume.toFixed(1)} dB
           </span>
         </div>
       </div>
@@ -183,13 +194,19 @@ export const TrackHeader = ({
               icon: <Edit3 className="w-3.5 h-3.5 text-zinc-400" />,
               onClick: () => {
                 const newName = prompt("Введите новое название дорожки:", track.name);
-                if (newName) onRename?.(track.id, newName);
+                if (newName) {
+                  saveSnapshot();
+                  onRename?.(track.id, newName);
+                }
               }
             },
             {
               label: "Сбросить громкость",
               icon: <RotateCcw className="w-3.5 h-3.5 text-zinc-400" />,
-              onClick: () => onVolumeChange(track.id, 1.0)
+              onClick: () => {
+                saveSnapshot();
+                onVolumeChange(track.id, 0.0);
+              }
             },
             {
               label: "Очистить дорожку",

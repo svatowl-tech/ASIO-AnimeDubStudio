@@ -93,14 +93,15 @@ const TransportControls: React.FC<TransportControlsProps> = ({
           <button 
             onClick={onToggleBackstageSession}
             className={cn(
-              "flex items-center gap-2 px-3 h-9 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border",
+              "flex items-center gap-2 px-3 h-9 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border cursor-pointer active:scale-95",
               isBackstageSessionRecording 
-                ? "bg-rose-600 border-rose-500 text-white animate-pulse" 
-                : "bg-zinc-800 border-white/5 text-zinc-400 hover:text-white"
+                ? "bg-rose-600 border-rose-500 text-white animate-pulse hover:bg-rose-700" 
+                : "bg-zinc-800 border-white/5 text-zinc-400 hover:text-white hover:bg-zinc-700"
             )}
+            title={isBackstageSessionRecording ? "Остановить бэкстейдж сессию" : "Начать бэкстейдж сессию"}
           >
             <Video className="w-3 h-3" />
-            {isBackstageSessionRecording ? "БЕКСТЕЙДЖ: ИДЕТ ЗАПИСЬ" : "ЗАПИСЬ БЕКСТЕЙДЖА"}
+            {isBackstageSessionRecording ? "БЕКСТЕЙДЖ ИДЕТ" : "БЕКСТЕЙДЖ ГОТОВ"}
           </button>
         )}
 

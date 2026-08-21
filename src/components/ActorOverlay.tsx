@@ -1,10 +1,11 @@
 import React from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, useDragControls } from 'framer-motion';
 import { cn } from '../lib/utils';
-import { SubtitleLine, Project } from '../types';
+import { SubtitleLine, Project, TeleprompterMode } from '../types';
 import Teleprompter from './Teleprompter';
 import BackstageCamera from './BackstageCamera';
 import { ScrollingWaveform } from './ScrollingWaveform';
+import { useTeleprompterLayout } from './teleprompter/useTeleprompterLayout';
 
 export const ActorOverlay = ({ 
   currentLine, 
@@ -16,7 +17,7 @@ export const ActorOverlay = ({
   recordingStream,
   onClipping,
   subtitles = [],
-  teleprompterMode,
+  teleprompterMode = 'compact',
   teleprompterFontSize,
   teleprompterLineHeight,
   teleprompterPacing,
@@ -49,14 +50,14 @@ export const ActorOverlay = ({
   previewStream?: MediaStream | null,
   onClipping?: (clipping: boolean) => void,
   subtitles?: SubtitleLine[],
-  teleprompterMode: 'compact' | 'expanded',
+  teleprompterMode: TeleprompterMode,
   teleprompterFontSize: number,
   teleprompterLineHeight: number,
   teleprompterPacing: 'auto' | 'manual',
   setTeleprompterFontSize: (s: number) => void,
   setTeleprompterLineHeight: (h: number) => void,
   setTeleprompterPacing: (p: 'auto' | 'manual') => void,
-  setTeleprompterMode: (m: 'compact' | 'expanded') => void,
+  setTeleprompterMode: (m: TeleprompterMode) => void,
   teleprompterPosition: { x: number, y: number },
   setTeleprompterPosition: (pos: { x: number, y: number }) => void,
   teleprompterSize: { width: number, height: number },
@@ -71,21 +72,29 @@ export const ActorOverlay = ({
   duration?: number,
   isPopout?: boolean
 }) => {
+  const { containerStyle, motionAnimate } = useTeleprompterLayout(
+    teleprompterMode,
+    teleprompterSize,
+    teleprompterPosition
+  );
+  const dragControls = useDragControls();
 
   return (
     <div className="absolute inset-0 pointer-events-none z-40 overflow-hidden">
       {/* Backstage Recording Indicator */}
       {isBackstageRecording && (
-        <div className="absolute top-8 right-8 flex items-center gap-2 bg-amber-600/80 backdrop-blur-md px-3 py-1.5 rounded-full border border-amber-400/50 shadow-lg animate-pulse">
+        <div className="absolute top-8 right-8 flex items-center gap-2 bg-amber-600/80 backdrop-blur-md px-3 py-1.5 rounded-full border border-amber-400/50 shadow-lg animate-pulse z-50">
           <div className="w-2 h-2 bg-white rounded-full" />
           <span className="text-[10px] font-black uppercase tracking-widest text-white">Запись бекстейджа</span>
         </div>
       )}
 
-      {/* Teleprompter */}
+      {/* Teleprompter (Dockable / Floating / Fullscreen) */}
       {(subtitles.length > 0 || isAudiobook) && (
         <motion.div 
           drag={teleprompterMode === 'compact'}
+          dragControls={dragControls}
+          dragListener={false}
           dragMomentum={false}
           dragConstraints={{ left: -window.innerWidth/2, right: window.innerWidth/2, top: -window.innerHeight, bottom: 200 }}
           onDragEnd={(_, info) => {
@@ -97,20 +106,12 @@ export const ActorOverlay = ({
             }
           }}
           className={cn(
-            "absolute pointer-events-auto",
-            teleprompterMode === 'expanded' ? "inset-0 transition-all duration-500" : ""
+            "pointer-events-auto",
+            teleprompterMode === 'expanded' ? "transition-all duration-300" : ""
           )}
-          style={teleprompterMode === 'compact' ? {
-            left: '50%',
-            top: 'calc(100% - 240px)',
-            marginLeft: -(teleprompterSize.width / 2),
-            width: teleprompterSize.width,
-            height: teleprompterSize.height,
-          } : {}}
-          animate={teleprompterMode === 'compact' ? {
-            x: teleprompterPosition.x,
-            y: teleprompterPosition.y
-          } : {}}
+          style={containerStyle}
+          animate={motionAnimate}
+          transition={teleprompterMode === 'compact' ? { duration: 0 } : { type: 'spring', damping: 26, stiffness: 220 }}
         >
           <Teleprompter 
             subtitles={subtitles}
@@ -120,6 +121,7 @@ export const ActorOverlay = ({
             lineHeight={teleprompterLineHeight}
             pacing={teleprompterPacing}
             activeRole={activeRole}
+            dragControls={dragControls}
             onFontSizeChange={setTeleprompterFontSize}
             onLineHeightChange={setTeleprompterLineHeight}
             onPacingChange={setTeleprompterPacing}
@@ -154,8 +156,6 @@ export const ActorOverlay = ({
           duration={duration}
         />
       )}
-
-      {/* Recording Status removed as per user request */}
     </div>
   );
 };

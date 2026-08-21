@@ -61,10 +61,13 @@ export const useTimelineState = (
       } else {
         if (videoRef.current && !videoError) {
           try {
-            if (Math.abs(videoRef.current.currentTime - currentTimeRef.current) > 0.05) {
-               videoRef.current.currentTime = currentTimeRef.current;
-            }
+            console.log(`[togglePlay] Attempting to play. currentTimeRef.current = ${currentTimeRef.current}, videoRef.current.currentTime = ${videoRef.current.currentTime}`);
+            
+            // ALWAYS force time synchronization before play to prevent browser seeking bugs
+            videoRef.current.currentTime = currentTimeRef.current;
+            
             await videoRef.current.play();
+            console.log(`[togglePlay] Video started playing.`);
             setIsPlaying(true);
             if (project) {
               const tracksToPlay = [...project.tracks];
@@ -204,6 +207,13 @@ export const useTimelineState = (
       playbackEngine.tick(time, project?.tracks || []);
       setCurrentTime(time);
       currentTimeRef.current = time;
+
+      // Automatically expand duration for audio-only projects when approaching the end
+      if (project && !project.videoPath && !project.videoUrl && !project.referenceAudioPath) {
+        if (time >= duration - 10) {
+          setDuration(duration + 300);
+        }
+      }
       
       rafId = requestAnimationFrame(sync);
     };

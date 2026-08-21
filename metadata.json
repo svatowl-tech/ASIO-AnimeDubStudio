@@ -1,8 +1,11 @@
 {
-  "name": "Remix: DubStudio Pro",
-  "description": "Профессиональное кроссплатформенное приложение для озвучки аниме и фандаба с многодорожечной записью и синхронизацией субтитров.",
+  "name": "DubStudio Pro",
+  "description": "Профессиональное кроссплатформенное приложение для дубляжа, озвучки аниме и фандаба с многодорожечной записью и синхронизацией субтитров.",
   "requestFramePermissions": [
     "camera",
     "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }

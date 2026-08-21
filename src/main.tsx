@@ -5,6 +5,18 @@ import StudioModeApp from './StudioModeApp.tsx';
 import './index.css';
 import { setupTauriLegacyWrapper } from './lib/tauriLegacyWrapper.ts';
 
+// Global shortcut blocker to prevent accidental project close via Ctrl+R/F5
+window.addEventListener('keydown', (e: KeyboardEvent) => {
+  if ((e.ctrlKey || e.metaKey) && (e.code === 'KeyR' || e.key.toLowerCase() === 'r')) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+  if (e.code === 'F5') {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+}, { capture: true });
+
 // Bridge the legacy electron API so existing code doesn't crash
 setupTauriLegacyWrapper();
 

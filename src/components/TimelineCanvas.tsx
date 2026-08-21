@@ -1,18 +1,21 @@
 import React, { useEffect, useRef, useState, useLayoutEffect } from 'react';
 import { Project } from '../types';
+import { getSubtitleCoverageStats } from '../lib/subtitleCoverage';
 
 export const TimelineCanvas = React.memo(({ 
   project, 
   duration, 
   zoom, 
   visibleRange: vRange,
-  loopRange
+  loopRange,
+  isHighlightingMissingSubtitles
 }: { 
   project: Project, 
   duration: number, 
   zoom: number, 
   visibleRange: { start: number, end: number },
-  loopRange: { start: number, end: number } | null
+  loopRange: { start: number, end: number } | null,
+  isHighlightingMissingSubtitles?: boolean
 }) => {
   if (!project) return null;
 
@@ -103,18 +106,53 @@ export const TimelineCanvas = React.memo(({
       ctx.fillText(`${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}:00`, x + 4, 10);
     }
 
+    const coverageStats = getSubtitleCoverageStats(project);
+
     project.subtitles.forEach(sub => {
-      if (project.selectedRole && sub.role !== project.selectedRole) return;
-      if (sub.end < vRange.start || sub.start > vRange.end) return;
-      const x = (sub.start * zoom) - offsetX;
-      const w = (sub.end - sub.start) * zoom;
-      ctx.fillStyle = 'rgba(99, 102, 241, 0.2)'; ctx.fillRect(x, 16, w, 14);
-      ctx.strokeStyle = 'rgba(99, 102, 241, 0.4)'; ctx.strokeRect(x, 16, w, 14);
-      ctx.fillStyle = '#fff'; ctx.font = '8px sans-serif';
+      const activeRoles = project.selectedRoles && project.selectedRoles.length > 0 
+        ? project.selectedRoles 
+        : (project.selectedRole ? [project.selectedRole] : []);
+      const isRoleSelected = activeRoles.length === 0 || activeRoles.includes(sub.role);
+      if (!isRoleSelected) return;
+
+      const offset = project.subtitlesOffset || 0;
+      const startOnTimeline = sub.start + offset;
+      const endOnTimeline = sub.end + offset;
+
+      if (endOnTimeline < vRange.start || startOnTimeline > vRange.end) return;
+
+      const x = (startOnTimeline * zoom) - offsetX;
+      const w = Math.max(12, (endOnTimeline - startOnTimeline) * zoom);
+
+      const isRecorded = coverageStats.recordedLineIds.has(sub.id);
+      const isUnrecorded = coverageStats.unrecordedLineIds.has(sub.id);
+      const isHighlighted = isHighlightingMissingSubtitles && isUnrecorded;
+
+      if (isHighlighted) {
+        ctx.fillStyle = 'rgba(245, 158, 11, 0.45)';
+        ctx.fillRect(x, 16, w, 14);
+        ctx.strokeStyle = 'rgba(245, 158, 11, 1)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, 16, w, 14);
+        ctx.lineWidth = 1;
+      } else if (isRecorded) {
+        ctx.fillStyle = 'rgba(16, 185, 129, 0.25)';
+        ctx.fillRect(x, 16, w, 14);
+        ctx.strokeStyle = 'rgba(16, 185, 129, 0.6)';
+        ctx.strokeRect(x, 16, w, 14);
+      } else {
+        ctx.fillStyle = 'rgba(99, 102, 241, 0.2)';
+        ctx.fillRect(x, 16, w, 14);
+        ctx.strokeStyle = 'rgba(99, 102, 241, 0.4)';
+        ctx.strokeRect(x, 16, w, 14);
+      }
+
+      ctx.fillStyle = isHighlighted ? '#fef3c7' : '#fff';
+      ctx.font = '8px sans-serif';
       ctx.fillText(sub.text.substring(0, Math.floor(w / 4)), x + 4, 26);
     });
 
-  }, [dimensions, project.subtitles, project.selectedRole, duration, zoom, vRange]);
+  }, [dimensions, project, duration, zoom, vRange, isHighlightingMissingSubtitles]);
 
   // 2. Draw Dynamic Elements (Loop Range)
   useEffect(() => {
@@ -174,6 +212,7 @@ export const TimelineCanvas = React.memo(({
     prevProps.loopRange?.start === nextProps.loopRange?.start &&
     prevProps.loopRange?.end === nextProps.loopRange?.end &&
     prevProps.project.selectedRole === nextProps.project.selectedRole &&
+    JSON.stringify(prevProps.project.selectedRoles) === JSON.stringify(nextProps.project.selectedRoles) &&
     prevProps.project.subtitles === nextProps.project.subtitles
   );
 });

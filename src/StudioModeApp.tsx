@@ -181,7 +181,7 @@ const StudioModeContent = () => {
         recordingStream={null}
         isWebcamSimulated={false}
         subtitles={state.subtitles || []}
-        teleprompterMode={state.teleprompterMode || 'expanded'}
+        teleprompterMode={state.teleprompterMode || 'compact'}
         teleprompterFontSize={state.teleprompterFontSize || 48}
         teleprompterLineHeight={state.teleprompterLineHeight || 1.1}
         teleprompterPacing={state.teleprompterPacing || 'auto'}

@@ -75,6 +75,78 @@ fn open_devtools(window: tauri::WebviewWindow) {
     window.open_devtools(); // Try forcing it in release mode too (requires devtools feature)
 }
 
+pub fn get_ffmpeg_path() -> String {
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            let (target_triple, ext) = if cfg!(target_os = "windows") {
+                ("x86_64-pc-windows-msvc", ".exe")
+            } else if cfg!(target_arch = "aarch64") {
+                ("aarch64-apple-darwin", "")
+            } else {
+                ("x86_64-apple-darwin", "")
+            };
+            
+            // First check if the exact sidecar exists
+            let sidecar_ffmpeg = parent.join(format!("ffmpeg-{}{}", target_triple, ext));
+            if sidecar_ffmpeg.exists() {
+                return sidecar_ffmpeg.to_str().unwrap_or("ffmpeg").to_string();
+            }
+            
+            // Then check if it's in resources/bin (Tauri v2 resources)
+            let resources_ffmpeg = parent.join("resources").join("bin").join(format!("ffmpeg-{}{}", target_triple, ext));
+            if resources_ffmpeg.exists() {
+                return resources_ffmpeg.to_str().unwrap_or("ffmpeg").to_string();
+            }
+            
+            // On macOS, resources are in ../Resources/bin
+            #[cfg(not(target_os = "windows"))]
+            if let Some(macos_parent) = parent.parent() {
+                let macos_resources = macos_parent.join("Resources").join("bin").join(format!("ffmpeg-{}", target_triple));
+                if macos_resources.exists() {
+                    return macos_resources.to_str().unwrap_or("ffmpeg").to_string();
+                }
+            }
+        }
+    }
+    "ffmpeg".to_string()
+}
+
+pub fn get_ffprobe_path() -> String {
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            let (target_triple, ext) = if cfg!(target_os = "windows") {
+                ("x86_64-pc-windows-msvc", ".exe")
+            } else if cfg!(target_arch = "aarch64") {
+                ("aarch64-apple-darwin", "")
+            } else {
+                ("x86_64-apple-darwin", "")
+            };
+            
+            // First check if the exact sidecar exists
+            let sidecar_ffprobe = parent.join(format!("ffprobe-{}{}", target_triple, ext));
+            if sidecar_ffprobe.exists() {
+                return sidecar_ffprobe.to_str().unwrap_or("ffprobe").to_string();
+            }
+            
+            // Then check if it's in resources/bin (Tauri v2 resources)
+            let resources_ffprobe = parent.join("resources").join("bin").join(format!("ffprobe-{}{}", target_triple, ext));
+            if resources_ffprobe.exists() {
+                return resources_ffprobe.to_str().unwrap_or("ffprobe").to_string();
+            }
+            
+            // On macOS, resources are in ../Resources/bin
+            #[cfg(not(target_os = "windows"))]
+            if let Some(macos_parent) = parent.parent() {
+                let macos_resources = macos_parent.join("Resources").join("bin").join(format!("ffprobe-{}", target_triple));
+                if macos_resources.exists() {
+                    return macos_resources.to_str().unwrap_or("ffprobe").to_string();
+                }
+            }
+        }
+    }
+    "ffprobe".to_string()
+}
+
 fn main() {
     // Shared empty state initially
     let app_state = AppState {
@@ -84,7 +156,6 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             log_debug("--- APPLICATION STARTUP ---");
             let app_handle = app.handle().clone();
@@ -171,10 +242,22 @@ fn main() {
 
             // Use Tauri 2.0 path resolver
             use tauri::Manager;
-            let app_data_dir = app_handle.path().app_data_dir().expect("Failed to get app data dir");
+            let app_data_dir = match app_handle.path().app_data_dir() {
+                Ok(dir) => dir,
+                Err(e) => {
+                    eprintln!("Failed to get app data dir: {}", e);
+                    std::process::exit(1);
+                }
+            };
             let _ = std::fs::create_dir_all(&app_data_dir);
             let db_path = app_data_dir.join("dev.db");
-            let db_path_str = db_path.to_str().expect("Path is not valid UTF-8").to_string();
+            let db_path_str = match db_path.to_str() {
+                Some(s) => s.to_string(),
+                None => {
+                    eprintln!("Path is not valid UTF-8");
+                    std::process::exit(1);
+                }
+            };
 
             tauri::async_runtime::spawn(async move {
                 // Initialize database asynchronously 
@@ -254,7 +337,10 @@ fn main() {
             create_blank_video
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .unwrap_or_else(|e| {
+            eprintln!("Error while running tauri application: {:?}", e);
+            std::process::exit(1);
+        });
 }
 
 // EOF

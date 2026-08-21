@@ -13,7 +13,9 @@ import {
   Mic,
   Download,
   Play,
-  Keyboard
+  Keyboard,
+  Sparkles,
+  User
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn, formatHotkey, getDefaultKeyMap } from '../lib/utils';
@@ -55,6 +57,9 @@ interface HeaderProps {
   handleOpenProjectFolder?: () => void;
   onLoadProject: (path: string) => void;
   hasBackstageSessions?: boolean;
+  onOpenCastingModal?: () => void;
+  onOpenDocumentModal?: () => void;
+  onUpdateDubberNick?: (nick: string) => void;
 }
 
 const HotkeyHints = ({ onClose, keyMap }: { onClose: () => void, keyMap: any }) => {
@@ -142,22 +147,38 @@ const Header: React.FC<HeaderProps> = ({
   handleExportStems,
   handleExportAllStemsZip,
   handleOpenProjectFolder,
-  onLoadProject
+  onLoadProject,
+  onOpenCastingModal,
+  onOpenDocumentModal,
+  onUpdateDubberNick
 }) => {
   const { toggleSettings } = useUIState();
   const [showHotkeys, setShowHotkeys] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
 
+  const baseImportOptions = [
+    { icon: <FileVideo className="w-5 h-5 text-indigo-400" />, title: "Видео", description: "Открыть видеофайл для озвучки", onClick: () => { setShowImportModal(false); if (isDesktop) handleSelectVideo(); } },
+    { icon: <FileText className="w-5 h-5 text-purple-400" />, title: "Субтитры", description: "Импортировать (.ass, .srt, .vtt, .fb2, .csv)", onClick: () => { setShowImportModal(false); if (isDesktop) handleSelectSubs(); } },
+    { icon: <FileText className="w-5 h-5 text-blue-400" />, title: "Документ", description: "Импорт текстового документа с распределением времени", onClick: () => { setShowImportModal(false); if (onOpenDocumentModal) { onOpenDocumentModal(); } else if (isDesktop) { handleSelectDocument(); } } },
+    { icon: <Music className="w-5 h-5 text-amber-400" />, title: "Аудиореференс", description: "Выбрать референсный аудиофайл", onClick: () => { setShowImportModal(false); if (isDesktop) handleSelectReferenceAudio(); } },
+    { icon: <Layers className="w-5 h-5 text-indigo-400" />, title: "Пакетный импорт", description: "Импорт всех аудиофайлов из папки", onClick: () => { setShowImportModal(false); handleBulkImport(); } },
+    { icon: <Layers className="w-5 h-5 text-emerald-400" />, title: "Импорт игровой озвучки", description: "Выбрать папку реплик + TXT перевод", onClick: () => { setShowImportModal(false); handleGameDubbingImport?.(); } },
+  ];
+
+  const projectOnlyOptions = project ? [
+    { icon: <FileText className="w-5 h-5 text-rose-400" />, title: "Импорт фиксов", description: "Вставить текст правок от куратора", onClick: () => { setShowImportModal(false); setShowFixImport && setShowFixImport(true); } },
+    { icon: <FileText className="w-5 h-5 text-green-400" />, title: "Быстрый импорт текста", description: "Вставить текст из буфера обмена", onClick: () => { setShowImportModal(false); setShowQuickImport(true); } },
+    { icon: <Music className="w-5 h-5 text-emerald-500" />, title: "Импорт аудио", description: "Импорт готового аудио на новую дорожку", onClick: () => { setShowImportModal(false); handleImportAudio?.(); } },
+  ] : [];
+
+  const castingOption = [
+    { icon: <Sparkles className="w-5 h-5 text-indigo-400" />, title: "Импорт кастинга", description: "Кастинг по аудио/видео с текстом или сабами", onClick: () => { setShowImportModal(false); onOpenCastingModal?.(); } }
+  ];
+
   const importOptions = [
-    { icon: <FileVideo className="w-5 h-5 text-indigo-400" />, title: "Видео", description: "Открыть видеофайл для озвучки", onClick: () => isDesktop && handleSelectVideo() },
-    { icon: <FileText className="w-5 h-5 text-purple-400" />, title: "Субтитры", description: "Импортировать (.ass, .srt, .vtt, .fb2, .csv)", onClick: () => isDesktop && handleSelectSubs() },
-    { icon: <FileText className="w-5 h-5 text-rose-400" />, title: "Импорт фиксов", description: "Вставить текст правок от куратора", onClick: () => setShowFixImport && setShowFixImport(true) },
-    { icon: <FileText className="w-5 h-5 text-blue-400" />, title: "Документ", description: "Импорт текстового документа", onClick: () => isDesktop && handleSelectDocument() },
-    { icon: <Music className="w-5 h-5 text-amber-400" />, title: "Аудиореференс", description: "Выбрать референсный аудиофайл", onClick: () => isDesktop && handleSelectReferenceAudio() },
-    { icon: <FileText className="w-5 h-5 text-green-400" />, title: "Быстрый импорт", description: "Вставить текст из буфера обмена", onClick: () => setShowQuickImport(true) },
-    { icon: <Music className="w-5 h-5 text-emerald-500" />, title: "Импорт аудио", description: "Импорт готового аудио на новую дорожку", onClick: handleImportAudio },
-    { icon: <Layers className="w-5 h-5 text-indigo-400" />, title: "Пакетный импорт", description: "Импорт всех аудиофайлов из папки", onClick: handleBulkImport },
-    { icon: <Layers className="w-5 h-5 text-emerald-400" />, title: "Импорт игровой озвучки", description: "Выбрать папку реплик + TXT перевод", onClick: handleGameDubbingImport || (() => {}) },
+    ...baseImportOptions,
+    ...projectOnlyOptions,
+    ...castingOption
   ];
 
   return (
@@ -172,6 +193,24 @@ const Header: React.FC<HeaderProps> = ({
           </div>
           <div className="h-4 w-px bg-white/10" />
           <div className="text-sm text-zinc-400 font-medium truncate max-w-[150px]">{project?.name || 'Нет проекта'}</div>
+          
+          {/* Dubber Nickname Field in Header */}
+          <div className="flex items-center gap-1.5 bg-zinc-800/80 hover:bg-zinc-800 px-2.5 py-1 rounded-lg border border-white/5 focus-within:border-indigo-500/50 transition-all" title="Ник даббера (автоматически добавляется в имя экспортируемого файла)">
+            <User className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+            <input 
+              type="text" 
+              placeholder="Ник даббера..." 
+              value={project?.dubberNick || localStorage.getItem('dubstudio_dubber_nick') || ''} 
+              onChange={(e) => {
+                const nick = e.target.value;
+                localStorage.setItem('dubstudio_dubber_nick', nick);
+                if (onUpdateDubberNick) {
+                  onUpdateDubberNick(nick);
+                }
+              }} 
+              className="bg-transparent text-xs font-semibold text-white placeholder-zinc-500 focus:outline-none w-20 sm:w-28 truncate"
+            />
+          </div>
         </div>
 
         <div className="flex items-center gap-3 shrink-0 ml-auto">
