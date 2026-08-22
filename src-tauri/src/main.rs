@@ -69,10 +69,9 @@ fn greet(name: &str) -> String {
 #[tauri::command]
 fn open_devtools(window: tauri::WebviewWindow) {
     #[cfg(debug_assertions)]
-    window.open_devtools();
-    
-    #[cfg(not(debug_assertions))]
-    window.open_devtools(); // Try forcing it in release mode too (requires devtools feature)
+    {
+        window.open_devtools();
+    }
 }
 
 pub fn get_ffmpeg_path() -> String {
@@ -86,28 +85,59 @@ pub fn get_ffmpeg_path() -> String {
                 ("x86_64-apple-darwin", "")
             };
             
-            // First check if the exact sidecar exists
-            let sidecar_ffmpeg = parent.join(format!("ffmpeg-{}{}", target_triple, ext));
-            if sidecar_ffmpeg.exists() {
-                return sidecar_ffmpeg.to_str().unwrap_or("ffmpeg").to_string();
+            // Check candidate filenames in various locations
+            let candidates = [
+                format!("ffmpeg-{}{}", target_triple, ext),
+                format!("ffmpeg{}", ext),
+                "ffmpeg-aarch64-apple-darwin".to_string(),
+                "ffmpeg-x86_64-apple-darwin".to_string(),
+                "ffmpeg".to_string(),
+            ];
+
+            for name in &candidates {
+                let p = parent.join(name);
+                if p.exists() {
+                    return p.to_string_lossy().to_string();
+                }
+
+                let p_res_bin = parent.join("resources").join("bin").join(name);
+                if p_res_bin.exists() {
+                    return p_res_bin.to_string_lossy().to_string();
+                }
+
+                let p_res = parent.join("resources").join(name);
+                if p_res.exists() {
+                    return p_res.to_string_lossy().to_string();
+                }
             }
-            
-            // Then check if it's in resources/bin (Tauri v2 resources)
-            let resources_ffmpeg = parent.join("resources").join("bin").join(format!("ffmpeg-{}{}", target_triple, ext));
-            if resources_ffmpeg.exists() {
-                return resources_ffmpeg.to_str().unwrap_or("ffmpeg").to_string();
-            }
-            
-            // On macOS, resources are in ../Resources/bin
+
+            // On macOS, check ../Resources in .app bundle
             #[cfg(not(target_os = "windows"))]
             if let Some(macos_parent) = parent.parent() {
-                let macos_resources = macos_parent.join("Resources").join("bin").join(format!("ffmpeg-{}", target_triple));
-                if macos_resources.exists() {
-                    return macos_resources.to_str().unwrap_or("ffmpeg").to_string();
+                for name in &candidates {
+                    let macos_bin = macos_parent.join("Resources").join("bin").join(name);
+                    if macos_bin.exists() {
+                        return macos_bin.to_string_lossy().to_string();
+                    }
+
+                    let macos_res = macos_parent.join("Resources").join(name);
+                    if macos_res.exists() {
+                        return macos_res.to_string_lossy().to_string();
+                    }
                 }
             }
         }
     }
+
+    #[cfg(target_os = "macos")]
+    {
+        for path in &["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"] {
+            if std::path::Path::new(path).exists() {
+                return path.to_string();
+            }
+        }
+    }
+
     "ffmpeg".to_string()
 }
 
@@ -122,28 +152,58 @@ pub fn get_ffprobe_path() -> String {
                 ("x86_64-apple-darwin", "")
             };
             
-            // First check if the exact sidecar exists
-            let sidecar_ffprobe = parent.join(format!("ffprobe-{}{}", target_triple, ext));
-            if sidecar_ffprobe.exists() {
-                return sidecar_ffprobe.to_str().unwrap_or("ffprobe").to_string();
+            let candidates = [
+                format!("ffprobe-{}{}", target_triple, ext),
+                format!("ffprobe{}", ext),
+                "ffprobe-aarch64-apple-darwin".to_string(),
+                "ffprobe-x86_64-apple-darwin".to_string(),
+                "ffprobe".to_string(),
+            ];
+
+            for name in &candidates {
+                let p = parent.join(name);
+                if p.exists() {
+                    return p.to_string_lossy().to_string();
+                }
+
+                let p_res_bin = parent.join("resources").join("bin").join(name);
+                if p_res_bin.exists() {
+                    return p_res_bin.to_string_lossy().to_string();
+                }
+
+                let p_res = parent.join("resources").join(name);
+                if p_res.exists() {
+                    return p_res.to_string_lossy().to_string();
+                }
             }
-            
-            // Then check if it's in resources/bin (Tauri v2 resources)
-            let resources_ffprobe = parent.join("resources").join("bin").join(format!("ffprobe-{}{}", target_triple, ext));
-            if resources_ffprobe.exists() {
-                return resources_ffprobe.to_str().unwrap_or("ffprobe").to_string();
-            }
-            
-            // On macOS, resources are in ../Resources/bin
+
+            // On macOS, check ../Resources in .app bundle
             #[cfg(not(target_os = "windows"))]
             if let Some(macos_parent) = parent.parent() {
-                let macos_resources = macos_parent.join("Resources").join("bin").join(format!("ffprobe-{}", target_triple));
-                if macos_resources.exists() {
-                    return macos_resources.to_str().unwrap_or("ffprobe").to_string();
+                for name in &candidates {
+                    let macos_bin = macos_parent.join("Resources").join("bin").join(name);
+                    if macos_bin.exists() {
+                        return macos_bin.to_string_lossy().to_string();
+                    }
+
+                    let macos_res = macos_parent.join("Resources").join(name);
+                    if macos_res.exists() {
+                        return macos_res.to_string_lossy().to_string();
+                    }
                 }
             }
         }
     }
+
+    #[cfg(target_os = "macos")]
+    {
+        for path in &["/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe", "/usr/bin/ffprobe"] {
+            if std::path::Path::new(path).exists() {
+                return path.to_string();
+            }
+        }
+    }
+
     "ffprobe".to_string()
 }
 
@@ -240,24 +300,13 @@ fn main() {
                 }
             });
 
-            // Use Tauri 2.0 path resolver
+            // Use Tauri 2.0 path resolver with resilient fallbacks
             use tauri::Manager;
-            let app_data_dir = match app_handle.path().app_data_dir() {
-                Ok(dir) => dir,
-                Err(e) => {
-                    eprintln!("Failed to get app data dir: {}", e);
-                    std::process::exit(1);
-                }
-            };
+            let app_data_dir = app_handle.path().app_data_dir()
+                .unwrap_or_else(|_| std::env::temp_dir().join("com.dubstudio.pro"));
             let _ = std::fs::create_dir_all(&app_data_dir);
             let db_path = app_data_dir.join("dev.db");
-            let db_path_str = match db_path.to_str() {
-                Some(s) => s.to_string(),
-                None => {
-                    eprintln!("Path is not valid UTF-8");
-                    std::process::exit(1);
-                }
-            };
+            let db_path_str = db_path.to_string_lossy().to_string();
 
             tauri::async_runtime::spawn(async move {
                 // Initialize database asynchronously 

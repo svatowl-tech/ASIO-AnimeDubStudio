@@ -14,36 +14,40 @@ if (!fs.existsSync(binDir)) {
 const osName = process.platform;
 const arch = process.arch;
 
-let targetTriple = '';
-let ext = '';
+// Copy helper for multiple target names
+function copyToDestinations(sourcePath, destFilenames) {
+    if (!sourcePath || !fs.existsSync(sourcePath)) return;
+    for (const name of destFilenames) {
+        const dest = path.join(binDir, name);
+        try {
+            console.log(`Copying ${sourcePath} -> ${dest}`);
+            fs.copyFileSync(sourcePath, dest);
+            fs.chmodSync(dest, 0o755);
+        } catch (e) {
+            console.warn(`Could not copy to ${dest}:`, e.message);
+        }
+    }
+}
+
+const ffmpegNames = [];
+const ffprobeNames = [];
 
 if (osName === 'win32') {
-    targetTriple = 'x86_64-pc-windows-msvc';
-    ext = '.exe';
+    ffmpegNames.push('ffmpeg-x86_64-pc-windows-msvc.exe', 'ffmpeg.exe');
+    ffprobeNames.push('ffprobe-x86_64-pc-windows-msvc.exe', 'ffprobe.exe');
 } else if (osName === 'darwin') {
-    targetTriple = arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
+    // Both Apple Silicon and Intel Macs
+    ffmpegNames.push('ffmpeg-aarch64-apple-darwin', 'ffmpeg-x86_64-apple-darwin', 'ffmpeg');
+    ffprobeNames.push('ffprobe-aarch64-apple-darwin', 'ffprobe-x86_64-apple-darwin', 'ffprobe');
 } else if (osName === 'linux') {
-    targetTriple = 'x86_64-unknown-linux-gnu';
+    ffmpegNames.push('ffmpeg-x86_64-unknown-linux-gnu', 'ffmpeg-aarch64-unknown-linux-gnu', 'ffmpeg');
+    ffprobeNames.push('ffprobe-x86_64-unknown-linux-gnu', 'ffprobe-aarch64-unknown-linux-gnu', 'ffprobe');
 } else {
     console.warn('Unsupported platform for setting up ffmpeg-static');
     process.exit(0);
 }
 
-const ffmpegDest = path.join(binDir, `ffmpeg-${targetTriple}${ext}`);
-const ffprobeDest = path.join(binDir, `ffprobe-${targetTriple}${ext}`);
-
-// Copy FFmpeg
-if (ffmpegStaticPath && fs.existsSync(ffmpegStaticPath)) {
-    console.log(`Copying ffmpeg from ${ffmpegStaticPath} to ${ffmpegDest}`);
-    fs.copyFileSync(ffmpegStaticPath, ffmpegDest);
-    fs.chmodSync(ffmpegDest, 0o755);
-}
-
-// Copy FFprobe
-if (ffprobeStatic && ffprobeStatic.path && fs.existsSync(ffprobeStatic.path)) {
-    console.log(`Copying ffprobe from ${ffprobeStatic.path} to ${ffprobeDest}`);
-    fs.copyFileSync(ffprobeStatic.path, ffprobeDest);
-    fs.chmodSync(ffprobeDest, 0o755);
-}
+copyToDestinations(ffmpegStaticPath, ffmpegNames);
+copyToDestinations(ffprobeStatic && ffprobeStatic.path, ffprobeNames);
 
 console.log('Successfully set up FFmpeg sidecars for Tauri.');

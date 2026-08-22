@@ -120,13 +120,18 @@ pub struct ProjectData {
 // --- DATABASE INITIALIZATION ---
 
 pub async fn init_db(db_path: &str) -> Result<Pool<Sqlite>, sqlx::Error> {
-    if !std::path::Path::new(db_path).exists() {
-        fs::File::create(db_path).unwrap();
+    if let Some(parent) = std::path::Path::new(db_path).parent() {
+        let _ = fs::create_dir_all(parent);
     }
     
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&format!("sqlite://{}", db_path))
+        .connect_with(options)
         .await?;
 
     // MIGRATION: Schema Setup
@@ -376,7 +381,9 @@ pub async fn migrate_json_to_db(state: State<'_, AppState>, json_string: String)
 
     // 3. Serialize flexible portions
     let mut config = parsed.clone();
-    config.as_object_mut().unwrap().remove("tracks");
+    if let Some(obj) = config.as_object_mut() {
+        obj.remove("tracks");
+    }
 
     // 4. Map directly to our standard format and save
     let mut track_vec = Vec::new();
