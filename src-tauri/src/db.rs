@@ -453,7 +453,7 @@ pub async fn generate_stress_test(
         let start_time = (i as f64) * 2.5; // Every 2.5 seconds
         let duration = 1.8;
         let file_path = dub_dir.join(format!("stress_{}.wav", i));
-        let file_path_str = file_path.to_str().unwrap().to_string();
+        let file_path_str = file_path.to_string_lossy().to_string();
 
         // Create a minimal silent WAV (44.1kHz, 16bit, mono, 1sec)
         let spec = hound::WavSpec {
@@ -689,7 +689,7 @@ pub async fn check_project_assets(
                                 for entry in entries.flatten() {
                                     if entry.file_name() == name {
                                         // Found: update database
-                                        let new_path = entry.path().to_str().unwrap().to_string();
+                                        let new_path = entry.path().to_string_lossy().to_string();
                                         sqlx::query("UPDATE segments SET file_path = ? WHERE id = ?")
                                             .bind(&new_path)
                                             .bind(&id)

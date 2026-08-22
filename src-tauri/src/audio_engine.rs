@@ -246,13 +246,22 @@ pub fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
         if let Ok(input_devices) = host.input_devices() {
             for device in input_devices {
                 if let Ok(name) = device.name() {
-                    let default_config = device.default_input_config().ok();
-                    let channels = default_config.as_ref().map(|c| c.channels()).unwrap_or(0);
-                    let sample_rate = default_config.as_ref().map(|c| c.sample_rate().0).unwrap_or(0);
+                    let mut channels = 0;
+                    let mut sample_rate = 48000;
+
+                    if let Ok(default_config) = device.default_input_config() {
+                        channels = default_config.channels();
+                        sample_rate = default_config.sample_rate().0;
+                    } else if let Ok(mut supported) = device.supported_input_configs() {
+                        if let Some(conf) = supported.next() {
+                            channels = conf.channels();
+                            sample_rate = conf.max_sample_rate().0;
+                        }
+                    }
 
                     log_debug(&format!("  Found device: '{}', Channels: {}, SampleRate: {}", name, channels, sample_rate));
 
-                    // Add only devices with inputs
+                    // Add only devices with inputs (or fallback to 1 channel if macOS report is zero-config)
                     if channels > 0 {
                         devices.push(AudioDevice {
                             id: name.clone(), 
@@ -265,6 +274,18 @@ pub fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
                 }
             }
         }
+    }
+
+    // Safe fallback device if no physical/virtual input devices are discovered (e.g. initial launch before mic permission dialog or headless environment)
+    if devices.is_empty() {
+        log_debug("No physical input devices enumerated. Adding safe default audio device.");
+        devices.push(AudioDevice {
+            id: "default".to_string(),
+            name: "Default System Audio Device".to_string(),
+            host: if cfg!(target_os = "macos") { "CoreAudio".to_string() } else { "Default".to_string() },
+            default_sample_rate: 48000,
+            max_input_channels: 2,
+        });
     }
 
     log_debug(&format!("get_audio_devices found {} devices total", devices.len()));
@@ -621,8 +642,24 @@ pub async fn start_recording(
     // Trigger any implicit initializations cpal does when grabbing hosts
     let available_hosts = cpal::available_hosts();
 
-    // Search for the specific host requested by the frontend
+    // Search for the specific host requested by the frontend, with platform adaptation
     let mut host_id = cpal::default_host().id();
+    let effective_host_target = if cfg!(target_os = "macos") {
+        if host_name_c.to_uppercase() == "ASIO" || host_name_c.to_uppercase() == "WASAPI" {
+            "CoreAudio".to_string()
+        } else {
+            host_name_c.clone()
+        }
+    } else if cfg!(target_os = "linux") {
+        if host_name_c.to_uppercase() == "ASIO" || host_name_c.to_uppercase() == "WASAPI" {
+            "ALSA".to_string()
+        } else {
+            host_name_c.clone()
+        }
+    } else {
+        host_name_c.clone()
+    };
+
     for id in &available_hosts {
         let id_name = {
             #[cfg(target_os = "windows")]
@@ -638,7 +675,7 @@ pub async fn start_recording(
                 format!("{:?}", id)
             }
         };
-        if id_name.to_uppercase() == host_name_c.to_uppercase() {
+        if id_name.to_uppercase() == effective_host_target.to_uppercase() {
             host_id = *id;
             break;
         }
@@ -648,8 +685,8 @@ pub async fn start_recording(
     let host = match cpal::host_from_id(host_id) {
         Ok(h) => h,
         Err(e) => { 
-            log_debug(&format!("Host from ID ERROR: {}", e));
-            return Err(e.to_string());
+            log_debug(&format!("Host from ID ERROR: {}, falling back to default host", e));
+            cpal::default_host()
         }
     };
 
@@ -701,26 +738,48 @@ pub async fn start_recording(
                 }
             }
 
+            // 5. If still none, try default input device of default host
+            if found_device.is_none() {
+                found_device = cpal::default_host().default_input_device();
+            }
+
             match found_device {
                 Some(d) => d,
                 None => { 
                     log_debug("Device not found in Main Thread list (even after fallbacks)");
-                    return Err("Device not found".into());
+                    return Err("Audio input device not accessible. Please verify microphone permissions.".into());
                 }
             }
         },
         Err(e) => { 
-            log_debug(&format!("input_devices() ERROR: {}", e));
-            return Err(e.to_string());
+            log_debug(&format!("input_devices() ERROR: {}, trying default input device", e));
+            match host.default_input_device() {
+                Some(d) => d,
+                None => return Err(format!("No input devices available: {}", e)),
+            }
         }
     };
 
-    log_debug("Querying default input config on Main Thread...");
+    log_debug("Querying input config on Main Thread...");
     let default_config = match device.default_input_config() {
         Ok(c) => c,
         Err(e) => { 
-            log_debug(&format!("default_input_config() ERROR: {}", e));
-            return Err(e.to_string());
+            log_debug(&format!("default_input_config() failed: {}, querying supported_input_configs fallback...", e));
+            match device.supported_input_configs() {
+                Ok(mut configs) => {
+                    if let Some(conf_range) = configs.next() {
+                        let target_sr = if conf_range.max_sample_rate().0 >= sample_rate && conf_range.min_sample_rate().0 <= sample_rate {
+                            cpal::SampleRate(sample_rate)
+                        } else {
+                            conf_range.max_sample_rate()
+                        };
+                        conf_range.with_sample_rate(target_sr)
+                    } else {
+                        return Err(format!("Device has no supported input stream configurations: {}", e));
+                    }
+                }
+                Err(err) => return Err(format!("Device configuration error: {}", err)),
+            }
         }
     };
 
@@ -1065,7 +1124,7 @@ pub async fn force_stop_all(state: State<'_, AudioState>) -> Result<(), String> 
 
 #[tauri::command]
 pub async fn check_crashes(app_handle: AppHandle) -> Result<Vec<RecoveryData>, String> {
-    let app_data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_data_dir = app_handle.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("com.dubstudio.pro"));
     let recovery_dir = app_data_dir.join("recovery");
     
     if !recovery_dir.exists() {

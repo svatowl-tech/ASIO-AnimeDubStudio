@@ -10,6 +10,17 @@
     <true/>
     <key>NSRequiresAquaSystemAppearance</key>
     <false/>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>DubStudio Pro requires access to Documents to open and save your dubbing projects.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>DubStudio Pro requires access to Downloads to import media assets.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>DubStudio Pro requires access to Desktop to import and export project files.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
 </dict>
 </plist>
 

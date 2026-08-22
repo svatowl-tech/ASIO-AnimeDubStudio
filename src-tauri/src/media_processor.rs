@@ -47,13 +47,14 @@ pub async fn concat_backstage_videos(
 
     // Склеиваем видео без перекодирования (stream copy), если это возможно
     // Внимание: это работает стабильно, если все исходники имеют одинаковые параметры (кодек, разрешение)
+    let temp_file_str = temp_file_path.to_string_lossy().to_string();
     let output = tokio::process::Command::new(crate::get_ffmpeg_path())
         .args(&[
             "-nostdin",
             "-y",
             "-f", "concat",
             "-safe", "0",
-            "-i", temp_file_path.to_str().unwrap(),
+            "-i", &temp_file_str,
             "-c", "copy",
             &output_path
         ])
@@ -126,12 +127,13 @@ pub async fn merge_segments(
     
     fs::write(&concat_file_path, concat_content).map_err(|e| e.to_string())?;
 
+    let concat_str = concat_file_path.to_string_lossy().to_string();
     // 3. Run FFmpeg Concat (Fastest, no re-encoding for same-spec WAVs)
     let args = vec![
         "-y".to_string(),
         "-f".to_string(), "concat".to_string(),
         "-safe".to_string(), "0".to_string(),
-        "-i".to_string(), concat_file_path.to_str().unwrap().to_string(),
+        "-i".to_string(), concat_str,
         "-c".to_string(), "copy".to_string(),
         output_path.clone(),
     ];
@@ -204,7 +206,7 @@ pub async fn merge_project_segments(
 
     // Sort segments by start time
     let mut sorted_segments = segments;
-    sorted_segments.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap());
+    sorted_segments.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap_or(std::cmp::Ordering::Equal));
 
     // Detect spec from first available segment
     let first_valid_path = sorted_segments.iter()

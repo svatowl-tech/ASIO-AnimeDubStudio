@@ -161,18 +161,21 @@ pub async fn finalize_backstage_session(project_path: String, session_id: String
     let mp4_name = format!("backstage_session_{}_fixed.mp4", session_id);
     let mp4_path = takes_dir.join(&mp4_name);
     
+    let webm_str = webm_path.to_string_lossy().to_string();
+    let mp4_str = mp4_path.to_string_lossy().to_string();
+
     let mut cmd = std::process::Command::new(crate::get_ffmpeg_path());
     cmd.args(&[
         "-nostdin",
         "-y",
-        "-i", webm_path.to_str().unwrap(),
+        "-i", &webm_str,
         "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         "-preset", "ultrafast",
         "-c:a", "aac",
         "-b:a", "192k",
-        mp4_path.to_str().unwrap()
+        &mp4_str
     ]);
     
     #[cfg(target_os = "windows")]
@@ -191,12 +194,15 @@ pub async fn finalize_backstage_session(project_path: String, session_id: String
     // Optionally remove the webm file to save space
     let _ = fs::remove_file(&webm_path);
     
-    Ok(mp4_path.to_str().unwrap().to_string())
+    Ok(mp4_str)
 }
 
 #[tauri::command]
 pub async fn save_media_recorder_take(project_path: String, role: String, data: Vec<u8>) -> Result<String, String> {
-    let epoch_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let epoch_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_else(|_| std::time::Duration::from_millis(0))
+        .as_millis();
     
     // Use hierarchy: {project_path}/takes/
     let takes_dir = Path::new(&project_path).join("takes");
@@ -214,12 +220,14 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
     fs::write(&temp_path, data).map_err(|e| e.to_string())?;
 
     let target_path = takes_dir.join(&file_name);
+    let temp_path_str = temp_path.to_string_lossy().to_string();
+    let target_path_str = target_path.to_string_lossy().to_string();
 
     // Use FFmpeg to convert
     // If backstage, convert to MP4 with consistent specs for later concatenation
     // If not backstage (audio), convert to WAV
     let mut command = std::process::Command::new(crate::get_ffmpeg_path());
-    command.arg("-nostdin").arg("-y").arg("-i").arg(temp_path.to_str().unwrap());
+    command.arg("-nostdin").arg("-y").arg("-i").arg(&temp_path_str);
     
     if is_backstage {
         command.args(&[
@@ -230,13 +238,13 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
             "-c:a", "aac",
             "-ar", "48000",
             "-ac", "1",
-            target_path.to_str().unwrap()
+            &target_path_str
         ]);
     } else {
         command.args(&[
             "-ar", "48000",
             "-ac", "1",
-            target_path.to_str().unwrap()
+            &target_path_str
         ]);
     }
 
@@ -249,7 +257,7 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
         return Err(format!("FFmpeg failed: {}", String::from_utf8_lossy(&status.stderr)));
     }
 
-    Ok(target_path.to_str().unwrap().to_string())
+    Ok(target_path_str)
 }
 
 #[tauri::command]
@@ -301,7 +309,12 @@ pub fn copy_file_to_project(src: String, dest_dir: String) -> Result<String, Str
     let file_name = src_path.file_name().ok_or("Invalid source file name")?;
     
     let dest_path = Path::new(&dest_dir).join(file_name);
+    if let Some(parent) = dest_path.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
     fs::copy(&src, &dest_path).map_err(|e| format!("Failed to copy file: {}", e))?;
     
-    Ok(dest_path.to_str().unwrap().to_string())
+    Ok(dest_path.to_string_lossy().to_string())
 }

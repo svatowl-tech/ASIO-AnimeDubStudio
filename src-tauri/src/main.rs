@@ -67,10 +67,10 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
-fn open_devtools(window: tauri::WebviewWindow) {
+fn open_devtools(_window: tauri::WebviewWindow) {
     #[cfg(debug_assertions)]
     {
-        window.open_devtools();
+        _window.open_devtools();
     }
 }
 

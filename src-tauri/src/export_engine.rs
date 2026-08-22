@@ -63,7 +63,7 @@ pub async fn export_all_stems(
         let mut segments: Vec<_> = track.segments.iter()
             .cloned()
             .collect();
-        segments.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap());
+        segments.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap_or(std::cmp::Ordering::Equal));
 
         for seg in segments {
             let adjusted_start = seg.start_time;
@@ -122,7 +122,7 @@ pub async fn export_all_stems(
     // Cleanup
     let _ = fs::remove_dir_all(&temp_dir);
 
-    Ok(final_zip_path.to_str().unwrap().to_string())
+    Ok(final_zip_path.to_string_lossy().to_string())
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -272,7 +272,7 @@ pub async fn export_stems(
 
             cmd.arg("-filter_complex").arg(filter);
             cmd.arg("-c:a").arg(enc_clone);
-            cmd.arg(out_file.to_str().unwrap());
+            cmd.arg(out_file.to_string_lossy().to_string());
 
             let status = cmd.output().await.map_err(|e| e.to_string())?;
             if !status.status.success() {
@@ -372,19 +372,22 @@ pub async fn export_audio(
             
             filter.push_str(&format!(",volume={},adelay={}|{}", segment.gain, delay_ms, delay_ms));
             
+            let seg_path = segment.file_path.clone().unwrap_or_default();
+            let out_file_str = out_file.to_string_lossy().to_string();
+
             let status = Command::new(crate::get_ffmpeg_path())
                 .arg("-nostdin")
                 .arg("-y")
-                .arg("-i").arg(segment.file_path.as_ref().unwrap())
+                .arg("-i").arg(&seg_path)
                 .arg("-af").arg(&filter)
                 .arg("-c:a").arg("pcm_s16le")
-                .arg(out_file.to_str().unwrap())
+                .arg(&out_file_str)
                 .output()
                 .await
                 .map_err(|e| format!("Failed spawning ffmpeg: {}", e))?;
 
             if !status.status.success() {
-                return Err(format!("FFmpeg error processing {}: {}", segment.file_path.as_ref().unwrap(), String::from_utf8_lossy(&status.stderr)));
+                return Err(format!("FFmpeg error processing {}: {}", seg_path, String::from_utf8_lossy(&status.stderr)));
             }
 
             Ok::<PathBuf, String>(out_file)
@@ -412,7 +415,7 @@ pub async fn export_audio(
             let mut chunk_args = vec!["-nostdin".to_string(), "-y".to_string()];
             for path in chunk {
                 chunk_args.push("-i".to_string());
-                chunk_args.push(path.to_str().unwrap().to_string());
+                chunk_args.push(path.to_string_lossy().to_string());
             }
             if chunk.len() > 1 {
                 let filter = format!("amix=inputs={}:duration=longest:dropout_transition=0:normalize=0", chunk.len());
@@ -421,7 +424,7 @@ pub async fn export_audio(
             }
             chunk_args.push("-c:a".to_string());
             chunk_args.push("pcm_s16le".to_string());
-            chunk_args.push(out_file.to_str().unwrap().to_string());
+            chunk_args.push(out_file.to_string_lossy().to_string());
 
             let status = Command::new(crate::get_ffmpeg_path())
                 .args(&chunk_args)
@@ -442,7 +445,7 @@ pub async fn export_audio(
     
     for path in &current_files {
         mix_args.push("-i".to_string());
-        mix_args.push(path.to_str().unwrap().to_string());
+        mix_args.push(path.to_string_lossy().to_string());
     }
 
     if current_files.len() > 1 {
@@ -519,7 +522,7 @@ pub async fn quick_preview_export(
     let dest = Path::new(&project_path).join(format!("preview_{}.wav", segment_id));
     fs::copy(src, &dest).map_err(|e| format!("Failed to copy segment: {}", e))?;
 
-    Ok(dest.to_str().unwrap().to_string())
+    Ok(dest.to_string_lossy().to_string())
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -656,10 +659,11 @@ pub async fn batch_export(
                 overlaps.len() + 1
             ));
 
+            let out_file_str = out_file.to_string_lossy().to_string();
             cmd.arg("-filter_complex").arg(filter);
             cmd.arg("-t").arg(format!("{:.4}", orig_seg.duration));
             cmd.arg("-c:a").arg("pcm_s16le");
-            cmd.arg(out_file.to_str().unwrap());
+            cmd.arg(&out_file_str);
 
             let output = cmd.output().await.map_err(|e| format!("FFmpeg execution failed: {}", e))?;
             if !output.status.success() {
@@ -667,7 +671,7 @@ pub async fn batch_export(
                 return Err(format!("FFmpeg error during {} render: {}", final_name, stderr));
             }
 
-            Ok::<String, String>(out_file.to_str().unwrap().to_string())
+            Ok::<String, String>(out_file_str)
         });
 
         handles.push(handle);
@@ -775,7 +779,7 @@ pub async fn export_audio_book(
     // If output_path is just a filename, put it in project_path
     let p = Path::new(&output_path);
     if p.parent() == Some(Path::new("")) {
-        final_output_path = Path::new(&project_path).join(output_path).to_str().unwrap().to_string();
+        final_output_path = Path::new(&project_path).join(output_path).to_string_lossy().to_string();
     }
 
     args.push(final_output_path.clone());
@@ -851,16 +855,18 @@ pub async fn export_backstage_video(
     
     if let Some(stderr) = child.stderr.take() {
         let mut reader = BufReader::new(stderr).lines();
-        let re = regex::Regex::new(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})").unwrap();
+        let re_res = regex::Regex::new(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})");
 
         let app_handle_clone = app_handle.clone();
         tokio::spawn(async move {
             while let Ok(Some(line)) = reader.next_line().await {
-                if let Some(caps) = re.captures(&line) {
-                    let _ = app_handle_clone.emit("export-progress", serde_json::json!({
-                        "operation": "Exporting Backstage Video",
-                        "time": caps[0].to_string()
-                    }));
+                if let Ok(ref re) = re_res {
+                    if let Some(caps) = re.captures(&line) {
+                        let _ = app_handle_clone.emit("export-progress", serde_json::json!({
+                            "operation": "Exporting Backstage Video",
+                            "time": caps[0].to_string()
+                        }));
+                    }
                 }
             }
         });
@@ -1032,16 +1038,18 @@ pub async fn export_blooper(
     
     if let Some(stderr) = child.stderr.take() {
         let mut reader = tokio::io::BufReader::new(stderr).lines();
-        let re = regex::Regex::new(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})").unwrap();
+        let re_res = regex::Regex::new(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})");
 
         let app_handle_clone = app_handle.clone();
         tokio::spawn(async move {
             while let Ok(Some(line)) = reader.next_line().await {
-                if let Some(caps) = re.captures(&line) {
-                    let _ = app_handle_clone.emit("export-progress", serde_json::json!({
-                        "operation": "Сохранение неудачного дубля...",
-                        "time": caps[0].to_string()
-                    }));
+                if let Ok(ref re) = re_res {
+                    if let Some(caps) = re.captures(&line) {
+                        let _ = app_handle_clone.emit("export-progress", serde_json::json!({
+                            "operation": "Сохранение неудачного дубля...",
+                            "time": caps[0].to_string()
+                        }));
+                    }
                 }
             }
         });
@@ -1221,7 +1229,11 @@ pub async fn export_backstage_assemble(
     println!("[export_backstage_assemble] Начало экспорта. Всего блоков: {}. Output: {}", blocks.len(), output_path);
 
     let out_dir = Path::new(&output_path).parent().unwrap_or(Path::new(""));
-    let temp_dir = out_dir.join(format!("temp_assemble_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()));
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+        .as_secs();
+    let temp_dir = out_dir.join(format!("temp_assemble_{}", now_secs));
     fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
 
     let mut concat_list = String::new();
@@ -1381,7 +1393,8 @@ pub async fn export_backstage_assemble(
         cmd.arg("-map").arg("[a_out]");
         cmd.arg("-c:v").arg("libx264").arg("-preset").arg("fast").arg("-crf").arg("23");
         cmd.arg("-c:a").arg("aac").arg("-b:a").arg("192k").arg("-ar").arg("48000").arg("-ac").arg("2");
-        cmd.arg(chunk_path.to_str().unwrap());
+        let chunk_path_str = chunk_path.to_string_lossy().to_string();
+        cmd.arg(&chunk_path_str);
         
         println!("[export_backstage_assemble] Рендеринг блока {}/{}", i + 1, blocks.len());
         let output = cmd.output().await.map_err(|e| e.to_string())?;
@@ -1402,13 +1415,14 @@ pub async fn export_backstage_assemble(
     f.write_all(concat_list.as_bytes()).map_err(|e| e.to_string())?;
 
     println!("[export_backstage_assemble] Склеивание {} блоков...", chunk_files.len());
+    let concat_file_str = concat_file.to_string_lossy().to_string();
     let mut concat_cmd = Command::new(crate::get_ffmpeg_path());
     concat_cmd.args([
         "-nostdin",
         "-y",
         "-f", "concat",
         "-safe", "0",
-        "-i", concat_file.to_str().unwrap(),
+        "-i", &concat_file_str,
         "-c", "copy",
         &output_path
     ]);

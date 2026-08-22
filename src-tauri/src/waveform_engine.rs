@@ -268,7 +268,7 @@ pub async fn generate_waveform_peaks(app_handle: AppHandle, file_path: String, p
             .unwrap_or_default()
             .as_millis();
         let temp_wav = temp_dir.join(format!("{}_{}_temp_peaks.wav", fname, random_id));
-        let temp_wav_str = temp_wav.to_str().unwrap().to_string();
+        let temp_wav_str = temp_wav.to_string_lossy().to_string();
         
         log_debug(&format!("Converting to temp wav for peaks: {}", temp_wav_str));
         
