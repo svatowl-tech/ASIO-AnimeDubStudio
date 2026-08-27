@@ -293,7 +293,7 @@ export const DocumentImportModal: React.FC<DocumentImportModalProps> = ({
                     type="number"
                     min={1}
                     max={60}
-                    value={fixedSeconds}
+                    value={typeof fixedSeconds === 'number' && !isNaN(fixedSeconds) ? fixedSeconds : ''}
                     onChange={(e) => setFixedSeconds(Number(e.target.value))}
                     className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500"
                   />
@@ -307,7 +307,7 @@ export const DocumentImportModal: React.FC<DocumentImportModalProps> = ({
                     type="number"
                     min={5}
                     max={40}
-                    value={charsPerSecond}
+                    value={typeof charsPerSecond === 'number' && !isNaN(charsPerSecond) ? charsPerSecond : ''}
                     onChange={(e) => setCharsPerSecond(Number(e.target.value))}
                     className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500"
                   />
@@ -320,7 +320,7 @@ export const DocumentImportModal: React.FC<DocumentImportModalProps> = ({
                   <input
                     type="number"
                     min={10}
-                    value={targetDuration}
+                    value={typeof targetDuration === 'number' && !isNaN(targetDuration) ? targetDuration : ''}
                     onChange={(e) => setTargetDuration(Number(e.target.value))}
                     className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500"
                   />
@@ -334,7 +334,7 @@ export const DocumentImportModal: React.FC<DocumentImportModalProps> = ({
                   step={0.1}
                   min={0}
                   max={10}
-                  value={pauseSeconds}
+                  value={typeof pauseSeconds === 'number' && !isNaN(pauseSeconds) ? pauseSeconds : ''}
                   onChange={(e) => setPauseSeconds(Number(e.target.value))}
                   className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500"
                 />

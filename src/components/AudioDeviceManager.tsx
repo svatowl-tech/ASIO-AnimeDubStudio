@@ -265,8 +265,11 @@ export const AudioDeviceManager = ({
               min="-70"
               max="-10"
               step="1"
-              value={settings.noiseGateThreshold || -45}
-              onChange={(e) => onSettingsChange({ ...settings, noiseGateThreshold: parseInt(e.target.value) })}
+              value={typeof settings.noiseGateThreshold === 'number' && !isNaN(settings.noiseGateThreshold) ? settings.noiseGateThreshold : -45}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                onSettingsChange({ ...settings, noiseGateThreshold: isNaN(val) ? -45 : val });
+              }}
               disabled={!settings.isNoiseGateEnabled}
               className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer disabled:opacity-30"
             />

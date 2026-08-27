@@ -416,8 +416,11 @@ const Sidebar: React.FC<SidebarProps> = ({
                 min="-10"
                 max="10"
                 step="0.1"
-                value={project.subtitlesOffset || 0}
-                onChange={(e) => onShiftSubtitles(parseFloat(e.target.value))}
+                value={typeof project.subtitlesOffset === 'number' && !isNaN(project.subtitlesOffset) ? project.subtitlesOffset : 0}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value);
+                  onShiftSubtitles(isNaN(val) ? 0 : val);
+                }}
                 className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-rose-500"
               />
               <button

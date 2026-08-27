@@ -61,7 +61,7 @@ const QuickImportModal: React.FC<QuickImportModalProps> = ({
                   type="number"
                   min="1"
                   max="60"
-                  value={duration}
+                  value={typeof duration === 'number' && !isNaN(duration) ? duration : 5}
                   onChange={(e) => onDurationChange(parseInt(e.target.value) || 5)}
                   className="w-20 bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
                 />

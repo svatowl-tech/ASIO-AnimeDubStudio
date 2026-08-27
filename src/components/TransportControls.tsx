@@ -172,8 +172,11 @@ const TransportControls: React.FC<TransportControlsProps> = ({
             min="10" 
             max="2000" 
             step="1"
-            value={zoomLevel} 
-            onChange={(e) => onZoomChange(Number(e.target.value))}
+            value={typeof zoomLevel === 'number' && !isNaN(zoomLevel) ? zoomLevel : 100} 
+            onChange={(e) => {
+              const val = Number(e.target.value);
+              onZoomChange(isNaN(val) ? 100 : val);
+            }}
             className="w-24 h-1 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
             title="Масштаб таймлайна"
           />

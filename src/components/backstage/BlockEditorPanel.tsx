@@ -40,8 +40,10 @@ export const BlockEditorPanel: React.FC<BlockEditorPanelProps> = ({
     );
   }
 
-  const activeStart = activeBlock.start ?? activeBlock.originalStart ?? 0;
-  const activeEnd = activeBlock.end ?? activeBlock.originalEnd ?? (activeStart + (activeBlock.duration || 0));
+  const rawStart = activeBlock.start ?? activeBlock.originalStart ?? 0;
+  const activeStart = typeof rawStart === 'number' && !isNaN(rawStart) ? rawStart : 0;
+  const rawEnd = activeBlock.end ?? activeBlock.originalEnd ?? (activeStart + (activeBlock.duration || 0));
+  const activeEnd = typeof rawEnd === 'number' && !isNaN(rawEnd) ? rawEnd : activeStart;
   const activeDuration = activeBlock.duration ?? (activeEnd - activeStart);
 
   return (
