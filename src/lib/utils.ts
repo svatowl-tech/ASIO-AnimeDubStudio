@@ -59,16 +59,21 @@ export const formatTimeHms = (seconds: number = 0): string => {
 
 export const getSafeFileUrl = (path: string | undefined): string | undefined => {
   if (!path) return undefined;
+  // If it's already a URL, return it
+  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('blob:') || path.startsWith('data:')) {
+    return path;
+  }
+  
+  const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
+  if (!isTauri) {
+    // In web preview / non-Tauri browser environment, avoid calling Tauri asset protocol
+    return path;
+  }
+
   try {
-    // If it's already a URL, return it
-    if (path.startsWith('http') || path.startsWith('blob:') || path.startsWith('data:')) {
-      return path;
-    }
-    
     const converted = convertFileSrc(path);
     return converted;
   } catch (e) {
-    console.error(`[getSafeFileUrl] CRITICAL: Failed to convert path "${path}":`, e);
     // On Windows, if absolute path fails, try normalized
     if (path.includes('\\')) {
       try {

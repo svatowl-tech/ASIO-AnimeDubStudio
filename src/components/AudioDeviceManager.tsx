@@ -47,7 +47,7 @@ export const AudioDeviceManager = ({
         
         setDevices(uniqueDevices);
       } catch (err) {
-        console.error("Error enumerating devices:", err);
+        console.warn("Could not enumerate full device list:", err);
       }
     };
     getDevices();

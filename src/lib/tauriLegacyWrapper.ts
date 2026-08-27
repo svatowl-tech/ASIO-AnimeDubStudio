@@ -397,7 +397,7 @@ export const tauriAPI = {
       
       return { success: true, data: { filePath: wavPath, peaks, duration } };
     } catch(err) {
-      console.error("Peak extract error, using fallback waveform:", err);
+      console.warn("Peak extract fallback waveform:", err);
       // Fallback: Try to get duration or assume 30s, and generate dummy peaks
       let duration = 30; // default
       try {
