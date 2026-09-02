@@ -1,4 +1,5 @@
 import { getSafeFileUrl, getFriendlyFileLoadErrorMessage, getTrackLinearVolume, getSegmentLinearGain } from '../lib/utils';
+import { isOriginalTrack } from '../lib/subtitleCoverage';
 
 const getSegmentUrl = (seg: any): string | null => {
   if (!seg) return null;
@@ -45,14 +46,85 @@ export class PlaybackEngine {
 
   constructor() {}
 
+  /**
+   * Ensures AudioContext and all master audio buses (Dubbing and Original/Video)
+   * are created and properly connected to destination.
+   */
+  private ensureAudioGraph(): AudioContext {
+    if (!this.audioContext) {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      this.audioContext = new AudioCtx({
+        latencyHint: 'interactive',
+        sampleRate: 48000,
+      });
+      console.log(`[PlaybackEngine] AudioContext initialized at ${this.audioContext.sampleRate}Hz`);
+    }
+
+    const ctx = this.audioContext;
+
+    // 1. Initialize / Re-verify Dubbing Bus
+    if (!this.dubbingGain) {
+      this.dubbingGain = ctx.createGain();
+    }
+    if (!this.dubbingDelay) {
+      this.dubbingDelay = ctx.createDelay(4.0);
+    }
+    const dubbingDelaySec = this.audioOffsetMs > 0 ? this.audioOffsetMs / 1000 : 0;
+    this.dubbingDelay.delayTime.value = dubbingDelaySec;
+
+    try { this.dubbingGain.disconnect(); } catch (e) {}
+    try { this.dubbingDelay.disconnect(); } catch (e) {}
+    this.dubbingGain.connect(this.dubbingDelay);
+    this.dubbingDelay.connect(ctx.destination);
+
+    // 2. Initialize / Re-verify Original/Video Bus
+    if (!this.videoGain) {
+      this.videoGain = ctx.createGain();
+      this.videoGain.gain.value = 1.0;
+    }
+    if (!this.videoDelay) {
+      this.videoDelay = ctx.createDelay(4.0);
+    }
+    const videoDelaySec = this.audioOffsetMs < 0 ? Math.abs(this.audioOffsetMs) / 1000 : 0;
+    this.videoDelay.delayTime.value = videoDelaySec;
+
+    try { this.videoGain.disconnect(); } catch (e) {}
+    try { this.videoDelay.disconnect(); } catch (e) {}
+    this.videoGain.connect(this.videoDelay);
+    this.videoDelay.connect(ctx.destination);
+
+    // 3. Initialize / Re-verify Reference Bus
+    if (!this.referenceGain) {
+      this.referenceGain = ctx.createGain();
+      this.referenceGain.gain.value = 0.0;
+    }
+    try { this.referenceGain.disconnect(); } catch (e) {}
+    this.referenceGain.connect(this.videoDelay);
+
+    // 4. Re-connect source nodes if bound
+    if (this.videoSource) {
+      try { this.videoSource.disconnect(); } catch (e) {}
+      this.videoSource.connect(this.videoGain);
+    }
+    if (this.referenceSource) {
+      try { this.referenceSource.disconnect(); } catch (e) {}
+      this.referenceSource.connect(this.referenceGain);
+    }
+
+    return ctx;
+  }
+
   public async setOutputDevice(deviceId: string) {
+    if (!deviceId || deviceId === 'default') {
+      return;
+    }
     const ctx = this.getContext();
     if (typeof (ctx as any).setSinkId === 'function') {
       try {
-        await (ctx as any).setSinkId(deviceId === 'default' ? '' : deviceId);
+        await (ctx as any).setSinkId(deviceId);
         console.log(`[PlaybackEngine] Output device set to: ${deviceId}`);
-      } catch (e) {
-        console.error(`[PlaybackEngine] Failed to set output device:`, e);
+      } catch (e: any) {
+        console.warn(`[PlaybackEngine] Could not set output device (${deviceId}): ${e?.message || e}`);
       }
     } else {
       console.warn(`[PlaybackEngine] setSinkId not supported in this browser.`);
@@ -69,10 +141,6 @@ export class PlaybackEngine {
     const ctx = this.getContext();
     
     if (this.dubbingDelay && this.videoDelay) {
-      // Dynamic balancing of delays to handle positive/negative offsets
-      // Positive offset = Dubs play LATER (delay Dubbing)
-      // Negative offset = Video/Reference plays LATER (delay Video)
-      
       const dubbingDelaySec = offsetMs > 0 ? offsetMs / 1000 : 0;
       const videoDelaySec = offsetMs < 0 ? Math.abs(offsetMs) / 1000 : 0;
       
@@ -84,32 +152,7 @@ export class PlaybackEngine {
   }
 
   private getContext(): AudioContext {
-    if (!this.audioContext) {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      this.audioContext = new AudioCtx({
-        latencyHint: 'interactive',
-        sampleRate: 48000,
-      });
-      
-      console.log(`[PlaybackEngine] AudioContext initialized at ${this.audioContext.sampleRate}Hz`);
-      // Initialize Dubbing Bus
-      this.dubbingGain = this.audioContext.createGain();
-      this.dubbingDelay = this.audioContext.createDelay(4.0); // Allow up to 4s compensation
-      this.dubbingGain.connect(this.dubbingDelay);
-      this.dubbingDelay.connect(this.audioContext.destination);
-
-      // Initialize Original/Video Bus
-      this.videoGain = this.audioContext.createGain();
-      this.videoDelay = this.audioContext.createDelay(4.0);
-      this.videoGain.connect(this.videoDelay);
-      this.videoDelay.connect(this.audioContext.destination);
-
-      // Reference track uses its own gain but same delay line as video
-      this.referenceGain = this.audioContext.createGain();
-      this.referenceGain.gain.value = 0;
-      this.referenceGain.connect(this.videoDelay); 
-    }
-    return this.audioContext;
+    return this.ensureAudioGraph();
   }
 
   public getCurrentTime(): number {
@@ -122,82 +165,59 @@ export class PlaybackEngine {
   }
 
   public bindVideoElement(video: HTMLMediaElement) {
-    if (this.boundVideoElement === video && this.videoSource) return;
-    const ctx = this.getContext();
+    if (!video) return;
+    if (this.boundVideoElement === video && this.videoSource) {
+      this.ensureAudioGraph();
+      return;
+    }
+    
     console.log("[PlaybackEngine] Binding video element for audio routing...");
+    const ctx = this.ensureAudioGraph();
     
     try {
-      if (this.videoSource && this.boundVideoElement !== video) {
-        console.log("[PlaybackEngine] Disconnecting previous video source");
-        this.videoSource.disconnect();
+      if (this.videoSource) {
+        try { this.videoSource.disconnect(); } catch (e) {}
+        this.videoSource = null;
       }
       
-      const isNewVideo = this.boundVideoElement !== video;
       this.boundVideoElement = video;
+      // Ensure media element is unmuted so it sends audio to MediaElementAudioSourceNode
+      video.muted = false;
       
-      if (!this.videoSource || isNewVideo) {
-         this.videoSource = ctx.createMediaElementSource(video);
-      }
+      this.videoSource = ctx.createMediaElementSource(video);
+      this.videoSource.connect(this.videoGain!);
       
-      if (!this.videoGain) {
-        this.videoGain = ctx.createGain();
-        this.videoGain.gain.value = 1.0;
-      }
-
-      if (!this.videoDelay) {
-        this.videoDelay = ctx.createDelay(4.0);
-        this.videoDelay.delayTime.value = this.audioOffsetMs < 0 ? Math.abs(this.audioOffsetMs) / 1000 : 0;
-      }
-      
-      this.videoSource.connect(this.videoGain);
-      // Ensure the master bus graph is consistent
-      if (this.videoGain.numberOfOutputs === 0) {
-         try { this.videoGain.disconnect(); } catch(e){}
-         this.videoGain.connect(this.videoDelay);
-      }
-      
-      console.log("[PlaybackEngine] Video element bound to master original bus");
-    } catch (e) {
-      console.warn("[PlaybackEngine] Failed to bind video element:", e);
+      console.log("[PlaybackEngine] Video element bound successfully to master original bus");
+    } catch (e: any) {
+      console.warn("[PlaybackEngine] Video element binding notice:", e?.message || e);
     }
   }
 
   public bindReferenceAudio(audio: HTMLMediaElement) {
-    if (this.boundReferenceElement === audio && this.referenceSource) return;
-    const ctx = this.getContext();
+    if (!audio) return;
+    if (this.boundReferenceElement === audio && this.referenceSource) {
+      this.ensureAudioGraph();
+      return;
+    }
+    
     console.log("[PlaybackEngine] Binding reference audio for routing...");
+    const ctx = this.ensureAudioGraph();
     
     try {
-      if (this.referenceSource && this.boundReferenceElement !== audio) {
-        this.referenceSource.disconnect();
+      if (this.referenceSource) {
+        try { this.referenceSource.disconnect(); } catch (e) {}
+        this.referenceSource = null;
       }
       
-      const isNewAudio = this.boundReferenceElement !== audio;
       this.boundReferenceElement = audio;
+      audio.muted = false;
       
-      if (!this.referenceSource || isNewAudio) {
-        this.referenceSource = ctx.createMediaElementSource(audio);
-      }
-      
-      if (!this.referenceGain) {
-        this.referenceGain = ctx.createGain();
-        this.referenceGain.gain.value = 0.0;
-      }
-      
-      this.referenceSource.connect(this.referenceGain);
-      
-      // Route through videoDelay if available
-      if (this.videoDelay) {
-         try { this.referenceGain.disconnect(); } catch(e) {}
-         this.referenceGain.connect(this.videoDelay);
-      } else {
-         try { this.referenceGain.disconnect(); } catch(e) {}
-         this.referenceGain.connect(ctx.destination);
-      }
+      this.referenceSource = ctx.createMediaElementSource(audio);
+      this.referenceSource.connect(this.referenceGain!);
       
       console.log("[PlaybackEngine] Reference audio bound to original bus");
-    } catch (e) {
-      console.warn("[PlaybackEngine] Failed to bind reference audio:", e);
+    } catch (e: any) {
+      console.warn("[PlaybackEngine] Reference audio binding notice:", e?.message || e);
     }
   }
 
@@ -452,17 +472,16 @@ export class PlaybackEngine {
     // (Drift correction moved to performSync)
 
     const anySolo = tracks.some(t => t.isSolo);
-    const originalTrack = tracks.find(t => {
-      const n = t.name?.toLowerCase() || '';
-      return n.includes('оригинал') || n.includes('original');
-    });
+    const originalTrack = tracks.find(t => isOriginalTrack(t));
     const referenceTrack = tracks.find(t => t.id === 'reference-track' || (t.name?.toLowerCase().includes('reference')));
 
     if (this.videoGain) {
       const isOriginalActive = anySolo 
         ? (originalTrack?.isSolo || false) 
         : !(originalTrack?.isMuted || false);
-      const targetVolume = isOriginalActive ? getTrackLinearVolume(originalTrack?.volume) : 0;
+      const targetVolume = isOriginalActive 
+        ? (originalTrack ? getTrackLinearVolume(originalTrack.volume) : 1.0) 
+        : 0;
       this.videoGain.gain.setTargetAtTime(targetVolume, now, 0.03);
     }
 
@@ -470,7 +489,9 @@ export class PlaybackEngine {
       const isRefActive = anySolo
         ? (referenceTrack?.isSolo || false)
         : !(referenceTrack?.isMuted || false);
-      const targetVolume = isRefActive ? getTrackLinearVolume(referenceTrack?.volume) : 0;
+      const targetVolume = isRefActive 
+        ? (referenceTrack ? getTrackLinearVolume(referenceTrack.volume) : 1.0) 
+        : 0;
       this.referenceGain.gain.setTargetAtTime(targetVolume, now, 0.03);
     }
 
@@ -479,8 +500,7 @@ export class PlaybackEngine {
       : tracks.filter(t => !t.isMuted);
 
     for (const track of activeTracks) {
-      const lowerName = track.name?.toLowerCase() || '';
-      const isOriginalOrRef = lowerName.includes('оригинал') || lowerName.includes('original') || track.id === 'reference-track' || lowerName.includes('reference');
+      const isOriginalOrRef = isOriginalTrack(track);
       if (isOriginalOrRef && !this.playOriginalTrackSegments) {
         continue;
       }
@@ -588,7 +608,7 @@ export class PlaybackEngine {
               currentMonoNode = monoNode;
             }
 
-            const isOriginalOrRefTrack = lowerTrackName.includes('оригинал') || lowerTrackName.includes('original') || track.id === 'reference-track' || lowerTrackName.includes('reference');
+            const isOriginalOrRefTrack = isOriginalTrack(track);
             if (isOriginalOrRefTrack) {
               gainNode.connect(this.videoGain || ctx.destination);
             } else {
@@ -729,17 +749,16 @@ export class PlaybackEngine {
     const anySolo = tracks.some(t => t.isSolo);
     
     // Update Video/Reference gains
-    const originalTrack = tracks.find(t => {
-      const n = t.name?.toLowerCase() || '';
-      return n.includes('оригинал') || n.includes('original');
-    });
+    const originalTrack = tracks.find(t => isOriginalTrack(t));
     const referenceTrack = tracks.find(t => t.id === 'reference-track' || (t.name?.toLowerCase().includes('reference')));
 
     if (this.videoGain) {
       const isOriginalActive = anySolo 
         ? (originalTrack?.isSolo || false) 
         : !(originalTrack?.isMuted || false);
-      const targetVolume = isOriginalActive ? getTrackLinearVolume(originalTrack?.volume) : 0;
+      const targetVolume = isOriginalActive 
+        ? (originalTrack ? getTrackLinearVolume(originalTrack.volume) : 1.0) 
+        : 0;
       this.videoGain.gain.setTargetAtTime(targetVolume, ctx.currentTime, 0.03);
     }
 
@@ -747,7 +766,9 @@ export class PlaybackEngine {
       const isRefActive = anySolo
         ? (referenceTrack?.isSolo || false)
         : !(referenceTrack?.isMuted || false);
-      const targetVolume = isRefActive ? getTrackLinearVolume(referenceTrack?.volume) : 0;
+      const targetVolume = isRefActive 
+        ? (referenceTrack ? getTrackLinearVolume(referenceTrack.volume) : 1.0) 
+        : 0;
       this.referenceGain.gain.setTargetAtTime(targetVolume, ctx.currentTime, 0.03);
     }
 

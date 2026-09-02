@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, RefObject } from 'react';
 import { Project } from '../types';
 import { playbackEngine } from '../services/playbackEngine';
 import { logger } from '../lib/logger';
+import { isOriginalTrack } from '../lib/subtitleCoverage';
 
 export const useTimelineState = (
   project: Project | null,
@@ -71,7 +72,7 @@ export const useTimelineState = (
             setIsPlaying(true);
             if (project) {
               const tracksToPlay = [...project.tracks];
-              const originalsTrack = project.tracks.find(t => t.name === 'Оригинал');
+              const originalsTrack = project.tracks.find(t => isOriginalTrack(t));
               
               if (project.referenceAudioPath && (!originalsTrack || originalsTrack.segments.length === 0)) {
                 const refPath = project.referenceAudioPath;
@@ -105,7 +106,7 @@ export const useTimelineState = (
                 setIsPlaying(true);
                 if (project) {
                   const tracksToPlay = [...project.tracks];
-                  const originalsTrack = project.tracks.find(t => t.name === 'Оригинал');
+                  const originalsTrack = project.tracks.find(t => isOriginalTrack(t));
                   if (project.referenceAudioPath && (!originalsTrack || originalsTrack.segments.length === 0)) {
                     tracksToPlay.push({
                       id: 'reference-track',
