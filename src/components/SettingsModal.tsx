@@ -80,18 +80,17 @@ const SettingsModal: React.FC = () => {
                     <div className="space-y-2 pt-2 border-t border-white/5">
                       <div className="flex justify-between text-[10px] font-bold text-zinc-500 uppercase tracking-tighter">
                         <span>Порог (Threshold)</span>
-                        <span>{typeof project?.audioSettings?.limiterThreshold === 'number' && !isNaN(project.audioSettings.limiterThreshold) ? project.audioSettings.limiterThreshold : -9} дБ</span>
+                        <span>{project?.audioSettings?.limiterThreshold ?? -9} дБ</span>
                       </div>
                       <input 
                         type="range" 
                         min="-30" 
                         max="0" 
                         step="1"
-                        value={typeof project?.audioSettings?.limiterThreshold === 'number' && !isNaN(project.audioSettings.limiterThreshold) ? project.audioSettings.limiterThreshold : -9}
+                        value={project?.audioSettings?.limiterThreshold ?? -9}
                         onChange={(e) => {
                           const settings = project?.audioSettings || {};
-                          const val = parseFloat(e.target.value);
-                          onProjectUpdate({ audioSettings: { ...settings, limiterThreshold: isNaN(val) ? -9 : val } });
+                          onProjectUpdate({ audioSettings: { ...settings, limiterThreshold: parseFloat(e.target.value) } });
                         }}
                         className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
                       />
@@ -108,7 +107,7 @@ const SettingsModal: React.FC = () => {
                         <div className="text-xs font-bold text-white">Системное смещение</div>
                         <div className="text-[10px] text-zinc-500">Компенсирует задержку записи</div>
                       </div>
-                      <div className="text-xl font-black text-indigo-400 font-mono">{typeof project?.audioOffsetMs === 'number' && !isNaN(project.audioOffsetMs) ? project.audioOffsetMs : 0} мс</div>
+                      <div className="text-xl font-black text-indigo-400 font-mono">{project?.audioOffsetMs || 0} мс</div>
                     </div>
                     
                     <button 
@@ -122,18 +121,15 @@ const SettingsModal: React.FC = () => {
                   <div className="space-y-2">
                     <div className="flex justify-between text-[10px] font-bold text-zinc-500 uppercase tracking-tighter">
                       <span>Ручная настройка</span>
-                      <span>{typeof project?.audioOffsetMs === 'number' && !isNaN(project.audioOffsetMs) ? project.audioOffsetMs : 0} мс</span>
+                      <span>{project?.audioOffsetMs || 0} мс</span>
                     </div>
                     <input 
                       type="range" 
                       min="-500" 
                       max="500" 
                       step="1"
-                      value={typeof project?.audioOffsetMs === 'number' && !isNaN(project.audioOffsetMs) ? project.audioOffsetMs : 0}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value);
-                        onProjectUpdate({ audioOffsetMs: isNaN(val) ? 0 : val });
-                      }}
+                      value={project?.audioOffsetMs || 0}
+                      onChange={(e) => onProjectUpdate({ audioOffsetMs: parseInt(e.target.value) })}
                       className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
                     />
                   </div>
@@ -145,18 +141,17 @@ const SettingsModal: React.FC = () => {
                   <div className="space-y-2">
                     <div className="flex justify-between text-[10px] font-bold text-zinc-500 uppercase tracking-tighter">
                       <span>Предпрослушивание при клике (Pre-roll)</span>
-                      <span>{typeof project?.audioSettings?.prerollSeconds === 'number' && !isNaN(project.audioSettings.prerollSeconds) ? project.audioSettings.prerollSeconds : 3} сек</span>
+                      <span>{project?.audioSettings?.prerollSeconds || 3} сек</span>
                     </div>
                     <input 
                       type="range" 
                       min="0" 
                       max="10" 
                       step="0.5"
-                      value={typeof project?.audioSettings?.prerollSeconds === 'number' && !isNaN(project.audioSettings.prerollSeconds) ? project.audioSettings.prerollSeconds : 3}
+                      value={project?.audioSettings?.prerollSeconds || 3}
                       onChange={(e) => {
                         const settings = project?.audioSettings || {};
-                        const val = parseFloat(e.target.value);
-                        onProjectUpdate({ audioSettings: { ...settings, prerollSeconds: isNaN(val) ? 3 : val } });
+                        onProjectUpdate({ audioSettings: { ...settings, prerollSeconds: parseFloat(e.target.value) } });
                       }}
                       className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
                     />

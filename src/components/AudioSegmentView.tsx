@@ -418,35 +418,25 @@ export const AudioSegmentView = React.memo(({
             {showVolume && (
               <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-2 bg-zinc-900 border border-white/10 rounded-lg shadow-2xl z-50 flex flex-col items-center gap-2">
                 <div className="text-[8px] font-bold text-zinc-500 uppercase tracking-widest">Громкость</div>
-                {(() => {
-                  const safeGain = typeof seg.gain === 'number' && !isNaN(seg.gain) ? seg.gain : 0;
-                  return (
-                    <>
-                      <input 
-                        type="range" min="-15" max="15" step="0.5"
-                        value={safeGain}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          saveSnapshot();
-                        }}
-                        onChange={(e) => {
-                          const val = parseFloat(e.target.value);
-                          onUpdateSegment(trackId, seg.id, { gain: isNaN(val) ? 0 : val });
-                        }}
-                        onDoubleClick={(e) => {
-                          e.stopPropagation();
-                          saveSnapshot();
-                          onUpdateSegment(trackId, seg.id, { gain: 0 });
-                        }}
-                        className="h-24 appearance-none bg-zinc-800 rounded-full w-1 accent-indigo-500 cursor-pointer"
-                        style={{ writingMode: 'vertical-lr' }}
-                      />
-                      <div className="text-[8px] font-mono text-indigo-400">
-                        {(safeGain > 0 ? '+' : '') + safeGain.toFixed(1)} dB
-                      </div>
-                    </>
-                  );
-                })()}
+                <input 
+                  type="range" min="-15" max="15" step="0.5"
+                  value={seg.gain === undefined ? 0 : seg.gain}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    saveSnapshot();
+                  }}
+                  onChange={(e) => onUpdateSegment(trackId, seg.id, { gain: parseFloat(e.target.value) })}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    saveSnapshot();
+                    onUpdateSegment(trackId, seg.id, { gain: 0 });
+                  }}
+                  className="h-24 appearance-none bg-zinc-800 rounded-full w-1 accent-indigo-500 cursor-pointer"
+                  style={{ writingMode: 'vertical-lr' }}
+                />
+                <div className="text-[8px] font-mono text-indigo-400">
+                  {(((seg.gain === undefined ? 0 : seg.gain) > 0) ? '+' : '') + (seg.gain === undefined ? 0 : seg.gain).toFixed(1)} dB
+                </div>
               </div>
             )}
           </div>

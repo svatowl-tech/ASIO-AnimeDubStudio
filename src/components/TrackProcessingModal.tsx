@@ -221,166 +221,145 @@ export const TrackProcessingModal = () => {
 
                 <div className={cn("space-y-6 transition-all", !settings.enabled && "opacity-40 grayscale")}>
                   {/* LUFS Normalize */}
-                  <section className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-xs font-black uppercase tracking-widest text-zinc-400">Нормализация (LUFS)</h4>
-                      <input 
-                        type="checkbox" 
-                        checked={settings.lufsNormalize?.enabled} 
-                        onChange={e => setSettings(s => ({ ...s, lufsNormalize: { ...s.lufsNormalize, enabled: e.target.checked } }))}
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <label className="text-[10px] text-zinc-500 uppercase font-bold">Цель (dB)</label>
-                        <input 
-                          type="number" 
-                          value={typeof settings.lufsNormalize?.target === 'number' && !isNaN(settings.lufsNormalize.target) ? settings.lufsNormalize.target : -16}
-                          onChange={e => {
-                            const val = Number(e.target.value);
-                            setSettings(s => ({ ...s, lufsNormalize: { ...s.lufsNormalize, target: isNaN(val) ? -16 : val } }));
-                          }}
-                          className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
-                        />
-                      </div>
-                    </div>
-                  </section>
+              <section className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-black uppercase tracking-widest text-zinc-400">Нормализация (LUFS)</h4>
+                  <input 
+                    type="checkbox" 
+                    checked={settings.lufsNormalize?.enabled} 
+                    onChange={e => setSettings(s => ({ ...s, lufsNormalize: { ...s.lufsNormalize, enabled: e.target.checked } }))}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-[10px] text-zinc-500 uppercase font-bold">Цель (dB)</label>
+                    <input 
+                      type="number" 
+                      value={settings.lufsNormalize?.target || -16}
+                      onChange={e => setSettings(s => ({ ...s, lufsNormalize: { ...s.lufsNormalize, target: Number(e.target.value) } }))}
+                      className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+                    />
+                  </div>
+                </div>
+              </section>
 
-                  {/* Noise Gate */}
-                  <section className="space-y-4 pt-6 border-t border-white/5">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-xs font-black uppercase tracking-widest text-zinc-400">Noise Gate (Шумоподавление)</h4>
-                      <input 
-                        type="checkbox" 
-                        checked={settings.noiseGate?.enabled} 
-                        onChange={e => setSettings(s => ({ ...s, noiseGate: { ...s.noiseGate, enabled: e.target.checked } }))}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <div className="flex justify-between text-[10px] text-zinc-500 uppercase font-bold">
-                        <span>Порог (dB)</span>
-                        <span>{typeof settings.noiseGate?.threshold === 'number' && !isNaN(settings.noiseGate.threshold) ? settings.noiseGate.threshold : -45} dB</span>
-                      </div>
-                      <input 
-                        type="range" min="-100" max="0" step="1"
-                        value={typeof settings.noiseGate?.threshold === 'number' && !isNaN(settings.noiseGate.threshold) ? settings.noiseGate.threshold : -45}
-                        onChange={e => {
-                          const val = Number(e.target.value);
-                          setSettings(s => ({ ...s, noiseGate: { ...s.noiseGate, threshold: isNaN(val) ? -45 : val } }));
-                        }}
-                        className="w-full accent-indigo-500"
-                      />
-                    </div>
-                  </section>
+              {/* Noise Gate */}
+              <section className="space-y-4 pt-6 border-t border-white/5">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-black uppercase tracking-widest text-zinc-400">Noise Gate (Шумоподавление)</h4>
+                  <input 
+                    type="checkbox" 
+                    checked={settings.noiseGate?.enabled} 
+                    onChange={e => setSettings(s => ({ ...s, noiseGate: { ...s.noiseGate, enabled: e.target.checked } }))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex justify-between text-[10px] text-zinc-500 uppercase font-bold">
+                    <span>Порог (dB)</span>
+                    <span>{settings.noiseGate?.threshold || -45} dB</span>
+                  </div>
+                  <input 
+                    type="range" min="-100" max="0" step="1"
+                    value={settings.noiseGate?.threshold || -45}
+                    onChange={e => setSettings(s => ({ ...s, noiseGate: { ...s.noiseGate, threshold: Number(e.target.value) } }))}
+                    className="w-full accent-indigo-500"
+                  />
+                </div>
+              </section>
 
-                  {/* Compressor */}
-                  <section className="space-y-4 pt-6 border-t border-white/5">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-xs font-black uppercase tracking-widest text-zinc-400">Компрессор</h4>
-                      <input 
-                        type="checkbox" 
-                        checked={settings.compressor?.enabled} 
-                        onChange={e => setSettings(s => ({ ...s, compressor: { ...s.compressor, enabled: e.target.checked } }))}
-                      />
+              {/* Compressor */}
+              <section className="space-y-4 pt-6 border-t border-white/5">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-black uppercase tracking-widest text-zinc-400">Компрессор</h4>
+                  <input 
+                    type="checkbox" 
+                    checked={settings.compressor?.enabled} 
+                    onChange={e => setSettings(s => ({ ...s, compressor: { ...s.compressor, enabled: e.target.checked } }))}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-[10px] text-zinc-500 uppercase font-bold">
+                      <span>Порог (dB)</span>
+                      <span>{settings.compressor?.threshold || -20} dB</span>
                     </div>
-                    <div className="grid grid-cols-2 gap-6">
-                      <div className="space-y-2">
-                        <div className="flex justify-between text-[10px] text-zinc-500 uppercase font-bold">
-                          <span>Порог (dB)</span>
-                          <span>{typeof settings.compressor?.threshold === 'number' && !isNaN(settings.compressor.threshold) ? settings.compressor.threshold : -20} dB</span>
-                        </div>
-                        <input 
-                          type="range" min="-60" max="0" step="1"
-                          value={typeof settings.compressor?.threshold === 'number' && !isNaN(settings.compressor.threshold) ? settings.compressor.threshold : -20}
-                          onChange={e => {
-                            const val = Number(e.target.value);
-                            setSettings(s => ({ ...s, compressor: { ...s.compressor, threshold: isNaN(val) ? -20 : val } }));
-                          }}
-                          className="w-full accent-indigo-500"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <div className="flex justify-between text-[10px] text-zinc-500 uppercase font-bold">
-                          <span>Ratio</span>
-                          <span>{typeof settings.compressor?.ratio === 'number' && !isNaN(settings.compressor.ratio) ? settings.compressor.ratio : 4}:1</span>
-                        </div>
-                        <input 
-                          type="range" min="1" max="20" step="0.5"
-                          value={typeof settings.compressor?.ratio === 'number' && !isNaN(settings.compressor.ratio) ? settings.compressor.ratio : 4}
-                          onChange={e => {
-                            const val = Number(e.target.value);
-                            setSettings(s => ({ ...s, compressor: { ...s.compressor, ratio: isNaN(val) ? 4 : val } }));
-                          }}
-                          className="w-full accent-indigo-500"
-                        />
-                      </div>
+                    <input 
+                      type="range" min="-60" max="0" step="1"
+                      value={settings.compressor?.threshold || -20}
+                      onChange={e => setSettings(s => ({ ...s, compressor: { ...s.compressor, threshold: Number(e.target.value) } }))}
+                      className="w-full accent-indigo-500"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-[10px] text-zinc-500 uppercase font-bold">
+                      <span>Ratio</span>
+                      <span>{settings.compressor?.ratio || 4}:1</span>
                     </div>
-                  </section>
+                    <input 
+                      type="range" min="1" max="20" step="0.5"
+                      value={settings.compressor?.ratio || 4}
+                      onChange={e => setSettings(s => ({ ...s, compressor: { ...s.compressor, ratio: Number(e.target.value) } }))}
+                      className="w-full accent-indigo-500"
+                    />
+                  </div>
+                </div>
+              </section>
 
-                  {/* EQ */}
-                  <section className="space-y-4 pt-6 border-t border-white/5">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-xs font-black uppercase tracking-widest text-zinc-400">Эквалайзер (Фильтры)</h4>
-                      <input 
-                        type="checkbox" 
-                        checked={settings.eq?.enabled} 
-                        onChange={e => setSettings(s => ({ ...s, eq: { ...s.eq, enabled: e.target.checked } }))}
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-6">
-                      <div className="space-y-2">
-                        <label className="text-[10px] text-zinc-500 uppercase font-bold">High Pass (Hz)</label>
-                        <input 
-                          type="number" 
-                          value={typeof settings.eq?.highPass === 'number' && !isNaN(settings.eq.highPass) ? settings.eq.highPass : 80}
-                          onChange={e => {
-                            const val = Number(e.target.value);
-                            setSettings(s => ({ ...s, eq: { ...s.eq, highPass: isNaN(val) ? 80 : val } }));
-                          }}
-                          className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-[10px] text-zinc-500 uppercase font-bold">Low Pass (Hz)</label>
-                        <input 
-                          type="number" 
-                          value={typeof settings.eq?.lowPass === 'number' && !isNaN(settings.eq.lowPass) ? settings.eq.lowPass : 20000}
-                          onChange={e => {
-                            const val = Number(e.target.value);
-                            setSettings(s => ({ ...s, eq: { ...s.eq, lowPass: isNaN(val) ? 20000 : val } }));
-                          }}
-                          className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
-                        />
-                      </div>
-                    </div>
-                  </section>
+              {/* EQ */}
+              <section className="space-y-4 pt-6 border-t border-white/5">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-black uppercase tracking-widest text-zinc-400">Эквалайзер (Фильтры)</h4>
+                  <input 
+                    type="checkbox" 
+                    checked={settings.eq?.enabled} 
+                    onChange={e => setSettings(s => ({ ...s, eq: { ...s.eq, enabled: e.target.checked } }))}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-[10px] text-zinc-500 uppercase font-bold">High Pass (Hz)</label>
+                    <input 
+                      type="number" 
+                      value={settings.eq?.highPass || 80}
+                      onChange={e => setSettings(s => ({ ...s, eq: { ...s.eq, highPass: Number(e.target.value) } }))}
+                      className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] text-zinc-500 uppercase font-bold">Low Pass (Hz)</label>
+                    <input 
+                      type="number" 
+                      value={settings.eq?.lowPass || 20000}
+                      onChange={e => setSettings(s => ({ ...s, eq: { ...s.eq, lowPass: Number(e.target.value) } }))}
+                      className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+                    />
+                  </div>
+                </div>
+              </section>
 
-                  {/* Fades */}
-                  <section className="space-y-4 pt-6 border-t border-white/5">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-xs font-black uppercase tracking-widest text-zinc-400">Кроссфейды (Склейки)</h4>
-                      <input 
-                        type="checkbox" 
-                        checked={settings.fades?.enabled} 
-                        onChange={e => setSettings(s => ({ ...s, fades: { ...s.fades, enabled: e.target.checked } }))}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <div className="flex justify-between text-[10px] text-zinc-500 uppercase font-bold">
-                        <span>Длительность (ms)</span>
-                        <span>{typeof settings.fades?.duration === 'number' && !isNaN(settings.fades.duration) ? settings.fades.duration : 50} ms</span>
-                      </div>
-                      <input 
-                        type="range" min="0" max="500" step="5"
-                        value={typeof settings.fades?.duration === 'number' && !isNaN(settings.fades.duration) ? settings.fades.duration : 50}
-                        onChange={e => {
-                          const val = Number(e.target.value);
-                          setSettings(s => ({ ...s, fades: { ...s.fades, duration: isNaN(val) ? 50 : val } }));
-                        }}
-                        className="w-full accent-indigo-500"
-                      />
-                    </div>
-                  </section>
+              {/* Fades */}
+              <section className="space-y-4 pt-6 border-t border-white/5">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-black uppercase tracking-widest text-zinc-400">Кроссфейды (Склейки)</h4>
+                  <input 
+                    type="checkbox" 
+                    checked={settings.fades?.enabled} 
+                    onChange={e => setSettings(s => ({ ...s, fades: { ...s.fades, enabled: e.target.checked } }))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex justify-between text-[10px] text-zinc-500 uppercase font-bold">
+                    <span>Длительность (ms)</span>
+                    <span>{settings.fades?.duration || 50} ms</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="500" step="5"
+                    value={settings.fades?.duration || 50}
+                    onChange={e => setSettings(s => ({ ...s, fades: { ...s.fades, duration: Number(e.target.value) } }))}
+                    className="w-full accent-indigo-500"
+                  />
+                </div>
+              </section>
             </div>
           </div>
         </div>

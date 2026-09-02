@@ -159,37 +159,27 @@ export const TrackHeader = ({
       
       <div className="flex-1 flex flex-col justify-end gap-2">
         <div className="flex items-center gap-2">
-          {(() => {
-            const safeVolume = typeof volume === 'number' && !isNaN(volume) ? volume : 0;
-            return (
-              <>
-                <input 
-                  type="range" 
-                  min="-15" 
-                  max="15" 
-                  step="0.5" 
-                  value={safeVolume} 
-                  onMouseDown={(e) => {
-                    e.stopPropagation();
-                    saveSnapshot();
-                  }}
-                  onChange={(e) => {
-                    const parsed = parseFloat(e.target.value);
-                    onVolumeChange(track.id, isNaN(parsed) ? 0 : parsed);
-                  }}
-                  onDoubleClick={(e) => {
-                    e.stopPropagation();
-                    saveSnapshot();
-                    onVolumeChange(track.id, 0.0);
-                  }}
-                  className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                />
-                <span className="text-[8px] font-mono text-zinc-600 w-10 text-right">
-                  {safeVolume > 0 ? `+${safeVolume.toFixed(1)}` : safeVolume.toFixed(1)} dB
-                </span>
-              </>
-            );
-          })()}
+          <input 
+            type="range" 
+            min="-15" 
+            max="15" 
+            step="0.5" 
+            value={volume} 
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              saveSnapshot();
+            }}
+            onChange={(e) => onVolumeChange(track.id, parseFloat(e.target.value))}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              saveSnapshot();
+              onVolumeChange(track.id, 0.0);
+            }}
+            className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+          />
+          <span className="text-[8px] font-mono text-zinc-600 w-10 text-right">
+            {volume > 0 ? `+${volume.toFixed(1)}` : volume.toFixed(1)} dB
+          </span>
         </div>
       </div>
 
