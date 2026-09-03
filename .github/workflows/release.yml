@@ -133,8 +133,11 @@ jobs:
             
             Профессиональное программное обеспечение для дубляжа, закадрового озвучивания и фандаба.
 
-            ### 📦 Готовые сборки для установки:
-            - **Windows**: `.exe` (NSIS Installer) и `.msi`
+            ### 📦 Готовые сборки:
+            - **Windows**: 
+              - `.exe` (NSIS Installer)
+              - `.msi` (Windows Installer)
+              - `_portable.exe` (Portable версия — запуск одним файлом без установки)
             - **macOS**: `.dmg` и `.app` (Universal Binary for Apple Silicon M1-M4 & Intel)
             - **Linux**: `.AppImage` и `.deb`
 
@@ -143,3 +146,44 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Package and Upload Windows Portable Binary
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          echo "Looking for compiled Windows binary..."
+          EXE_PATH=""
+          for p in \
+            "src-tauri/target/release/dubstudio.exe" \
+            "src-tauri/target/release/DubStudio Pro.exe" \
+            "src-tauri/target/x86_64-pc-windows-msvc/release/dubstudio.exe" \
+            "src-tauri/target/x86_64-pc-windows-msvc/release/DubStudio Pro.exe" \
+            "target/release/dubstudio.exe" \
+            "target/release/DubStudio Pro.exe"; do
+            if [ -f "$p" ]; then
+              EXE_PATH="$p"
+              break
+            fi
+          done
+
+          if [ -z "$EXE_PATH" ]; then
+            echo "Searching for binary in target directories..."
+            EXE_PATH=$(find . -type f -name "dubstudio.exe" -not -path "*/deps/*" -not -path "*/build/*" | head -n 1)
+          fi
+
+          if [ -n "$EXE_PATH" ] && [ -f "$EXE_PATH" ]; then
+            PORTABLE_NAME="DubStudio-Pro_${VERSION}_x64_portable.exe"
+            echo "Found compiled binary at: $EXE_PATH"
+            echo "Creating single-file portable release asset: $PORTABLE_NAME"
+            cp "$EXE_PATH" "$PORTABLE_NAME"
+            echo "Uploading $PORTABLE_NAME to GitHub Release $TAG_NAME..."
+            gh release upload "$TAG_NAME" "$PORTABLE_NAME" --clobber
+            echo "Successfully uploaded Windows Portable binary: $PORTABLE_NAME"
+          else
+            echo "::error::Could not find compiled Windows binary to publish portable edition."
+            exit 1
+          fi
