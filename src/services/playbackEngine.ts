@@ -46,13 +46,21 @@ export class PlaybackEngine {
   constructor() {}
 
   public async setOutputDevice(deviceId: string) {
+    if (!deviceId || deviceId === 'default') {
+      // The default system device is already the native destination of AudioContext.
+      return;
+    }
     const ctx = this.getContext();
     if (typeof (ctx as any).setSinkId === 'function') {
       try {
-        await (ctx as any).setSinkId(deviceId === 'default' ? '' : deviceId);
+        await (ctx as any).setSinkId(deviceId);
         console.log(`[PlaybackEngine] Output device set to: ${deviceId}`);
-      } catch (e) {
-        console.error(`[PlaybackEngine] Failed to set output device:`, e);
+      } catch (e: any) {
+        if (e?.name === 'NotAllowedError' || e?.message?.includes?.('Permissions-Policy') || e?.message?.includes?.('speaker selection')) {
+          console.warn(`[PlaybackEngine] Output device selection is restricted by browser/frame Permissions-Policy. Using default audio output.`);
+        } else {
+          console.warn(`[PlaybackEngine] Unable to set output device to ${deviceId}:`, e?.message || e);
+        }
       }
     } else {
       console.warn(`[PlaybackEngine] setSinkId not supported in this browser.`);

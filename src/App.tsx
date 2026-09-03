@@ -641,7 +641,7 @@ export default function App() {
         id: 'demo-project',
         name: 'Демо Превью',
         projectPath: '/mock/path',
-        videoUrl: 'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4',
+        videoUrl: '/sample-video.mp4',
         subtitles: [
           { id: 1, start: 0, end: 3, role: 'Character 1', text: 'This is a demo project', combined: 'This is a demo project' },
           { id: 2, start: 3, end: 7, role: 'Character 2', text: 'For AI Studio preview!', combined: 'For AI Studio preview!' }
@@ -743,7 +743,7 @@ export default function App() {
     if (project) {
       playbackEngine.setAudioOffset(project.audioOffsetMs || 0);
       playbackEngine.setPlayOriginalTrackSegments(!!project.audioSettings?.playOriginalTrackSegments);
-      if (project.audioSettings?.outputDeviceId) {
+      if (project.audioSettings?.outputDeviceId && project.audioSettings.outputDeviceId !== 'default') {
         playbackEngine.setOutputDevice(project.audioSettings.outputDeviceId);
       }
     }
@@ -3290,6 +3290,15 @@ export default function App() {
                   if (!project?.videoPath && !project?.videoUrl) {
                     return; // Ignore error if no video is expected
                   }
+
+                  // If code 4 occurs on an element with crossOrigin, attempt fallback without crossOrigin
+                  if (error?.code === 4 && video.getAttribute('crossorigin')) {
+                    console.warn("Video failed with crossOrigin, attempting fallback without crossOrigin...");
+                    video.removeAttribute('crossorigin');
+                    video.load();
+                    return;
+                  }
+
                   let message = "Видео не может быть загружено. Пожалуйста, проверьте формат файла.";
                   
                   if (error) {
@@ -3592,7 +3601,7 @@ export default function App() {
                     <button 
                       onClick={() => {
                         if (project) {
-                          setProject({ ...project, videoUrl: "https://vjs.zencdn.net/v/oceans.mp4" });
+                          setProject({ ...project, videoUrl: "/sample-video.mp4" });
                         }
                         setVideoError(null);
                       }} 

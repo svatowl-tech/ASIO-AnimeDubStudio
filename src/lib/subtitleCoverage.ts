@@ -1,4 +1,4 @@
-import { Project, SubtitleLine, AudioSegment } from '../types';
+import { Project, SubtitleLine, AudioSegment, AudioTrack } from '../types';
 
 export interface SubtitleCoverageStats {
   totalTargetLines: number;
@@ -9,6 +9,43 @@ export interface SubtitleCoverageStats {
   unrecordedLines: SubtitleLine[];
   targetSubtitles: SubtitleLine[];
   activeRoles: string[];
+}
+
+/**
+ * Checks if a track is an original/reference video audio track.
+ */
+export function isOriginalTrack(track: { id?: string; name?: string }): boolean {
+  if (!track) return false;
+  const name = (track.name || '').toLowerCase().trim();
+  const id = (track.id || '').toLowerCase().trim();
+
+  return (
+    name.includes('оригинал') ||
+    name.includes('original') ||
+    name.includes('reference') ||
+    id.includes('original') ||
+    id.includes('reference') ||
+    id === 'originals-track' ||
+    id === 'original-audio-track' ||
+    id === 'original-track'
+  );
+}
+
+/**
+ * Checks if an audio segment belongs to original/master reference audio.
+ */
+export function isOriginalSegment(seg: AudioSegment): boolean {
+  if (!seg) return false;
+  const id = (seg.id || '').toLowerCase().trim();
+  const segName = ((seg as any).name || '').toLowerCase().trim();
+
+  return (
+    id === 'original-audio-seg' ||
+    id.startsWith('original-audio-seg') ||
+    segName.includes('оригинальный звук') ||
+    segName.includes('original audio') ||
+    segName.includes('original sound')
+  );
 }
 
 /**
@@ -27,6 +64,8 @@ export function isSubtitleRecorded(
   const lineMid = lineStart + lineDuration / 2;
 
   for (const seg of segments) {
+    if (isOriginalSegment(seg)) continue;
+
     const segStart = seg.startTime;
     const segEnd = seg.startTime + seg.duration;
 
@@ -53,6 +92,7 @@ export function isSubtitleRecorded(
 
 /**
  * Returns comprehensive coverage statistics for the user's selected roles in a project.
+ * Excludes original/reference audio tracks so master video audio isn't counted as recorded dubs.
  */
 export function getSubtitleCoverageStats(project: Project | null): SubtitleCoverageStats {
   if (!project || !project.subtitles || project.subtitles.length === 0) {
@@ -82,12 +122,16 @@ export function getSubtitleCoverageStats(project: Project | null): SubtitleCover
       ? project.subtitles.filter((sub) => activeRoles.includes(sub.role))
       : project.subtitles;
 
-  // Gather audio segments from armed tracks (or all tracks if no track is armed)
+  // Gather audio segments from armed dubbing tracks (or all dubbing tracks if no track is armed),
+  // strictly excluding the original / reference tracks which contain master video audio.
   const tracks = project.tracks || [];
-  const armedTracks = tracks.filter((t) => t.isArmed);
-  const targetTracks = armedTracks.length > 0 ? armedTracks : tracks;
+  const dubbingTracks = tracks.filter((t) => !isOriginalTrack(t));
+  const armedDubbingTracks = dubbingTracks.filter((t) => t.isArmed);
+  const targetTracks = armedDubbingTracks.length > 0 ? armedDubbingTracks : dubbingTracks;
 
-  const allSegments: AudioSegment[] = targetTracks.flatMap((t) => t.segments || []);
+  const allSegments: AudioSegment[] = targetTracks
+    .flatMap((t) => t.segments || [])
+    .filter((seg) => !isOriginalSegment(seg));
   const subtitlesOffset = project.subtitlesOffset || 0;
 
   const recordedLineIds = new Set<string>();
