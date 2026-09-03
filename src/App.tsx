@@ -75,7 +75,6 @@ import { splitSegmentAtTime } from './lib/timelineUtils';
 
 import { MissingSubtitlesBanner } from './components/MissingSubtitlesBanner';
 import { getSubtitleCoverageStats } from './lib/subtitleCoverage';
-import { getOrCreateDemoVideoBlobUrl } from './services/demoVideoGenerator';
 
 // Extracted Components
 import { AudioDAWView } from './components/AudioDAWView';
@@ -638,59 +637,49 @@ export default function App() {
     
     // Inject demo project for web preview immediately if not in desktop mode
     if (!project && !(window as any).__TAURI_INTERNALS__) {
-      getOrCreateDemoVideoBlobUrl().then((demoBlobUrl) => {
-        setProject((currentProj) => {
-          if (currentProj) {
-            if (demoBlobUrl && (!currentProj.videoUrl || currentProj.videoUrl.startsWith('http'))) {
-              return { ...currentProj, videoUrl: demoBlobUrl };
+      setProject({
+        id: 'demo-project',
+        name: 'Демо Превью',
+        projectPath: '/mock/path',
+        videoUrl: 'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4',
+        subtitles: [
+          { id: 1, start: 0, end: 3, role: 'Character 1', text: 'This is a demo project', combined: 'This is a demo project' },
+          { id: 2, start: 3, end: 7, role: 'Character 2', text: 'For AI Studio preview!', combined: 'For AI Studio preview!' }
+        ],
+        roles: ['Character 1', 'Character 2'],
+        selectedRole: 'Character 1',
+        tracks: [
+          { id: 'original', name: 'Оригинал', segments: [], volume: 1, isMuted: false },
+          { id: 'track-1', name: 'Dubs 1', segments: [
+            {
+               id: 'demo-seg',
+               startTime: 1,
+               duration: 6,
+               fileOffset: 0,
+               fileDuration: 6,
+               blobUrl: '',
+               filePath: '',
+               gain: 1,
+               playbackRate: 1,
+               waveform: new Array(120).fill(0).map(() => Math.random() * 0.8 + 0.1),
+               originalFileName: 'demo-dub.wav'
             }
-            return currentProj;
-          }
-          return {
-            id: 'demo-project',
-            name: 'Демо Превью',
-            projectPath: '/mock/path',
-            videoUrl: demoBlobUrl || '',
-            subtitles: [
-              { id: 1, start: 0, end: 3, role: 'Character 1', text: 'This is a demo project', combined: 'This is a demo project' },
-              { id: 2, start: 3, end: 7, role: 'Character 2', text: 'For AI Studio preview!', combined: 'For AI Studio preview!' }
-            ],
-            roles: ['Character 1', 'Character 2'],
-            selectedRole: 'Character 1',
-            tracks: [
-              { id: 'original', name: 'Оригинал', segments: [], volume: 1, isMuted: false },
-              { id: 'track-1', name: 'Dubs 1', segments: [
-                {
-                   id: 'demo-seg',
-                   startTime: 1,
-                   duration: 6,
-                   fileOffset: 0,
-                   fileDuration: 6,
-                   blobUrl: '',
-                   filePath: '',
-                   gain: 1,
-                   playbackRate: 1,
-                   waveform: new Array(120).fill(0).map(() => Math.random() * 0.8 + 0.1),
-                   originalFileName: 'demo-dub.wav'
-                }
-              ], volume: 1, isMuted: false, isArmed: true }
-            ],
-            latencyOffset: 0,
-            audioOffsetMs: 0,
-            audioSettings: {
-              deviceId: 'default',
-              outputDeviceId: 'default',
-              sampleRate: 48000,
-              channels: 1,
-              noiseSuppression: true,
-              echoCancellation: true,
-              backstageMode: 'parallel',
-              isBackstageEnabled: false
-            }
-          };
-        });
-        setDuration(10);
+          ], volume: 1, isMuted: false, isArmed: true }
+        ],
+        latencyOffset: 0,
+        audioOffsetMs: 0,
+        audioSettings: {
+          deviceId: 'default',
+          outputDeviceId: 'default',
+          sampleRate: 48000,
+          channels: 1,
+          noiseSuppression: true,
+          echoCancellation: true,
+          backstageMode: 'parallel',
+          isBackstageEnabled: false
+        }
       });
+      setDuration(10);
     }
     
     return () => clearInterval(interval);
@@ -1422,8 +1411,10 @@ export default function App() {
   } as any);
 
   useEffect(() => {
-    if (isDesktop && (window as any).electronAPI && typeof (window as any).electronAPI.requestPermissions === 'function') {
-      (window as any).electronAPI.requestPermissions().catch(() => {});
+    if (isDesktop && (window as any).electronAPI) {
+      (window as any).electronAPI.requestPermissions().catch(err => {
+        console.error('Failed to request media permissions:', err);
+      });
     }
   }, [isDesktop]);
 
@@ -3225,6 +3216,7 @@ export default function App() {
                 ref={videoRef}
                 className="w-full h-full object-contain shadow-2xl"
                 playsInline
+                crossOrigin="anonymous"
                 preload="metadata"
                 onKeyDown={(e) => e.preventDefault()}
                 onPlay={() => {
@@ -3298,19 +3290,8 @@ export default function App() {
                   if (!project?.videoPath && !project?.videoUrl) {
                     return; // Ignore error if no video is expected
                   }
-
-                  // In web preview / sandbox, automatically fallback to locally generated demo video blob
-                  if (!IS_TAURI) {
-                    getOrCreateDemoVideoBlobUrl().then((demoBlob) => {
-                      if (demoBlob && project) {
-                        setProject((prev) => prev ? { ...prev, videoUrl: demoBlob } : null);
-                        setVideoError(null);
-                      }
-                    });
-                    return;
-                  }
-                  
                   let message = "Видео не может быть загружено. Пожалуйста, проверьте формат файла.";
+                  
                   if (error) {
                     if (error.code === 1) message = "Воспроизведение прервано пользователем.";
                     else if (error.code === 2) message = "Ошибка сети при загрузке видео.";
@@ -3319,7 +3300,7 @@ export default function App() {
                   }
                   
                   setVideoError(message);
-                  logger.warn("Video Playback Note:", {
+                  console.error("Video Playback Error:", {
                     code: error?.code,
                     message: error?.message,
                     src: video.src || "Multiple sources",
@@ -3405,6 +3386,7 @@ export default function App() {
                       ref={videoRef}
                       className="w-full h-full object-contain shadow-2xl"
                       playsInline
+                      crossOrigin="anonymous"
                       preload="metadata"
                       onKeyDown={(e) => e.preventDefault()}
                       onPlay={() => {
@@ -3530,6 +3512,7 @@ export default function App() {
                     <video 
                       ref={videoRef}
                       src={getVideoSource()}
+                      crossOrigin="anonymous"
                       onLoadedMetadata={(e) => {
                         let newDuration = e.currentTarget.duration;
                         if (newDuration !== Infinity && newDuration > 0) {
