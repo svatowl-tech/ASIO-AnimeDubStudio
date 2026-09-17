@@ -1,26 +1,78 @@
-import { parse as parseAss } from 'ass-compiler';
-import mammoth from 'mammoth';
-import ePub from 'epubjs';
-import * as pdfjsLib from 'pdfjs-dist';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 import { SubtitleLine } from '../types';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+export interface ParsedScriptLine {
+  index: number;
+  character?: string;
+  text: string;
+  original_time_start_ms?: number;
+  original_time_end_ms?: number;
+  stage_directions?: string;
+  is_foley_sfx: boolean;
+}
+
+export interface ParsedScriptResponse {
+  file_name: string;
+  total_lines: number;
+  characters: string[];
+  lines: ParsedScriptLine[];
+}
 
 export class UniversalParserService {
   /**
-   * Parses the raw content of a file into SubtitleLine objects.
-   * Supports .ass, .srt, .vtt, .csv, .fb2, .txt, .epub, .docx, .pdf.
+   * High-performance Native Script Parser (Tauri v2 + Rayon multi-threaded engine)
+   * Handles DOCX, PDF, EPUB, ASS, SRT, VTT, FB2, CSV, TXT without client-side memory bloat.
    */
-  static async parse(content: string | ArrayBuffer, fileName: string): Promise<SubtitleLine[]> {
-    const extension = fileName.split('.').pop()?.toLowerCase();
+  static async parseScriptFile(filePath: string): Promise<ParsedScriptResponse> {
+    if (isTauri()) {
+      try {
+        const res = await invoke<ParsedScriptResponse>('parse_script_file', { filePath });
+        if (res && Array.isArray(res.lines)) {
+          return res;
+        }
+      } catch (err) {
+        console.warn('[UniversalParserService] Native parsing failed, falling back to local text parser:', err);
+      }
+    }
 
-    // If it's ArrayBuffer (for docx/epub/pdf), we handle it internally within the switch
-    // Otherwise, normalize CRLF to LF universally for text modes
+    // Fallback if not running in Tauri or file inaccessible
+    return {
+      file_name: filePath.split(/[/\\]/).pop() || 'script',
+      total_lines: 0,
+      characters: [],
+      lines: [],
+    };
+  }
+
+  /**
+   * Primary unified parser interface returning SubtitleLine[] for timeline & editor.
+   * If filePath is provided (or in Tauri), utilizes the multi-threaded Rust engine.
+   */
+  static async parse(
+    content: string | ArrayBuffer,
+    fileName: string,
+    filePath?: string
+  ): Promise<SubtitleLine[]> {
+    // 1. If we have a file path in Tauri environment, use native Rust parsing engine
+    if (filePath && isTauri()) {
+      try {
+        const response = await this.parseScriptFile(filePath);
+        if (response.lines.length > 0) {
+          return this.mapToSubtitleLines(response);
+        }
+      } catch (e) {
+        console.warn('[UniversalParserService] Native parse failed, falling back to in-memory parser', e);
+      }
+    }
+
+    // 2. High-speed lightweight in-memory parser (ASS, SRT, VTT, CSV, FB2, TXT)
+    const extension = fileName.split('.').pop()?.toLowerCase() || 'txt';
     const isText = typeof content === 'string';
     const normalizedContent = isText ? (content as string).replace(/\r\n/g, '\n') : '';
 
     switch (extension) {
       case 'ass':
+      case 'ssa':
         return this.parseASS(normalizedContent);
       case 'srt':
         return this.parseSRT(normalizedContent);
@@ -30,69 +82,133 @@ export class UniversalParserService {
         return this.parseCSV(normalizedContent);
       case 'fb2':
         return this.parseFB2(normalizedContent);
-      case 'docx':
-        return this.parseDOCX(content);
-      case 'epub':
-        return this.parseEPUB(content);
-      case 'pdf':
-        return this.parsePDF(content);
       case 'txt':
       default:
         return this.parseTXT(normalizedContent);
     }
   }
 
+  /**
+   * Maps native ParsedScriptResponse to standard SubtitleLine[]
+   */
+  static mapToSubtitleLines(response: ParsedScriptResponse): SubtitleLine[] {
+    const timestamp = Date.now();
+    return response.lines.map((line, idx) => {
+      const startSec = line.original_time_start_ms !== undefined && line.original_time_start_ms !== null
+        ? line.original_time_start_ms / 1000
+        : 0;
+      const endSec = line.original_time_end_ms !== undefined && line.original_time_end_ms !== null
+        ? line.original_time_end_ms / 1000
+        : 0;
+
+      let displayText = line.text;
+      if (line.stage_directions) {
+        displayText = `(${line.stage_directions}) ${displayText}`.trim();
+      }
+
+      return {
+        id: `sub-${idx}-${timestamp}`,
+        start: startSec,
+        end: endSec >= startSec ? endSec : startSec,
+        text: displayText,
+        role: line.character || (line.is_foley_sfx ? 'SFX' : 'Default'),
+      };
+    });
+  }
+
+  // =========================================================================
+  // Lightweight In-Memory Parsers (Zero External Dependencies)
+  // =========================================================================
+
   private static parseASS(content: string): SubtitleLine[] {
-    try {
-      const parsed = parseAss(content);
-      // Map Dialogue events to our SubtitleLine structure using 'any' cast to bypass strict ass-compiler type mismatches
-      return parsed.events.dialogue.map((dialogue: any, index: number) => {
-        let rawText = dialogue.Text?.combined || dialogue.text?.combined || '';
-        if (!rawText) rawText = '';
-        const cleanText = rawText
-          .replace(/\{[^}]+\}/g, '')
-          .replace(/\\N/g, '\n')
-          .replace(/\\n/g, '\n')
-          .replace(/\\h/g, ' ')
-          .trim();
+    const lines: SubtitleLine[] = [];
+    const assLines = content.split('\n');
+    let inEvents = false;
+    let formatHeaders: string[] = [];
 
-        const rawStart = Number(dialogue.Start ?? dialogue.start ?? 0);
-        const rawEnd = Number(dialogue.End ?? dialogue.end ?? 0);
-        const start = Number.isFinite(rawStart) && !Number.isNaN(rawStart) && rawStart >= 0 ? rawStart : 0;
-        const end = Number.isFinite(rawEnd) && !Number.isNaN(rawEnd) && rawEnd >= start ? rawEnd : start;
+    const assTagRegex = /\{[^}]+\}/g;
 
-        return {
-          id: `ass-${index}-${Date.now()}`,
-          start,
-          end,
-          text: cleanText,
-          role: dialogue.Name || dialogue.who || 'Default',
-        };
-      });
-    } catch (err) {
-      console.error('ASS parsing failed:', err);
-      return [];
+    for (const line of assLines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        inEvents = trimmed.toLowerCase() === '[events]';
+        continue;
+      }
+
+      if (inEvents) {
+        if (trimmed.startsWith('Format:')) {
+          formatHeaders = trimmed.substring(7).split(',').map(h => h.trim().toLowerCase());
+        } else if (trimmed.startsWith('Dialogue:')) {
+          const maxFields = formatHeaders.length > 0 ? formatHeaders.length : 10;
+          const commaSplit = this.splitN(trimmed.substring(9).trim(), ',', maxFields);
+          
+          let startIdx = 1;
+          let endIdx = 2;
+          let nameIdx = 4;
+          let textIdx = commaSplit.length - 1;
+
+          if (formatHeaders.length > 0) {
+            formatHeaders.forEach((h, i) => {
+              if (h === 'start') startIdx = i;
+              if (h === 'end') endIdx = i;
+              if (h === 'name' || h === 'actor') nameIdx = i;
+              if (h === 'text') textIdx = i;
+            });
+          }
+
+          const startStr = commaSplit[startIdx] || '0:00:00.00';
+          const endStr = commaSplit[endIdx] || '0:00:00.00';
+          const nameStr = commaSplit[nameIdx] || 'Default';
+          const rawText = commaSplit[textIdx] || '';
+
+          const cleanText = rawText
+            .replace(assTagRegex, '')
+            .replace(/\\N/g, '\n')
+            .replace(/\\n/g, '\n')
+            .replace(/\\h/g, ' ')
+            .trim();
+
+          if (cleanText.length > 0) {
+            lines.push({
+              id: `ass-${lines.length}-${Date.now()}`,
+              start: this.assTimeToSeconds(startStr),
+              end: this.assTimeToSeconds(endStr),
+              text: cleanText,
+              role: nameStr.trim() || 'Default',
+            });
+          }
+        }
+      }
     }
+
+    return lines;
   }
 
   private static parseSRT(content: string): SubtitleLine[] {
     const lines: SubtitleLine[] = [];
-    const srtRegex = /\d+\n(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})\n([\s\S]*?)(?=\n\n|\n$|$)/g;
-    
+    const srtRegex = /\d+\n(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\n([\s\S]*?)(?=\n\n|\n$|$)/g;
+
     let match;
     while ((match = srtRegex.exec(content)) !== null) {
-      const [ , startStr, endStr, text] = match;
-      const cleanText = text.replace(/<[^>]+>/g, '').replace(/\{[^}]+\}/g, '').trim().replace(/\\N/g, ' ').replace(/\\n/g, ' ').replace(/\n/g, ' ');
+      const [, startStr, endStr, text] = match;
+      const cleanText = text
+        .replace(/<[^>]+>/g, '')
+        .replace(/\{[^}]+\}/g, '')
+        .trim()
+        .replace(/\r?\n/g, ' ');
+
       const start = this.srtTimeToSeconds(startStr);
       let end = this.srtTimeToSeconds(endStr);
       if (end < start) end = start;
+
+      const { role, text: dialogueText } = this.extractRoleAndText(cleanText);
 
       lines.push({
         id: `srt-${lines.length}-${Date.now()}`,
         start,
         end,
-        text: cleanText,
-        role: 'Default',
+        text: dialogueText,
+        role: role || 'Default',
       });
     }
     return lines;
@@ -100,26 +216,30 @@ export class UniversalParserService {
 
   private static parseVTT(content: string): SubtitleLine[] {
     const lines: SubtitleLine[] = [];
-    // VTT uses . instead of , for milliseconds and may omit hours
     const vttRegex = /(?:.+)?\n?(\d{2}:\d{2}(?::\d{2})?\.\d{3})\s*-->\s*(\d{2}:\d{2}(?::\d{2})?\.\d{3})(?:.*?)\n([\s\S]*?)(?=\n\n|\n$|$)/g;
-    
+
     let match;
     while ((match = vttRegex.exec(content)) !== null) {
-      const [ , startStr, endStr, text] = match;
-      if (text.trim().toLowerCase() === 'webvtt') continue; // Skip header
+      const [, startStr, endStr, text] = match;
+      if (text.trim().toLowerCase() === 'webvtt') continue;
 
-      // Strip VTT tags like <v Speaker> or <c.class>
-      const cleanText = text.replace(/<[^>]+>/g, '').trim().replace(/\\N/g, ' ').replace(/\\n/g, ' ').replace(/\n/g, ' ');
+      let role = 'Default';
+      const voiceMatch = text.match(/<v\s+([^>]+)>/i);
+      if (voiceMatch) {
+        role = voiceMatch[1].trim();
+      }
+
+      const cleanText = text.replace(/<[^>]+>/g, '').trim().replace(/\r?\n/g, ' ');
       const start = this.vttTimeToSeconds(startStr);
       let end = this.vttTimeToSeconds(endStr);
       if (end < start) end = start;
-      
+
       lines.push({
         id: `vtt-${lines.length}-${Date.now()}`,
         start,
         end,
         text: cleanText,
-        role: 'Default',
+        role,
       });
     }
     return lines;
@@ -128,30 +248,26 @@ export class UniversalParserService {
   private static parseCSV(content: string): SubtitleLine[] {
     const lines: SubtitleLine[] = [];
     const rows = content.split('\n').filter(line => line.trim().length > 0);
-    
-    rows.forEach((row, index) => {
-      // Basic CSV splitting (doesn't handle quotes perfectly, but good enough for simple scripts)
-      const parts = row.split(';');
-      if (parts.length === 1) { // Try comma if semicolon fails
-        const commaParts = row.split(',');
-        if (commaParts.length > 1) parts.splice(0, 1, ...commaParts);
-      }
 
-      let text = parts[0] || '';
+    rows.forEach((row, index) => {
+      const parts = row.includes(';') ? row.split(';') : row.split(',');
       let role = 'Default';
+      let text = parts[0] || '';
 
       if (parts.length >= 2) {
-        role = parts[0].trim();
-        text = parts.slice(1).join(',').trim();
+        role = parts[0].trim().replace(/^["']|["']$/g, '');
+        text = parts.slice(1).join(',').trim().replace(/^["']|["']$/g, '');
       }
 
-      lines.push({
-        id: `csv-${index}-${Date.now()}`,
-        start: 0, // No timecodes 
-        end: 0,
-        text: text.replace(/^["']|["']$/g, ''), // Strip surrounding quotes
-        role: role.replace(/^["']|["']$/g, ''), // Strip surrounding quotes
-      });
+      if (text.trim().length > 0) {
+        lines.push({
+          id: `csv-${index}-${Date.now()}`,
+          start: 0,
+          end: 0,
+          text: text.trim(),
+          role: role || 'Default',
+        });
+      }
     });
 
     return lines;
@@ -159,139 +275,102 @@ export class UniversalParserService {
 
   private static parseFB2(content: string): SubtitleLine[] {
     const lines: SubtitleLine[] = [];
-    
-    // Extract everything between <body...> and </body>
-    const bodyMatch = content.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-    let bodyText = bodyMatch ? bodyMatch[1] : content;
-
-    // Remove empty lines, images, binary
-    bodyText = bodyText.replace(/<binary[^>]*>[\s\S]*?<\/binary>/gi, '');
-    bodyText = bodyText.replace(/<empty-line\b[^>]*\/>/gi, '');
-
-    // Get paragraphs <p>
     const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
     let match;
     let index = 0;
-    while ((match = pRegex.exec(bodyText)) !== null) {
-      // Strip other inner tags like <strong>, <emphasis>, <a>
-      let text = match[1].replace(/<[^>]+>/g, '').trim();
+
+    while ((match = pRegex.exec(content)) !== null) {
+      const text = match[1].replace(/<[^>]+>/g, '').trim();
       if (text.length > 0) {
+        const { role, text: cleanText } = this.extractRoleAndText(text);
         lines.push({
           id: `fb2-${index++}-${Date.now()}`,
           start: 0,
           end: 0,
-          text: text,
-          role: 'Default',
+          text: cleanText,
+          role: role || 'Default',
         });
       }
     }
     return lines;
   }
 
-  private static async parseDOCX(content: string | ArrayBuffer): Promise<SubtitleLine[]> {
-    try {
-      // mammoth needs array buffer
-      const buffer = typeof content === 'string' 
-          ? new TextEncoder().encode(content).buffer 
-          : content;
-      
-      const result = await mammoth.extractRawText({ arrayBuffer: buffer });
-      const text = result.value; // The raw text
-      return this.parseTXT(text);
-    } catch (err) {
-      console.error('DOCX parsing failed:', err);
-      return [];
-    }
-  }
-
-  private static async parseEPUB(content: string | ArrayBuffer): Promise<SubtitleLine[]> {
-    try {
-      const book = ePub(content as any);
-      await book.ready;
-      
-      let fullText = '';
-      const spine = book.spine as any;
-      if (spine && spine.each) {
-          // Loop through all chapters
-          const chapters: string[] = [];
-          for (let i = 0; i < spine.items.length; i++) {
-              const item = spine.items[i];
-              const chapter = await book.load(item.href);
-              const textNode = (chapter as Document).body.textContent || "";
-              chapters.push(textNode.trim());
-          }
-          fullText = chapters.join('\n\n');
-      }
-      
-      return this.parseTXT(fullText);
-    } catch (err) {
-      console.error('EPUB parsing failed:', err);
-      return [];
-    }
-  }
-
-  private static async parsePDF(content: string | ArrayBuffer): Promise<SubtitleLine[]> {
-    try {
-      const buffer = typeof content === 'string'
-        ? new TextEncoder().encode(content).buffer
-        : content;
-
-      const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
-      const pdf = await loadingTask.promise;
-      
-      let fullText = '';
-      for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
-        const pageText = textContent.items.map((item: any) => item.str).join(' ');
-        fullText += pageText + '\n\n';
-      }
-
-      return this.parseTXT(fullText);
-    } catch (err) {
-      console.error('PDF parsing failed:', err);
-      return [];
-    }
-  }
-
   private static parseTXT(content: string): SubtitleLine[] {
-    return content.split('\n')
-      .filter(line => line.trim().length > 0)
-      .map((line, index) => ({
-        id: `txt-${index}-${Date.now()}`,
-        start: 0,
-        end: 0,
-        text: line.trim().replace(/\\N/g, ' ').replace(/\\n/g, ' '),
-        role: 'Default',
-      }));
+    return content
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l.length > 0)
+      .map((line, index) => {
+        const { role, text } = this.extractRoleAndText(line);
+        return {
+          id: `txt-${index}-${Date.now()}`,
+          start: 0,
+          end: 0,
+          text,
+          role: role || 'Default',
+        };
+      });
+  }
+
+  // =========================================================================
+  // Heuristic Utilities
+  // =========================================================================
+
+  private static extractRoleAndText(line: string): { role?: string; text: string } {
+    const colonMatch = line.match(/^([А-ЯЁA-Z0-9_\s\-\.]{2,30})\s*(?:\([^)]+\))?\s*[:—–\-]\s*(.+)$/i);
+    if (colonMatch) {
+      const role = colonMatch[1].trim();
+      const text = colonMatch[2].trim();
+      if (text.length > 0) {
+        return { role, text };
+      }
+    }
+    return { text: line };
+  }
+
+  private static assTimeToSeconds(time: string): number {
+    const parts = time.split(':');
+    if (parts.length !== 3) return 0;
+    const h = Number(parts[0]) || 0;
+    const m = Number(parts[1]) || 0;
+    const [s, cs] = parts[2].split('.');
+    const seconds = Number(s) || 0;
+    const centiseconds = Number(cs) || 0;
+    return h * 3600 + m * 60 + seconds + centiseconds / 100;
   }
 
   private static srtTimeToSeconds(time: string): number {
-    if (!time) return 0;
-    const [hms, ms] = time.split(',');
+    const splitChar = time.includes(',') ? ',' : '.';
+    const [hms, ms] = time.split(splitChar);
     if (!hms) return 0;
-    const timeParts = hms.split(':').map(Number);
-    const h = timeParts[0] || 0;
-    const m = timeParts[1] || 0;
-    const s = timeParts[2] || 0;
-    const millis = ms ? Number(ms) / 1000 : 0;
-    const val = h * 3600 + m * 60 + s + (Number.isFinite(millis) ? millis : 0);
-    return Number.isFinite(val) && !Number.isNaN(val) && val >= 0 ? val : 0;
+    const [h, m, s] = hms.split(':').map(Number);
+    return (h || 0) * 3600 + (m || 0) * 60 + (s || 0) + (Number(ms) || 0) / 1000;
   }
 
   private static vttTimeToSeconds(time: string): number {
-    if (!time) return 0;
     const parts = time.split('.');
     const hms = parts[0];
     const ms = parts[1] ? Number(parts[1]) / 1000 : 0;
-    
     const timeParts = hms.split(':').map(Number);
-    let val = 0;
-    if (timeParts.length === 3) { // HH:MM:SS
-      val = (timeParts[0] || 0) * 3600 + (timeParts[1] || 0) * 60 + (timeParts[2] || 0) + (Number.isFinite(ms) ? ms : 0);
-    } else if (timeParts.length === 2) { // MM:SS
-      val = (timeParts[0] || 0) * 60 + (timeParts[1] || 0) + (Number.isFinite(ms) ? ms : 0);
+
+    if (timeParts.length === 3) {
+      return (timeParts[0] || 0) * 3600 + (timeParts[1] || 0) * 60 + (timeParts[2] || 0) + ms;
+    } else if (timeParts.length === 2) {
+      return (timeParts[0] || 0) * 60 + (timeParts[1] || 0) + ms;
     }
-    return Number.isFinite(val) && !Number.isNaN(val) && val >= 0 ? val : 0;
+    return 0;
+  }
+
+  private static splitN(str: string, delimiter: string, n: number): string[] {
+    const parts: string[] = [];
+    let current = str;
+    for (let i = 0; i < n - 1; i++) {
+      const idx = current.indexOf(delimiter);
+      if (idx === -1) break;
+      parts.push(current.substring(0, idx));
+      current = current.substring(idx + delimiter.length);
+    }
+    parts.push(current);
+    return parts;
   }
 }

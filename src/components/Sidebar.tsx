@@ -307,7 +307,8 @@ const Sidebar: React.FC<SidebarProps> = ({
                             content = await file.text();
                           }
                           
-                          const parsed = await UniversalParserService.parse(content, file.name);
+                          const filePath = (file as any).path;
+                          const parsed = await UniversalParserService.parse(content, file.name, filePath);
                           if (!parsed || parsed.length === 0) {
                             alert("Файл пуст или имеет неверную структуру.");
                             return;

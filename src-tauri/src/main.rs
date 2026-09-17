@@ -7,9 +7,11 @@ mod waveform_engine;
 mod file_io;
 mod media_processor;
 mod logger;
+mod script_parser;
 
 use audio_engine::{get_audio_devices, start_recording, stop_recording, force_stop_all, check_crashes, AudioState, AudioRecorder};
 use logger::log_debug;
+use script_parser::parse_script_file;
 use export_engine::{export_audio, export_stems, export_all_stems, quick_preview_export, batch_export, export_audio_book, export_backstage_video, export_blooper, process_backstage_shorts, process_backstage_remove_silence, export_backstage_assemble};
 use db::{AppState, init_db, save_project_to_db, load_project_from_db, migrate_json_to_db, save_subtitles, generate_stress_test, load_segments_in_range, check_project_assets, verify_project_files, cleanup_orphaned_files, relink_segment_file, calculate_file_hash, find_file_by_hash};
 use waveform_engine::{extract_audio_peaks_bin, generate_waveform_peaks};
@@ -383,7 +385,8 @@ fn main() {
             concat_backstage_videos,
             get_media_info,
             extract_mkv_assets,
-            create_blank_video
+            create_blank_video,
+            parse_script_file
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

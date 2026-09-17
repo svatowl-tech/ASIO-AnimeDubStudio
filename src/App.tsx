@@ -1103,7 +1103,7 @@ export default function App() {
             if (contentToParse) {
                 const content = contentToParse;
                 try {
-                  const subtitles = await UniversalParserService.parse(content, fileName);
+                  const subtitles = await UniversalParserService.parse(content, fileName, path);
                   if (!subtitles || subtitles.length === 0) {
                     throw new Error("Файл пуст или имеет неверную структуру.");
                   }
@@ -1376,7 +1376,8 @@ export default function App() {
       }
       
       try {
-        const subtitles = await UniversalParserService.parse(content, file.name);
+        const filePath = (file as any).path;
+        const subtitles = await UniversalParserService.parse(content, file.name, filePath);
         if (!subtitles || subtitles.length === 0) {
           throw new Error("Файл пуст или имеет неверную структуру.");
         }
@@ -2397,7 +2398,7 @@ export default function App() {
 
     if (data.textSourceType === 'subtitles_file' || data.textSourceType === 'text_file') {
       if (data.textFileContent && data.textFilePath) {
-        parsedSubtitles = await UniversalParserService.parse(data.textFileContent, data.textFilePath);
+        parsedSubtitles = await UniversalParserService.parse(data.textFileContent, data.textFilePath, data.textFilePath);
       }
     } else if (data.textSourceType === 'clipboard' && data.clipboardText) {
       parsedSubtitles = TextImportService.parseRawText(data.clipboardText);
@@ -3125,7 +3126,7 @@ export default function App() {
                     const textRes = await window.electronAPI.readTextFile(res.data.path);
                     if (textRes.success && textRes.data) {
                       try {
-                        const subtitles = await UniversalParserService.parse(textRes.data, res.data.name);
+                        const subtitles = await UniversalParserService.parse(textRes.data, res.data.name, res.data.path);
                         if (!subtitles || subtitles.length === 0) {
                           throw new Error("Файл пуст или имеет неверную структуру.");
                         }

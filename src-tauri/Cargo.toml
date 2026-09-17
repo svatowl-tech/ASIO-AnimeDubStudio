@@ -28,6 +28,9 @@ zip = "2.2.0"
 chrono = "0.4"
 ebur128 = "0.1"
 rubato = "0.15"
+docx-rs = "0.4.17"
+lopdf = "0.34.0"
+quick-xml = "0.37.2"
 
 
 # Required for our audio implementation

@@ -703,21 +703,17 @@ export const tauriAPI = {
         const fileName = (filePath as string).split(/[/\\]/).pop() || '';
         const ext = fileName.split('.').pop()?.toLowerCase();
         
-        // Use node FS if available, or try fetch for binary
-        let contentToParse: string | ArrayBuffer;
-        if (ext === 'docx' || ext === 'epub' || ext === 'pdf') {
-             try {
-                const arr = await invoke<number[]>('read_binary_file', { path: filePath });
-                contentToParse = new Uint8Array(arr).buffer;
-             } catch (e) {
-                 console.warn("Failed binary fallback, trying text read", e);
-                 contentToParse = await invoke<string>('read_text_file', { path: filePath });
-             }
-        } else {
-             contentToParse = await invoke<string>('read_text_file', { path: filePath });
+        // Use native Rust parser with fallback
+        let contentToParse: string | ArrayBuffer = '';
+        if (ext !== 'docx' && ext !== 'epub' && ext !== 'pdf') {
+          try {
+            contentToParse = await invoke<string>('read_text_file', { path: filePath });
+          } catch (e) {
+            console.warn("Text read fallback warning:", e);
+          }
         }
         
-        const subtitles = await UniversalParserService.parse(contentToParse, fileName);
+        const subtitles = await UniversalParserService.parse(contentToParse, fileName, filePath);
         const roles = Array.from(new Set(subtitles.map(s => s.role)));
 
         if (projectId) {

@@ -68,11 +68,26 @@ export const DocumentImportModal: React.FC<DocumentImportModalProps> = ({
         setFilePath(path);
         setFileName(name);
 
-        const readRes = await window.electronAPI.readTextFile(path);
-        if (readRes.success && readRes.data) {
-          setFileContent(readRes.data);
-        } else if (typeof data === 'object' && data.content) {
-          setFileContent(data.content);
+        const ext = name.split('.').pop()?.toLowerCase();
+        if (path && (ext === 'docx' || ext === 'pdf' || ext === 'epub')) {
+          try {
+            const parsedLines = await UniversalParserService.parse('', name, path);
+            if (parsedLines.length > 0) {
+              const assembledText = parsedLines
+                .map(l => (l.role && l.role !== 'Default' ? `${l.role}: ${l.text}` : l.text))
+                .join('\n\n');
+              setFileContent(assembledText);
+            }
+          } catch (e) {
+            console.warn('Native script parse error:', e);
+          }
+        } else {
+          const readRes = await window.electronAPI.readTextFile(path);
+          if (readRes.success && readRes.data) {
+            setFileContent(readRes.data);
+          } else if (typeof data === 'object' && data.content) {
+            setFileContent(data.content);
+          }
         }
       }
     } catch (err) {

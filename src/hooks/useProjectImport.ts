@@ -125,7 +125,7 @@ export const useProjectImport = (
          try {
            const res = await window.electronAPI.readTextFile(subImportedPath);
            if (res.success && res.data) {
-              const parsed = await import('../services/UniversalParserService').then(m => m.UniversalParserService.parse(res.data, subImportedPath));
+              const parsed = await import('../services/UniversalParserService').then(m => m.UniversalParserService.parse(res.data, subImportedPath, subImportedPath));
               if (parsed && parsed.length > 0) {
                   initialSubtitles = parsed;
                   initialRoles = Array.from(new Set(parsed.map(s => s.role)));
