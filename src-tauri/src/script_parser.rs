@@ -2,12 +2,21 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 
 use quick_xml::events::Event;
 use quick_xml::Reader as XmlReader;
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+
+// Helper macro for thread-safe zero-cost cached regular expressions
+macro_rules! get_regex {
+    ($re:expr) => {{
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new($re).expect("Invalid regex pattern"))
+    }};
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedScriptLine {
@@ -146,9 +155,8 @@ impl ScriptParserEngine {
             || (trimmed_text.starts_with('(') && trimmed_text.ends_with(')'))
             || (trimmed_text.starts_with('*') && trimmed_text.ends_with('*'))
         {
-            let inner = &trimmed_text[1..trimmed_text.len() - 1].trim();
+            let inner = trimmed_text[1..trimmed_text.len() - 1].trim();
             if Self::contains_foley_keywords(inner) || Self::is_sfx_token(inner) {
-                is_foley = true;
                 return (
                     detected_character.or_else(|| Some("SFX".to_string())),
                     String::new(),
@@ -162,16 +170,14 @@ impl ScriptParserEngine {
         if detected_character.is_none() {
             // Pattern A: "CHARACTER (remark): Dialogue text" or "CHARACTER: Dialogue text"
             // or "CHARACTER — Dialogue text"
-            lazy_static_regex!(
-                RE_CLASSIC,
+            let re_classic = get_regex!(
                 r#"^([A-ZА-ЯЁ0-9_'\s\-\.]{2,35})(?:\s*\(([^)]+)\))?\s*[:—–\-]\s*(.+)$"#
             );
-            lazy_static_regex!(
-                RE_TITLECASE,
+            let re_titlecase = get_regex!(
                 r#"^([A-ZА-ЯЁ][a-zа-яёA-ZА-ЯЁ0-9_'\s\-\.]{1,30})(?:\s*\(([^)]+)\))?\s*:\s*(.+)$"#
             );
 
-            if let Some(caps) = RE_CLASSIC.captures(&text) {
+            if let Some(caps) = re_classic.captures(&text) {
                 let name = caps.get(1).map(|m| m.as_str().trim().to_string());
                 let remark = caps.get(2).map(|m| m.as_str().trim().to_string());
                 let content = caps.get(3).map(|m| m.as_str().trim()).unwrap_or("");
@@ -188,7 +194,7 @@ impl ScriptParserEngine {
                         text = content.to_string();
                     }
                 }
-            } else if let Some(caps) = RE_TITLECASE.captures(&text) {
+            } else if let Some(caps) = re_titlecase.captures(&text) {
                 let name = caps.get(1).map(|m| m.as_str().trim().to_string());
                 let remark = caps.get(2).map(|m| m.as_str().trim().to_string());
                 let content = caps.get(3).map(|m| m.as_str().trim()).unwrap_or("");
@@ -208,14 +214,14 @@ impl ScriptParserEngine {
         }
 
         // 3. Extract parenthetical stage directions embedded in the dialogue text
-        lazy_static_regex!(RE_PARENS, r#"\(([^)]+)\)|\[([^\]]+)\]"#);
+        let re_parens = get_regex!(r#"\(([^)]+)\)|\[([^\]]+)\]"#);
         let mut cleaned_text_parts = Vec::new();
         let mut last_idx = 0;
 
-        for mat in RE_PARENS.find_iter(&text) {
+        for mat in re_parens.find_iter(&text) {
             cleaned_text_parts.push(&text[last_idx..mat.start()]);
             let match_str = mat.as_str();
-            let inner = &match_str[1..match_str.len() - 1].trim();
+            let inner = match_str[1..match_str.len() - 1].trim();
 
             if Self::contains_foley_keywords(inner) {
                 is_foley = true;
@@ -317,7 +323,6 @@ impl ScriptParserEngine {
         let mut items = Vec::new();
         let mut buf = Vec::new();
 
-        let mut in_paragraph = false;
         let mut in_run = false;
         let mut in_text = false;
         let mut run_is_bold = false;
@@ -331,7 +336,6 @@ impl ScriptParserEngine {
                 Ok(Event::Start(ref e)) => {
                     let name = e.name().into_inner();
                     if name == b"w:p" {
-                        in_paragraph = true;
                         current_bold_prefix.clear();
                         current_normal_text.clear();
                     } else if name == b"w:r" {
@@ -376,7 +380,6 @@ impl ScriptParserEngine {
                         }
                         current_run_text.clear();
                     } else if name == b"w:p" {
-                        in_paragraph = false;
                         let bold_trimmed = current_bold_prefix.trim();
                         let normal_trimmed = current_normal_text.trim();
 
@@ -457,21 +460,7 @@ impl ScriptParserEngine {
         let mut archive = zip::ZipArchive::new(BufReader::new(file))
             .map_err(|e| format!("Failed to read EPUB container: {}", e))?;
 
-        // 1. Locate OPF file from META-INF/container.xml
-        let mut opf_path = String::new();
-        if let Ok(mut container_file) = archive.by_name("META-INF/container.xml") {
-            let mut xml_content = String::new();
-            if container_file.read_to_string(&mut xml_content).is_ok() {
-                lazy_static_regex!(RE_OPF, r#"full-path=["']([^"']+\.opf)["']"#);
-                if let Some(caps) = RE_OPF.captures(&xml_content) {
-                    if let Some(m) = caps.get(1) {
-                        opf_path = m.as_str().to_string();
-                    }
-                }
-            }
-        }
-
-        // 2. Collect chapter file entries
+        // 1. Collect chapter file entries
         let mut chapter_names = Vec::new();
         for i in 0..archive.len() {
             if let Ok(file) = archive.by_index(i) {
@@ -487,7 +476,7 @@ impl ScriptParserEngine {
             }
         }
 
-        // 3. Read chapter contents into memory
+        // 2. Read chapter contents into memory
         let mut chapter_buffers = Vec::new();
         for name in chapter_names {
             if let Ok(mut entry) = archive.by_name(&name) {
@@ -498,7 +487,7 @@ impl ScriptParserEngine {
             }
         }
 
-        // 4. Parallel extraction across chapters using Rayon
+        // 3. Parallel extraction across chapters using Rayon
         let extracted_chapters: Vec<Vec<String>> = chapter_buffers
             .into_par_iter()
             .map(|data| {
@@ -572,7 +561,7 @@ impl ScriptParserEngine {
         let mut in_events = false;
         let mut format_headers: Vec<String> = Vec::new();
 
-        lazy_static_regex!(RE_ASS_TAGS, r#"\{[^}]+\}"#);
+        let re_ass_tags = get_regex!(r#"\{[^}]+\}"#);
 
         for line_res in reader.lines() {
             let line = line_res.map_err(|e| format!("Error reading ASS: {}", e))?;
@@ -619,7 +608,7 @@ impl ScriptParserEngine {
                         let raw_text = parts.get(text_idx).unwrap_or(&"").trim();
 
                         // Clean ASS tags and linebreaks
-                        let clean_text = RE_ASS_TAGS
+                        let clean_text = re_ass_tags
                             .replace_all(raw_text, "")
                             .replace("\\N", "\n")
                             .replace("\\n", "\n")
@@ -655,19 +644,18 @@ impl ScriptParserEngine {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read SRT file: {}", e))?;
 
-        lazy_static_regex!(
-            RE_SRT,
+        let re_srt = get_regex!(
             r#"(?m)^\d+\s*\r?\n(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*\r?\n([\s\S]*?)(?=\r?\n\r?\n\d+|\r?\n\r?\n$|$)"#
         );
-        lazy_static_regex!(RE_HTML_TAGS, r#"<[^>]+>|\{[^}]+\}"#);
+        let re_html_tags = get_regex!(r#"<[^>]+>|\{[^}]+\}"#);
 
         let mut items = Vec::new();
-        for caps in RE_SRT.captures_iter(&content) {
+        for caps in re_srt.captures_iter(&content) {
             let start_str = caps.get(1).map(|m| m.as_str()).unwrap_or("00:00:00,000");
             let end_str = caps.get(2).map(|m| m.as_str()).unwrap_or("00:00:00,000");
             let text_block = caps.get(3).map(|m| m.as_str()).unwrap_or("");
 
-            let clean_text = RE_HTML_TAGS
+            let clean_text = re_html_tags
                 .replace_all(text_block, "")
                 .lines()
                 .map(|l| l.trim())
@@ -696,15 +684,14 @@ impl ScriptParserEngine {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read VTT file: {}", e))?;
 
-        lazy_static_regex!(
-            RE_VTT,
+        let re_vtt = get_regex!(
             r#"(?m)(?:(?:.+)\r?\n)?(\d{2}:)?(\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:)?(\d{2}:\d{2}\.\d{3})(?:.*?)\r?\n([\s\S]*?)(?=\r?\n\r?\n|\r?\n$|$)"#
         );
-        lazy_static_regex!(RE_VTT_TAGS, r#"<[^>]+>"#);
-        lazy_static_regex!(RE_VTT_VOICE, r#"<v\s+([^>]+)>"#);
+        let re_vtt_tags = get_regex!(r#"<[^>]+>"#);
+        let re_vtt_voice = get_regex!(r#"<v\s+([^>]+)>"#);
 
         let mut items = Vec::new();
-        for caps in RE_VTT.captures_iter(&content) {
+        for caps in re_vtt.captures_iter(&content) {
             let start_h = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let start_ms_part = caps.get(2).map(|m| m.as_str()).unwrap_or("00:00.000");
             let end_h = caps.get(3).map(|m| m.as_str()).unwrap_or("");
@@ -715,11 +702,11 @@ impl ScriptParserEngine {
                 continue;
             }
 
-            let character_hint = RE_VTT_VOICE
+            let character_hint = re_vtt_voice
                 .captures(text_block)
                 .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()));
 
-            let clean_text = RE_VTT_TAGS
+            let clean_text = re_vtt_tags
                 .replace_all(text_block, "")
                 .lines()
                 .map(|l| l.trim())
@@ -924,15 +911,6 @@ impl ScriptParserEngine {
         }
     }
 }
-
-// Macro helper for thread-safe static regex caching
-macro_rules! lazy_static_regex {
-    ($name:ident, $re:expr) => {
-        static $name: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let $name = $name.get_or_init(|| regex::Regex::new($re).expect("Invalid regex pattern"));
-    };
-}
-use lazy_static_regex;
 
 /// Tauri 2.0 Command: Parse native script file
 #[tauri::command]
