@@ -4,10 +4,11 @@ import { Plus, FolderOpen, Play } from 'lucide-react';
 interface StartScreenProps {
   onNewProject: () => void;
   onOpenProject: () => void;
-  recentProjects: { name: string; path: string }[];
+  recentProjects: { name: string; path: string; updatedAt?: number }[];
+  onLoadProject?: (path: string) => void;
 }
 
-export const StartScreen: React.FC<StartScreenProps> = ({ onNewProject, onOpenProject, recentProjects }) => {
+export const StartScreen: React.FC<StartScreenProps> = ({ onNewProject, onOpenProject, recentProjects, onLoadProject }) => {
   return (
     <div className="flex flex-col items-center justify-center h-screen bg-zinc-950 text-white p-8">
       <h1 className="text-4xl font-black mb-12">DubStudio Pro</h1>
@@ -37,9 +38,18 @@ export const StartScreen: React.FC<StartScreenProps> = ({ onNewProject, onOpenPr
           <h2 className="text-sm font-bold text-zinc-500 uppercase tracking-widest mb-4">Недавние проекты</h2>
           <div className="space-y-2">
             {recentProjects.map((proj, i) => (
-              <div key={i} className="flex items-center justify-between p-4 bg-zinc-900 border border-white/10 rounded-xl">
-                <span className="font-medium">{proj.name}</span>
-                <button className="p-2 hover:bg-white/10 rounded-lg" title="Открыть проект"><Play className="w-4 h-4 text-indigo-500" /></button>
+              <div 
+                key={i} 
+                onClick={() => onLoadProject?.(proj.path)}
+                className="flex items-center justify-between p-4 bg-zinc-900 border border-white/10 rounded-xl hover:bg-white/5 transition-colors cursor-pointer"
+              >
+                <div className="flex flex-col">
+                  <span className="font-medium text-zinc-200">{proj.name}</span>
+                  {proj.path && <span className="text-xs text-zinc-500 font-mono">{proj.path}</span>}
+                </div>
+                <button className="p-2 hover:bg-white/10 rounded-lg" title="Открыть проект">
+                  <Play className="w-4 h-4 text-indigo-500" />
+                </button>
               </div>
             ))}
           </div>

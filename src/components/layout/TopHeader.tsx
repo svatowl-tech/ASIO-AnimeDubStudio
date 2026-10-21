@@ -35,7 +35,18 @@ interface TopHeaderProps {
 }
 
 export const TopHeader: React.FC<TopHeaderProps> = (props) => {
-  const { project, setProject, recentProjects, handleNewProject, handleOpenProject, handleSaveProject, handleCloseProject, onLoadProject } = useProjectData();
+  const { 
+    project, 
+    setProject, 
+    recentProjects, 
+    removeRecentProject, 
+    clearRecentProjects, 
+    handleNewProject, 
+    handleOpenProject, 
+    handleSaveProject, 
+    handleCloseProject, 
+    onLoadProject 
+  } = useProjectData();
 
   const handleSelectProjectFolder = async () => {
     if (window.electronAPI && project && project.projectPath) {
@@ -119,6 +130,8 @@ export const TopHeader: React.FC<TopHeaderProps> = (props) => {
       handleExportStems={props.handleExportStems}
       handleExportAllStemsZip={props.handleExportAllStemsZip}
       onLoadProject={onLoadProject}
+      handleRemoveRecentProject={removeRecentProject}
+      handleClearRecentProjects={clearRecentProjects}
       onOpenCastingModal={props.onOpenCastingModal}
       onOpenDocumentModal={props.onOpenDocumentModal}
       onUpdateDubberNick={props.onUpdateDubberNick}

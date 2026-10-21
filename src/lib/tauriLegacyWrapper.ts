@@ -289,7 +289,7 @@ function bufferToFloat32Array(buffer: unknown): Float32Array {
 export const tauriAPI = {
   // --- PROJECT MANAGEMENT ---
   openFolder: async (): Promise<BridgeResponse<string>> => {
-    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    if (!IS_TAURI) return { success: true, data: '/preview/exports' };
     try {
         const result = await open({ directory: true });
         return result ? { success: true, data: result as string } : { success: false, error: 'User cancelled' };
@@ -300,7 +300,19 @@ export const tauriAPI = {
   },
 
   saveProjectJson: async (args: { projectPath: string, projectData: any }): Promise<BridgeResponse<boolean>> => {
-    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    if (!IS_TAURI) {
+      try {
+        const cleanData = { ...args.projectData };
+        const key = `dubstudio_project_${args.projectPath || args.projectData.name || 'default'}`;
+        localStorage.setItem(key, JSON.stringify(cleanData));
+        if (args.projectData.name) {
+          localStorage.setItem(`dubstudio_project_name_${args.projectData.name}`, JSON.stringify(cleanData));
+        }
+        return { success: true, data: true };
+      } catch (err) {
+        return { success: false, data: false, error: String(err) };
+      }
+    }
     try {
       // Create hierarchy first
       await invoke('init_project_folder', { path: args.projectPath });
@@ -320,13 +332,45 @@ export const tauriAPI = {
   },
 
   loadProjectJson: async (filePath: string): Promise<BridgeResponse<any>> => {
-    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    if (!IS_TAURI) {
+      try {
+        let raw = localStorage.getItem(`dubstudio_project_${filePath}`) 
+               || localStorage.getItem(`dubstudio_project_name_${filePath}`);
+        if (!raw) {
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && (k.startsWith('dubstudio_project_') || k.startsWith('dubstudio_project_name_'))) {
+              const stripped = k.replace('dubstudio_project_name_', '').replace('dubstudio_project_', '');
+              if (stripped === filePath || filePath.includes(stripped) || stripped.includes(filePath)) {
+                raw = localStorage.getItem(k);
+                break;
+              }
+            }
+          }
+        }
+        if (raw) {
+          const projectData = JSON.parse(raw);
+          return { success: true, data: projectData };
+        }
+        return { success: false, error: 'Проект не найден в браузере' };
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    }
     try {
         let actualPath = filePath;
-        // If user picked a folder initially (legacy behavior), we can't easily find the .dub file.
-        // But the new 'Open Project' will pick a .dub file directly.
-        if (!filePath.endsWith('.dub')) {
-            return { success: false, error: 'Пожалуйста, выберите файл .dub' };
+        // If user provided a folder path instead of .dub file, try to resolve to .dub
+        if (!actualPath.endsWith('.dub')) {
+            const folderName = actualPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || 'project';
+            const candidate1 = `${actualPath}/${folderName}.dub`.replace(/\\/g, '/');
+            try {
+              const testContent = await invoke<string>('read_text_file', { path: candidate1 });
+              if (testContent) {
+                actualPath = candidate1;
+              }
+            } catch (_) {
+              actualPath = `${actualPath}/project.dub`.replace(/\\/g, '/');
+            }
         }
 
         const content = await invoke<string>('read_text_file', { path: actualPath });
@@ -610,7 +654,17 @@ export const tauriAPI = {
 
   // --- EXPORT ENGINE ---
   onExportProgress: (cb: (percent: number) => void): (() => void) => {
-    if (!IS_TAURI) return () => {};
+    if (!IS_TAURI) {
+      const listener = (e: any) => {
+        if (e.detail && typeof e.detail.percent === 'number') {
+          cb(e.detail.percent);
+        }
+      };
+      window.addEventListener('dubstudio_preview_export_progress', listener);
+      return () => {
+        window.removeEventListener('dubstudio_preview_export_progress', listener);
+      };
+    }
     let unlisten: UnlistenFn | null = null;
     let isCancelled = false;
     
@@ -631,14 +685,26 @@ export const tauriAPI = {
   },
   
   exportAudio: async (options: any): Promise<BridgeResponse<{ success: boolean }>> => {
-    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    if (!IS_TAURI) {
+      console.log("[Bridge] exportAudio simulated in non-Tauri environment:", options);
+      for (const pct of [15, 35, 60, 85, 100]) {
+        await new Promise(r => setTimeout(r, 200));
+        window.dispatchEvent(new CustomEvent('dubstudio_preview_export_progress', { detail: { percent: pct } }));
+      }
+      return { success: true, data: { success: true } };
+    }
     try {
         await invokeWithWatchdog('export_audio', {
             projectJson: options.projectJson,
             outputPath: options.outputPath,
             format: options.format || 'wav',
             bitDepth: options.bitDepth,
-            bitrate: options.bitrate
+            bitrate: options.bitrate,
+            forceMono: options.forceMono,
+            normalize: options.normalize,
+            targetLufs: options.targetLufs,
+            maxPeak: options.maxPeak,
+            normalizationMode: options.normalizationMode,
         }, { progressEvent: 'export-progress' });
         return { success: true, data: { success: true } };
     } catch(err) {
@@ -648,7 +714,17 @@ export const tauriAPI = {
   },
 
   exportStems: async (args: { projectData: any, outputDir: string, bitDepth: string }): Promise<BridgeResponse<{ success: boolean }>> => {
-    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    if (!IS_TAURI) {
+      console.log("[Bridge] exportStems simulated in preview:", args);
+      const tracks = args.projectData?.tracks || [{ name: 'Оригинал' }, { name: 'Dubs 1' }];
+      for (let i = 0; i < tracks.length; i++) {
+        await new Promise(r => setTimeout(r, 350));
+        window.dispatchEvent(new CustomEvent('dubstudio_preview_stem_progress', { 
+          detail: { current: i + 1, total: tracks.length, trackName: tracks[i].name || `Дорожка ${i + 1}` } 
+        }));
+      }
+      return { success: true, data: { success: true } };
+    }
     try {
         await invokeWithWatchdog('export_stems', {
             projectJson: JSON.stringify({
@@ -668,7 +744,15 @@ export const tauriAPI = {
   },
 
   onStemProgress: (cb: (data: { current: number, total: number, trackName: string }) => void): (() => void) => {
-      if (!IS_TAURI) return () => {};
+      if (!IS_TAURI) {
+        const listener = (e: any) => {
+          if (e.detail) cb(e.detail);
+        };
+        window.addEventListener('dubstudio_preview_stem_progress', listener);
+        return () => {
+          window.removeEventListener('dubstudio_preview_stem_progress', listener);
+        };
+      }
       let unlisten: UnlistenFn | null = null;
       let isCancelled = false;
       
@@ -937,7 +1021,37 @@ export const tauriAPI = {
   },
 
   openFile: async (options: { title: string, filters: { name: string, extensions: string[] }[] }): Promise<BridgeResponse<{ path: string, name: string, content?: string }>> => {
-    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    if (!IS_TAURI) {
+      return new Promise<{ success: boolean; data?: { path: string; name: string; content?: string }; error?: string }>((resolve) => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        const exts = options.filters?.flatMap(f => f.extensions)?.map(ext => `.${ext}`).join(',');
+        if (exts) input.accept = exts;
+        input.onchange = async () => {
+          const file = input.files?.[0];
+          if (!file) {
+            resolve({ success: false, error: 'Cancelled' });
+            return;
+          }
+          let content: string | undefined = undefined;
+          if (/\.(dub|json|srt|ass|vtt|txt)$/i.test(file.name)) {
+            content = await file.text();
+            if (file.name.endsWith('.dub')) {
+              localStorage.setItem(`dubstudio_project_${file.name}`, content);
+            }
+          }
+          resolve({
+            success: true,
+            data: {
+              path: file.name,
+              name: file.name,
+              content
+            }
+          });
+        };
+        input.click();
+      });
+    }
     try {
         const path = await open({
             title: options.title,
@@ -963,7 +1077,10 @@ export const tauriAPI = {
   },
 
   saveFile: async (options: { title: string, defaultPath: string, filters: { name: string, extensions: string[] }[] }): Promise<BridgeResponse<string>> => {
-    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    if (!IS_TAURI) {
+      const defaultName = options.defaultPath ? options.defaultPath.split(/[/\\]/).pop() || 'export_audio.wav' : 'export_audio.wav';
+      return { success: true, data: defaultName };
+    }
     try {
         const path = await save({
             title: options.title,
@@ -1074,7 +1191,14 @@ export const tauriAPI = {
   },
 
   batchExport: async (options: any): Promise<BridgeResponse<string[]>> => {
-    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    if (!IS_TAURI) {
+      console.log("[Bridge] batchExport simulated in preview:", options);
+      for (const pct of [25, 50, 75, 100]) {
+        await new Promise(r => setTimeout(r, 200));
+        window.dispatchEvent(new CustomEvent('dubstudio_preview_export_progress', { detail: { percent: pct } }));
+      }
+      return { success: true, data: ['/preview/exports/replica_001.wav', '/preview/exports/replica_002.wav'] };
+    }
     try {
       const result = await invoke<string[]>('batch_export', options);
       return { success: true, data: result };
@@ -1083,7 +1207,14 @@ export const tauriAPI = {
     }
   },
   exportAudioBook: async (options: any): Promise<BridgeResponse<{ success: boolean, path?: string }>> => {
-    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    if (!IS_TAURI) {
+      console.log("[Bridge] exportAudioBook simulated in preview:", options);
+      for (const pct of [20, 50, 80, 100]) {
+        await new Promise(r => setTimeout(r, 200));
+        window.dispatchEvent(new CustomEvent('dubstudio_preview_export_progress', { detail: { percent: pct } }));
+      }
+      return { success: true, data: { success: true, path: options.outputPath || '/preview/audiobook.wav' } };
+    }
     try {
       const mappedOptions = {
           projectPath: options.projectPath,
@@ -1226,7 +1357,14 @@ export const tauriAPI = {
   },
 
   exportAllStems: async (args: { projectId: string, projectName: string, outputPath: string }): Promise<BridgeResponse<string>> => {
-    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    if (!IS_TAURI) {
+      console.log("[Bridge] exportAllStems simulated in preview:", args);
+      for (const pct of [20, 50, 75, 100]) {
+        await new Promise(r => setTimeout(r, 200));
+        window.dispatchEvent(new CustomEvent('dubstudio_preview_export_progress', { detail: { percent: pct } }));
+      }
+      return { success: true, data: args.outputPath || '/preview/stems.zip' };
+    }
     try {
         const result = await invokeWithWatchdog('export_all_stems', args);
         return { success: true, data: result as string };

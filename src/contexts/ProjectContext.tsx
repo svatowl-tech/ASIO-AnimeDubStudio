@@ -4,7 +4,10 @@ import { Project } from '../types';
 export interface ProjectContextType {
   project: Project | null;
   setProject: React.Dispatch<React.SetStateAction<Project | null>>;
-  recentProjects: { name: string; path: string }[];
+  recentProjects: { name: string; path: string; updatedAt?: number }[];
+  addRecentProject?: (name: string, path: string) => void;
+  removeRecentProject?: (path: string) => void;
+  clearRecentProjects?: () => void;
   handleNewProject: () => Promise<void>;
   handleOpenProject: (path?: string) => Promise<void>;
   handleSaveProject: () => Promise<void>;

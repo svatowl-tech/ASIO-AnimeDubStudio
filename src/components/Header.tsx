@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { 
   FolderOpen, 
   Settings, 
@@ -15,7 +15,8 @@ import {
   Play,
   Keyboard,
   Sparkles,
-  User
+  User,
+  ChevronDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn, formatHotkey, getDefaultKeyMap } from '../lib/utils';
@@ -26,7 +27,9 @@ import { useUIState } from '../contexts/UIContext';
 
 interface HeaderProps {
   project: any;
-  recentProjects: { name: string; path: string }[];
+  recentProjects: { name: string; path: string; updatedAt?: number }[];
+  handleRemoveRecentProject?: (path: string) => void;
+  handleClearRecentProjects?: () => void;
   showProjectMenu: boolean;
   setShowProjectMenu: (show: boolean) => void;
   handleNewProject: () => void;
@@ -118,6 +121,8 @@ const HotkeyHints = ({ onClose, keyMap }: { onClose: () => void, keyMap: any }) 
 const Header: React.FC<HeaderProps> = ({
   project,
   recentProjects,
+  handleRemoveRecentProject,
+  handleClearRecentProjects,
   showProjectMenu,
   setShowProjectMenu,
   handleNewProject,
@@ -155,6 +160,38 @@ const Header: React.FC<HeaderProps> = ({
   const { toggleSettings } = useUIState();
   const [showHotkeys, setShowHotkeys] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+  const projectMenuRef = useRef<HTMLDivElement>(null);
+
+  // Close menus on outside click safely without backdrop overlay glitches
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (showExportMenu && exportMenuRef.current && !exportMenuRef.current.contains(target)) {
+        setShowExportMenu(false);
+      }
+      if (showProjectMenu && projectMenuRef.current && !projectMenuRef.current.contains(target)) {
+        setShowProjectMenu(false);
+      }
+    };
+
+    if (showExportMenu || showProjectMenu) {
+      document.addEventListener('mousedown', handleOutsideClick);
+      document.addEventListener('touchstart', handleOutsideClick);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      document.removeEventListener('touchstart', handleOutsideClick);
+    };
+  }, [showExportMenu, showProjectMenu, setShowProjectMenu]);
+
+  // Keep recent projects ordered newest first
+  const sortedRecentProjects = useMemo(() => {
+    if (!recentProjects || recentProjects.length === 0) return [];
+    return [...recentProjects].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  }, [recentProjects]);
 
   const baseImportOptions = [
     { icon: <FileVideo className="w-5 h-5 text-indigo-400" />, title: "Видео", description: "Открыть видеофайл для озвучки", onClick: () => { setShowImportModal(false); if (isDesktop) handleSelectVideo(); } },
@@ -223,26 +260,122 @@ const Header: React.FC<HeaderProps> = ({
               Импорт
           </button>
 
-          {project && (
-            <div className="relative group">
-              <button 
-                className="flex items-center gap-2 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-[10px] font-bold transition-all shadow-lg shadow-indigo-600/20"
-              >
-                <Download className="w-3.5 h-3.5" /> <span className="hidden md:inline">Экспорт</span>
-              </button>
-              <div className="absolute right-0 top-full mt-1 w-56 bg-zinc-900 border border-white/10 rounded-lg shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
-                <button onClick={() => handleExport('WAV')} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5">WAV (24-bit 48k)</button>
-                <button onClick={() => handleExport('FLAC')} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5">FLAC (Lossless)</button>
-                <button onClick={() => handleExport('MP3')} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5">MP3 (320kbps)</button>
-                <button onClick={handleBatchExport} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-indigo-400">Пакетный экспорт</button>
-                <button onClick={handleMuxVideo} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-purple-400">Экспорт видео с озвучкой</button>
-                <button onClick={() => handleExportAudioBook(1.5)} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-emerald-400">Аудиокнига (1.5s пауз)</button>
-                <button onClick={() => handleExportAudioBook(1.0)} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-teal-400">Реплики единым (1.0s пауз)</button>
-                <button onClick={handleExportStems} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-amber-400">Экспорт стемов</button>
-                <button onClick={handleExportAllStemsZip} className="w-full px-4 py-2 text-left text-[10px] font-bold hover:bg-white/5 transition-colors border-b border-white/5 text-zinc-400">Экспорт стемов (ZIP)</button>
-              </div>
-            </div>
-          )}
+          <div className="relative" ref={exportMenuRef}>
+            <button 
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setShowExportMenu(prev => !prev);
+                setShowProjectMenu(false);
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 rounded-lg text-xs font-bold transition-all shadow-lg shadow-indigo-600/20 active:scale-95 cursor-pointer"
+              title="Экспорт дорожек озвучки и проекта"
+            >
+              <Download className="w-3.5 h-3.5" /> 
+              <span className="inline font-bold">Экспорт</span>
+              <ChevronDown className={`w-3 h-3 text-indigo-200 transition-transform ${showExportMenu ? 'rotate-180' : ''}`} />
+            </button>
+            
+            <AnimatePresence>
+              {showExportMenu && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                  className="absolute right-0 top-full mt-2 w-64 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl z-[70] overflow-hidden"
+                >
+                    <div className="p-2 space-y-1">
+                      <div className="px-3 py-1 text-[10px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
+                        <span>Аудиодорожки</span>
+                        <span className="text-[9px] text-indigo-400 font-mono">с нормализацией</span>
+                      </div>
+                      
+                      <button 
+                        onClick={() => { setShowExportMenu(false); handleExport('WAV'); }} 
+                        className="w-full flex items-center justify-between px-3 py-2 hover:bg-white/5 rounded-lg text-xs font-bold transition-colors text-left group"
+                      >
+                        <span className="flex items-center gap-2 text-white">
+                          <span className="w-2 h-2 rounded-full bg-indigo-500 group-hover:scale-125 transition-transform"></span>
+                          WAV
+                        </span>
+                        <span className="text-[10px] text-zinc-400 font-normal">24-bit 48kHz</span>
+                      </button>
+                      
+                      <button 
+                        onClick={() => { setShowExportMenu(false); handleExport('MP3'); }} 
+                        className="w-full flex items-center justify-between px-3 py-2 hover:bg-white/5 rounded-lg text-xs font-bold transition-colors text-left group"
+                      >
+                        <span className="flex items-center gap-2 text-white">
+                          <span className="w-2 h-2 rounded-full bg-blue-500 group-hover:scale-125 transition-transform"></span>
+                          MP3
+                        </span>
+                        <span className="text-[10px] text-zinc-400 font-normal">320 kbps</span>
+                      </button>
+                      
+                      <button 
+                        onClick={() => { setShowExportMenu(false); handleExport('FLAC'); }} 
+                        className="w-full flex items-center justify-between px-3 py-2 hover:bg-white/5 rounded-lg text-xs font-bold transition-colors text-left group"
+                      >
+                        <span className="flex items-center gap-2 text-white">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 group-hover:scale-125 transition-transform"></span>
+                          FLAC
+                        </span>
+                        <span className="text-[10px] text-zinc-400 font-normal">Lossless</span>
+                      </button>
+                    </div>
+
+                    <div className="border-t border-white/5 p-2 space-y-1">
+                      <div className="px-3 py-1 text-[10px] font-bold text-zinc-400 uppercase tracking-wider">
+                        Дополнительно
+                      </div>
+                      
+                      <button 
+                        onClick={() => { setShowExportMenu(false); handleBatchExport(); }} 
+                        className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/5 rounded-lg text-xs font-medium text-indigo-300 transition-colors text-left"
+                      >
+                        Пакетный экспорт
+                      </button>
+                      
+                      <button 
+                        onClick={() => { setShowExportMenu(false); handleMuxVideo(); }} 
+                        className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/5 rounded-lg text-xs font-medium text-purple-300 transition-colors text-left"
+                      >
+                        Экспорт видео с озвучкой
+                      </button>
+                      
+                      <button 
+                        onClick={() => { setShowExportMenu(false); handleExportAudioBook(1.5); }} 
+                        className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/5 rounded-lg text-xs font-medium text-emerald-300 transition-colors text-left"
+                      >
+                        Аудиокнига (1.5с пауз)
+                      </button>
+
+                      <button 
+                        onClick={() => { setShowExportMenu(false); handleExportAudioBook(1.0); }} 
+                        className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/5 rounded-lg text-xs font-medium text-teal-300 transition-colors text-left"
+                      >
+                        Реплики единым (1.0с пауз)
+                      </button>
+
+                      <button 
+                        onClick={() => { setShowExportMenu(false); handleExportStems(); }} 
+                        className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/5 rounded-lg text-xs font-medium text-amber-300 transition-colors text-left"
+                      >
+                        Экспорт стемов
+                      </button>
+
+                      <button 
+                        onClick={() => { setShowExportMenu(false); handleExportAllStemsZip(); }} 
+                        className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/5 rounded-lg text-xs font-medium text-zinc-300 transition-colors text-left"
+                      >
+                        Экспорт стемов (ZIP)
+                      </button>
+                    </div>
+                  </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
 
           {project && hasBackstageSessions && (
             <button
@@ -256,25 +389,29 @@ const Header: React.FC<HeaderProps> = ({
             </button>
           )}
           
-          <div className="relative">
+          <div className="relative" ref={projectMenuRef}>
             <button 
-              onClick={() => setShowProjectMenu(!showProjectMenu)}
-              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-[10px] font-bold flex items-center gap-2 transition-all shadow-lg shadow-indigo-600/20"
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setShowProjectMenu(!showProjectMenu);
+                setShowExportMenu(false);
+              }}
+              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-bold flex items-center gap-2 transition-all shadow-lg shadow-indigo-600/20 active:scale-95 cursor-pointer"
             >
               <Layers className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Проекты</span>
+              <span className="inline font-bold">Проекты</span>
             </button>
             
             <AnimatePresence>
               {showProjectMenu && (
-                <>
-                  <div className="fixed inset-0 z-[60]" onClick={() => setShowProjectMenu(false)} />
-                  <motion.div 
-                    initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                    className="absolute top-full right-0 mt-2 w-64 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl z-[70] overflow-hidden"
-                  >
+                <motion.div 
+                  initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                  className="absolute top-full right-0 mt-2 w-64 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl z-[70] overflow-hidden"
+                >
                     <div className="p-2 space-y-1">
                       <button 
                         onClick={() => { handleNewProject(); setShowProjectMenu(false); }}
@@ -341,28 +478,67 @@ const Header: React.FC<HeaderProps> = ({
                       </div>
                     )}
                     
-                    {recentProjects.length > 0 && (
+                    {sortedRecentProjects.length > 0 && (
                       <div className="border-t border-white/5 p-2">
-                        <div className="px-3 py-2 text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Недавние</div>
-                        <div className="space-y-1 max-h-48 overflow-y-auto custom-scrollbar">
-                          {recentProjects.map((proj, i) => (
-                            <button 
-                              key={i}
+                        <div className="px-3 py-1.5 text-[10px] font-bold text-zinc-500 uppercase tracking-widest flex items-center justify-between">
+                          <span>Недавние проекты</span>
+                          {handleClearRecentProjects && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleClearRecentProjects();
+                              }}
+                              className="text-[9px] text-zinc-500 hover:text-rose-400 transition-colors uppercase tracking-normal"
+                              title="Очистить список недавних проектов"
+                            >
+                              Очистить
+                            </button>
+                          )}
+                        </div>
+                        <div className="space-y-1 max-h-52 overflow-y-auto custom-scrollbar">
+                          {sortedRecentProjects.map((proj, i) => (
+                            <div 
+                              key={`${proj.path}-${i}`}
                               onClick={() => {
                                 onLoadProject(proj.path);
                                 setShowProjectMenu(false);
                               }}
-                              className="w-full flex items-center justify-between px-3 py-2 hover:bg-white/5 rounded-lg text-xs transition-colors group"
+                              className="w-full flex items-center justify-between px-3 py-2 hover:bg-white/5 rounded-lg text-xs transition-colors group cursor-pointer"
+                              title={`Открыть: ${proj.path}`}
                             >
-                              <span className="truncate flex-1 text-left">{proj.name}</span>
-                              <Play className="w-3 h-3 text-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-                            </button>
+                              <div className="flex flex-col min-w-0 flex-1 text-left mr-2">
+                                <span className="truncate font-semibold text-zinc-200 group-hover:text-indigo-300 transition-colors">
+                                  {proj.name}
+                                </span>
+                                {proj.path && (
+                                  <span className="truncate text-[10px] text-zinc-500 font-mono">
+                                    {proj.path}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-1.5 flex-shrink-0">
+                                <Play className="w-3.5 h-3.5 text-indigo-400 opacity-60 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all" />
+                                {handleRemoveRecentProject && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleRemoveRecentProject(proj.path);
+                                    }}
+                                    className="p-1 hover:text-rose-400 text-zinc-500 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                                    title="Удалить из списка"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
                           ))}
                         </div>
                       </div>
                     )}
                   </motion.div>
-                </>
               )}
             </AnimatePresence>
           </div>

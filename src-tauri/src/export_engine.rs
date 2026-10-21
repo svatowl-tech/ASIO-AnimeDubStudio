@@ -15,6 +15,26 @@ use hound::{WavReader, WavWriter, WavSpec, SampleFormat};
 use std::io::Write;
 use sqlx::Row;
 
+#[inline]
+pub fn new_ffmpeg_command() -> Command {
+    let mut cmd = Command::new(crate::get_ffmpeg_path());
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
+#[inline]
+pub fn new_ffprobe_command() -> Command {
+    let mut cmd = Command::new(crate::get_ffprobe_path());
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 // ... inside export_engine.rs ...
 
 #[tauri::command]
@@ -171,6 +191,10 @@ pub struct ExportProjectData {
 pub struct StemOptions {
     pub bit_depth: String, // "16", "24", "32float"
     pub output_dir: String,
+    pub normalize: Option<bool>,
+    pub target_lufs: Option<f64>,
+    pub max_peak: Option<f64>,
+    pub normalization_mode: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -207,12 +231,19 @@ pub async fn export_stems(
 
     let mut handles = Vec::new();
 
+        let norm_clone = options.normalize;
+        let lufs_clone = options.target_lufs;
+        let peak_clone = options.max_peak;
+
         for (i, track) in project.tracks.into_iter().enumerate() {
             let sem_clone = Arc::clone(&semaphore);
             let app_clone = app_handle.clone();
             let enc_clone = encoder.to_string();
             let out_dir_clone = output_dir.to_path_buf();
             let track_idx = i + 1;
+            let norm_enabled = norm_clone.unwrap_or(false);
+            let target_lufs_val = lufs_clone.unwrap_or(-20.0).clamp(-70.0, -5.0);
+            let max_peak_val = peak_clone.unwrap_or(-9.0).clamp(-9.0, 0.0);
 
             let handle = tokio::spawn(async move {
                 let _permit = sem_clone.acquire().await.map_err(|e| e.to_string())?;
@@ -237,7 +268,7 @@ pub async fn export_stems(
 
                 // --- FFmpeg Logic for Stem ---
                 // We use filter_complex to place each segment at its correct timeline position
-                let mut cmd = Command::new(crate::get_ffmpeg_path());
+                let mut cmd = new_ffmpeg_command();
                 cmd.arg("-nostdin");
                 cmd.arg("-y");
 
@@ -270,6 +301,10 @@ pub async fn export_stems(
             }
             filter.push_str(&format!("amix=inputs={}:duration=longest:dropout_transition=0:normalize=0", valid_segments.len()));
 
+            if norm_enabled {
+                filter.push_str(&format!(",loudnorm=I={:.1}:TP={:.1}:LRA=11", target_lufs_val, max_peak_val));
+            }
+
             cmd.arg("-filter_complex").arg(filter);
             cmd.arg("-c:a").arg(enc_clone);
             cmd.arg(out_file.to_string_lossy().to_string());
@@ -300,6 +335,11 @@ pub async fn export_audio(
     format: String, // "wav", "mp3", "flac"
     bit_depth: Option<String>, // e.g., "16", "24"
     bitrate: Option<String>, // e.g., "320k"
+    force_mono: Option<bool>,
+    normalize: Option<bool>,
+    target_lufs: Option<f64>,
+    max_peak: Option<f64>,
+    normalization_mode: Option<String>,
 ) -> Result<(), String> {
     let project: ExportProjectData = serde_json::from_str(&project_json)
         .map_err(|e| format!("Failed to parse project JSON: {}", e))?;
@@ -375,7 +415,7 @@ pub async fn export_audio(
             let seg_path = segment.file_path.clone().unwrap_or_default();
             let out_file_str = out_file.to_string_lossy().to_string();
 
-            let status = Command::new(crate::get_ffmpeg_path())
+            let status = new_ffmpeg_command()
                 .arg("-nostdin")
                 .arg("-y")
                 .arg("-i").arg(&seg_path)
@@ -426,7 +466,7 @@ pub async fn export_audio(
             chunk_args.push("pcm_s16le".to_string());
             chunk_args.push(out_file.to_string_lossy().to_string());
 
-            let status = Command::new(crate::get_ffmpeg_path())
+            let status = new_ffmpeg_command()
                 .args(&chunk_args)
                 .output()
                 .await
@@ -441,30 +481,92 @@ pub async fn export_audio(
         pass += 1;
     }
 
-    let mut mix_args = vec!["-y".to_string()];
-    
-    for path in &current_files {
-        mix_args.push("-i".to_string());
-        mix_args.push(path.to_string_lossy().to_string());
-    }
-
-    if current_files.len() > 1 {
+    let combined_file = if current_files.len() > 1 {
+        let mix_out = temp_dir.join("combined_mix.wav");
+        let mut mix_args = vec!["-nostdin".to_string(), "-y".to_string()];
+        for path in &current_files {
+            mix_args.push("-i".to_string());
+            mix_args.push(path.to_string_lossy().to_string());
+        }
         let filter = format!("amix=inputs={}:duration=longest:dropout_transition=0:normalize=0", current_files.len());
         mix_args.push("-filter_complex".to_string());
         mix_args.push(filter);
+        mix_args.push("-c:a".to_string());
+        mix_args.push("pcm_s16le".to_string());
+        mix_args.push(mix_out.to_string_lossy().to_string());
+
+        let status = new_ffmpeg_command()
+            .args(&mix_args)
+            .output()
+            .await
+            .map_err(|e| format!("FFmpeg final mix failed to execute: {}", e))?;
+
+        if !status.status.success() {
+            return Err(format!("FFmpeg final mix failed: {}", String::from_utf8_lossy(&status.stderr)));
+        }
+        mix_out
+    } else if !current_files.is_empty() {
+        current_files[0].clone()
+    } else {
+        return Err("No audio files were generated to mix".to_string());
+    };
+
+    let mut audio_filters = Vec::new();
+
+    if force_mono.unwrap_or(false) {
+        audio_filters.push("pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1".to_string());
+    }
+
+    if normalize.unwrap_or(false) {
+        let target_lufs_val = target_lufs.unwrap_or(-20.0).clamp(-70.0, -5.0);
+        let max_peak_val = max_peak.unwrap_or(-9.0);
+        let mode = normalization_mode.unwrap_or_else(|| "lufs".to_string());
+
+        if mode == "peak" {
+            // Measure actual peak of the combined audio
+            let (_mean_v, max_v) = get_volume_stats(&combined_file.to_string_lossy(), None, None).await;
+            if let Some(peak_val) = max_v {
+                if peak_val > -85.0 {
+                    let gain_db = max_peak_val - peak_val;
+                    if gain_db.abs() > 0.05 {
+                        audio_filters.push(format!("volume={:.2}dB", gain_db));
+                    }
+                }
+            }
+        } else {
+            // Mode is "lufs" (default: target -20 LUFS, peak <= -9 dBTP)
+            if max_peak_val >= -9.0 {
+                let tp = max_peak_val.clamp(-9.0, 0.0);
+                audio_filters.push(format!("loudnorm=I={:.1}:TP={:.1}:LRA=11", target_lufs_val, tp));
+            } else {
+                let extra_attenuation = max_peak_val - (-9.0);
+                audio_filters.push(format!("loudnorm=I={:.1}:TP=-9.0:LRA=11,volume={:.1}dB", target_lufs_val, extra_attenuation));
+            }
+        }
+    }
+
+    let mut final_args = vec![
+        "-y".to_string(),
+        "-i".to_string(),
+        combined_file.to_string_lossy().to_string(),
+    ];
+
+    if !audio_filters.is_empty() {
+        final_args.push("-af".to_string());
+        final_args.push(audio_filters.join(","));
     }
 
     // Format specific settings
     match format.as_str() {
         "mp3" => {
-            mix_args.push("-c:a".to_string());
-            mix_args.push("libmp3lame".to_string());
-            mix_args.push("-b:a".to_string());
-            mix_args.push(bitrate.unwrap_or_else(|| "320k".to_string()));
+            final_args.push("-c:a".to_string());
+            final_args.push("libmp3lame".to_string());
+            final_args.push("-b:a".to_string());
+            final_args.push(bitrate.unwrap_or_else(|| "320k".to_string()));
         },
         "flac" => {
-            mix_args.push("-c:a".to_string());
-            mix_args.push("flac".to_string());
+            final_args.push("-c:a".to_string());
+            final_args.push("flac".to_string());
         },
         _ => { // default wav
             let depth = bit_depth.unwrap_or_else(|| "16".to_string());
@@ -473,17 +575,17 @@ pub async fn export_audio(
                 "32" => "pcm_s32le",
                 _ => "pcm_s16le",
             };
-            mix_args.push("-c:a".to_string());
-            mix_args.push(pcm.to_string());
+            final_args.push("-c:a".to_string());
+            final_args.push(pcm.to_string());
         }
     }
 
-    mix_args.push(output_path.clone());
+    final_args.push(output_path.clone());
 
     crate::media_processor::run_ffmpeg_with_progress(
         app_handle.clone(),
-        mix_args,
-        "Final Audio Mix".to_string(),
+        final_args,
+        "Final Audio Mix & Normalization".to_string(),
         None,
     ).await?;
 
@@ -603,7 +705,7 @@ pub async fn batch_export(
             }
 
             // 2. Build and run FFmpeg command for this replica
-            let mut cmd = Command::new(crate::get_ffmpeg_path());
+            let mut cmd = new_ffmpeg_command();
             cmd.arg("-nostdin");
             cmd.arg("-y");
 
@@ -817,7 +919,7 @@ pub async fn export_backstage_video(
     webcam_export_overlay: Option<bool>,
 ) -> Result<String, String> {
     println!("[export_backstage_video] Начало. main: {}, backstage: {}, audio: {}, output: {}, overlay: {:?}", main_video_path, backstage_video_path, final_audio_path, output_path, webcam_export_overlay);
-    let mut cmd = Command::new(crate::get_ffmpeg_path());
+    let mut cmd = new_ffmpeg_command();
     cmd.arg("-nostdin");
     
     let is_overlay = webcam_export_overlay.unwrap_or(true);
@@ -890,8 +992,7 @@ async fn get_volume_stats(
     start: Option<f64>,
     duration: Option<f64>,
 ) -> (Option<f64>, Option<f64>) {
-    use tokio::process::Command;
-    let mut cmd = Command::new(crate::get_ffmpeg_path());
+    let mut cmd = new_ffmpeg_command();
     cmd.arg("-nostdin").arg("-y");
     if let Some(s) = start {
         cmd.arg("-ss").arg(format!("{:.3}", s));
@@ -1012,7 +1113,7 @@ pub async fn export_blooper(
          fade_out_start, fade_out_start, audio_trim_start, voice_gain_linear, voice_delay_ms, voice_delay_ms, fade_out_start
     );
 
-    let mut cmd = tokio::process::Command::new(crate::get_ffmpeg_path());
+    let mut cmd = new_ffmpeg_command();
     cmd.args([
         "-nostdin",
         "-y",
@@ -1084,7 +1185,7 @@ pub async fn process_backstage_shorts(
 
     let filter = "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:20[bg];[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[out]";
 
-    let mut cmd = tokio::process::Command::new(crate::get_ffmpeg_path());
+    let mut cmd = new_ffmpeg_command();
     cmd.args(&[
         "-nostdin",
         "-y",
@@ -1144,7 +1245,7 @@ pub async fn process_backstage_remove_silence(
     let vf_filter = format!("select='{}',setpts=N/FRAME_RATE/TB", select_expr);
     let af_filter = format!("aselect='{}',asetpts=N/SR/TB", select_expr);
     
-    let mut cmd = tokio::process::Command::new(crate::get_ffmpeg_path());
+    let mut cmd = new_ffmpeg_command();
     cmd.args(&[
         "-nostdin",
         "-y",
@@ -1245,7 +1346,7 @@ pub async fn export_backstage_assemble(
     let use_pip = settings.pip_camera.unwrap_or(false);
 
     // Check camera audio
-    let probe_out = Command::new(crate::get_ffprobe_path())
+    let probe_out = new_ffprobe_command()
         .args(["-i", &video_path, "-show_streams", "-select_streams", "a", "-loglevel", "error"])
         .output().await;
     let has_cam_audio = probe_out.map(|o| !o.stdout.is_empty()).unwrap_or(true);
@@ -1380,7 +1481,7 @@ pub async fn export_backstage_assemble(
             }
         }
 
-        let mut cmd = Command::new(crate::get_ffmpeg_path());
+        let mut cmd = new_ffmpeg_command();
         cmd.arg("-nostdin").arg("-y");
         cmd.arg("-i").arg(&video_path);
         
@@ -1416,7 +1517,7 @@ pub async fn export_backstage_assemble(
 
     println!("[export_backstage_assemble] Склеивание {} блоков...", chunk_files.len());
     let concat_file_str = concat_file.to_string_lossy().to_string();
-    let mut concat_cmd = Command::new(crate::get_ffmpeg_path());
+    let mut concat_cmd = new_ffmpeg_command();
     concat_cmd.args([
         "-nostdin",
         "-y",

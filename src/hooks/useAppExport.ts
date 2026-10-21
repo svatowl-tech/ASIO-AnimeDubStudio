@@ -335,15 +335,30 @@ export function useAppExport(
     includeOriginalAudio: boolean,
     forceMono: boolean,
     exportFolder?: string,
-    customFileName?: string
+    customFileName?: string,
+    normalizeAudio?: boolean,
+    normalizationLevel?: number,
+    normalizationPeak?: number,
+    normalizationMode?: 'lufs' | 'peak'
   } ) => {
     logger.info("handleExport triggered with options:", options);
-    if (!project || !project.projectPath) {
-      alert("Настройте или сохраните проект перед экспортом.");
+    if (!project) {
+      alert("Настройте или откройте проект перед экспортом.");
       return;
     }
 
-    const { format, includeVideo, includeOriginalAudio, forceMono, exportFolder, customFileName } = options;
+    const { 
+      format, 
+      includeVideo, 
+      includeOriginalAudio, 
+      forceMono, 
+      exportFolder, 
+      customFileName,
+      normalizeAudio,
+      normalizationLevel,
+      normalizationPeak,
+      normalizationMode
+    } = options;
     const safeFormat = format || 'WAV';
 
     const exportTracks = project.tracks.filter(t => {
@@ -424,6 +439,7 @@ export function useAppExport(
 
     setIsExporting(true);
     setExportProgress(0);
+    setExportOperation(`Сведение и экспорт мастер-трека (${safeFormat})...`);
     setIsExportModalOpen(false);
 
     let unsubscribe: (() => void) | undefined;
@@ -451,11 +467,21 @@ export function useAppExport(
           bitDepth: project.audioSettings?.bitDepth?.toString() || '16',
           ...(project.audioSettings?.exportSettings && {
             bitrate: `${project.audioSettings.exportSettings.mp3Bitrate}k`
-          })
+          }),
+          forceMono,
+          normalize: normalizeAudio ?? false,
+          targetLufs: normalizationLevel ?? -20,
+          maxPeak: normalizationPeak ?? -9,
+          normalizationMode: normalizationMode ?? 'lufs'
         });
 
         if (resultRes.success) {
-          alert(`Экспорт успешно завершен: ${outputPath}`);
+          const normInfo = normalizeAudio 
+            ? (normalizationMode === 'peak' 
+                ? ` (Пиковая нормализация: ${normalizationPeak ?? -9} dBFS)` 
+                : ` (Нормализация: ${normalizationLevel ?? -20} LUFS, пик ≤ ${normalizationPeak ?? -9} dB)`)
+            : '';
+          alert(`Экспорт успешно завершен${normInfo}:\n${outputPath}`);
           logger.info("Audio export successful.");
         } else {
           throw new Error(resultRes.error || 'Unknown export error');
@@ -467,6 +493,8 @@ export function useAppExport(
         logger.error("Audio export operation failed:", error);
       } finally {
         if (unsubscribe) unsubscribe();
+        setExportProgress(100);
+        setExportOperation('');
         setIsExporting(false);
       }
       return;

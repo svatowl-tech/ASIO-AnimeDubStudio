@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Project } from '../types';
 import { logger } from '../lib/logger';
 import { safeConfirm, getGlobalAudioSettings, getSafeFileUrl } from '../lib/utils';
@@ -42,17 +42,72 @@ const sanitizeProjectData = (p: Project): Project => {
   };
 };
 
+export interface RecentProjectItem {
+  name: string;
+  path: string;
+  updatedAt?: number;
+}
+
 export const useProject = () => {
   const [project, setProject] = useState<Project | null>(null);
-  const [recentProjects, setRecentProjects] = useState<{ name: string; path: string }[]>(() => {
+  const [recentProjects, setRecentProjects] = useState<RecentProjectItem[]>(() => {
     try {
       const saved = localStorage.getItem('dubstudio_recent_projects');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          // Normalize items, backfill updatedAt for legacy entries, and sort newest first
+          return parsed.map((item, idx) => ({
+            name: (item.name || 'Проект').trim(),
+            path: (item.path || item.name || '').trim(),
+            updatedAt: item.updatedAt || (Date.now() - idx * 60000)
+          })).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        }
+      }
     } catch (e) {
       logger.error(`Failed to load recent projects from localStorage: ${e}`);
     }
     return [];
   });
+
+  const addRecentProject = useCallback((name: string, path: string) => {
+    if (!name && !path) return;
+    const cleanName = (name || 'Проект').trim();
+    const cleanPath = (path || cleanName).trim();
+    setRecentProjects(prev => {
+      // Filter out existing matching entries
+      const filtered = prev.filter(p => p.path !== cleanPath && p.name !== cleanName);
+      // Place newest/freshest project at the TOP (index 0)
+      const updated = [{ name: cleanName, path: cleanPath, updatedAt: Date.now() }, ...filtered].slice(0, 15);
+      try {
+        localStorage.setItem('dubstudio_recent_projects', JSON.stringify(updated));
+      } catch (e) {
+        logger.error(`Failed to save recent projects to localStorage: ${e}`);
+      }
+      return updated;
+    });
+  }, []);
+
+  const removeRecentProject = useCallback((path: string) => {
+    setRecentProjects(prev => {
+      const updated = prev.filter(p => p.path !== path);
+      try {
+        localStorage.setItem('dubstudio_recent_projects', JSON.stringify(updated));
+      } catch (e) {
+        logger.error(`Failed to update recent projects in localStorage: ${e}`);
+      }
+      return updated;
+    });
+  }, []);
+
+  const clearRecentProjects = useCallback(() => {
+    setRecentProjects([]);
+    try {
+      localStorage.removeItem('dubstudio_recent_projects');
+    } catch (e) {
+      logger.error(`Failed to clear recent projects in localStorage: ${e}`);
+    }
+  }, []);
 
   useEffect(() => {
     try {
@@ -62,38 +117,43 @@ export const useProject = () => {
     }
   }, [recentProjects]);
 
-
   const handleNewProject = async () => {
-    if (!window.electronAPI) {
-      alert("Эта функция доступна только в десктопном приложении.");
-      return;
-    }
     logger.info("Initializing new project creation...");
     try {
-      const folderRes = await window.electronAPI.openFolder();
-      if (folderRes.success && folderRes.data) {
-        const folder = folderRes.data;
-        logger.info(`Creating new project in folder: ${folder}`);
-        await window.electronAPI.initProject(folder);
-        const newProject: Project = {
-          id: Math.random().toString(36).substr(2, 9),
-          name: 'Новый проект',
-          projectPath: folder,
-          subtitles: [],
-          roles: [],
-          tracks: [
-            { id: 'track-1', name: 'Дорога 1', segments: [], volume: 0, isMuted: false },
-            { id: 'track-2', name: 'Дорога 2', segments: [], volume: 0, isMuted: false }
-          ],
-          latencyOffset: 0,
-          audioOffsetMs: 0,
-          audioSettings: getGlobalAudioSettings()
-        };
-        setProject(newProject);
-        await window.electronAPI.saveProjectJson({ projectPath: folder, projectData: newProject });
-        setRecentProjects(prev => [...prev, { name: newProject.name, path: folder }]);
-        logger.info("New project created and saved.");
+      let folder = '';
+      if (window.electronAPI) {
+        const folderRes = await window.electronAPI.openFolder();
+        if (folderRes.success && folderRes.data) {
+          folder = folderRes.data;
+        }
       }
+      if (!folder) {
+        folder = `/projects/Проект_${new Date().toISOString().slice(0, 10)}_${Math.random().toString(36).substr(2, 4)}`;
+      }
+      logger.info(`Creating new project in folder: ${folder}`);
+      if (window.electronAPI) {
+        await window.electronAPI.initProject(folder);
+      }
+      const newProject: Project = {
+        id: Math.random().toString(36).substr(2, 9),
+        name: 'Новый проект',
+        projectPath: folder,
+        subtitles: [],
+        roles: [],
+        tracks: [
+          { id: 'track-1', name: 'Дорога 1', segments: [], volume: 0, isMuted: false },
+          { id: 'track-2', name: 'Дорога 2', segments: [], volume: 0, isMuted: false }
+        ],
+        latencyOffset: 0,
+        audioOffsetMs: 0,
+        audioSettings: getGlobalAudioSettings()
+      };
+      setProject(newProject);
+      if (window.electronAPI) {
+        await window.electronAPI.saveProjectJson({ projectPath: folder, projectData: newProject });
+      }
+      addRecentProject(newProject.name, folder);
+      logger.info("New project created and saved.");
     } catch (error) {
       logger.error('Failed to create new project:', error);
       alert(`Ошибка при создании проекта: ${error instanceof Error ? error.message : String(error)}`);
@@ -102,7 +162,7 @@ export const useProject = () => {
 
   const handleOpenProject = async () => {
     if (!window.electronAPI) {
-      alert("Эта функция доступна только в десктопном приложении.");
+      alert("API для открытия файлов недоступно");
       return;
     }
     logger.info("Opening project...");
@@ -114,20 +174,27 @@ export const useProject = () => {
       if (fileRes.success && fileRes.data) {
         const filePath = fileRes.data.path;
         logger.info(`Selected project file: ${filePath}`);
-        const projectDataRes = await window.electronAPI.loadProjectJson(filePath);
-        if (projectDataRes.success && projectDataRes.data) {
+        let projectData: any = null;
+        if (fileRes.data.content) {
+          try {
+            projectData = JSON.parse(fileRes.data.content);
+          } catch (_) {}
+        }
+        if (!projectData) {
+          const projectDataRes = await window.electronAPI.loadProjectJson(filePath);
+          if (projectDataRes.success && projectDataRes.data) {
+            projectData = projectDataRes.data;
+          }
+        }
+        if (projectData) {
           logger.info(`Project data loaded successfully, sanitizing...`);
-          const projectData = sanitizeProjectData(projectDataRes.data);
-          projectData.audioSettings = { ...getGlobalAudioSettings(), ...projectData.audioSettings };
-          logger.info(`Project loaded: ${projectData.name}, tracks: ${projectData.tracks?.length || 0}`);
-          setProject(projectData);
-          setRecentProjects(prev => {
-            const path = projectData.projectPath || filePath;
-            const filtered = prev.filter(p => p.path !== path);
-            return [...filtered, { name: projectData.name, path }];
-          });
+          const sanitized = sanitizeProjectData(projectData);
+          sanitized.audioSettings = { ...getGlobalAudioSettings(), ...sanitized.audioSettings };
+          logger.info(`Project loaded: ${sanitized.name}, tracks: ${sanitized.tracks?.length || 0}`);
+          setProject(sanitized);
+          addRecentProject(sanitized.name, sanitized.projectPath || filePath);
         } else {
-          logger.warn(`Project file load failed: ${projectDataRes.error}`);
+          logger.warn(`Project file load failed for ${filePath}`);
           alert("Не удалось загрузить проект.");
         }
       } else {
@@ -140,15 +207,16 @@ export const useProject = () => {
   };
 
   const handleSaveProject = async () => {
-    if (!project || !project.projectPath) {
-      logger.warn("handleSaveProject: project or projectPath is missing.");
-      alert("Проект не сохранен на диске. Используйте 'Создать проект'.");
+    if (!project) {
+      alert("Нет открытого проекта для сохранения.");
       return;
     }
+    const targetPath = project.projectPath || `/projects/${project.name || 'Проект'}`;
     if (window.electronAPI) {
-      logger.info(`Saving project (useProject): ${project.name} to ${project.projectPath}`);
+      logger.info(`Saving project (useProject): ${project.name} to ${targetPath}`);
       try {
-        await window.electronAPI.saveProjectJson({ projectPath: project.projectPath, projectData: project });
+        await window.electronAPI.saveProjectJson({ projectPath: targetPath, projectData: { ...project, projectPath: targetPath } });
+        addRecentProject(project.name, targetPath);
         alert("Проект сохранен!");
         logger.info("Project save (useProject) successful.");
       } catch (error) {
@@ -160,7 +228,7 @@ export const useProject = () => {
 
   const onLoadProject = async (path: string) => {
     if (window.electronAPI) {
-      logger.info(`Loading project from fixed path: ${path}`);
+      logger.info(`Loading project from path: ${path}`);
       try {
         const projectDataRes = await window.electronAPI.loadProjectJson(path);
         if (projectDataRes.success && projectDataRes.data) {
@@ -169,15 +237,14 @@ export const useProject = () => {
           projectData.audioSettings = { ...getGlobalAudioSettings(), ...projectData.audioSettings };
           logger.info(`Project loaded: ${projectData.name}, tracks: ${projectData.tracks?.length || 0}`);
           setProject(projectData);
-          setRecentProjects(prev => {
-            const filtered = prev.filter(p => p.path !== path);
-            return [...filtered, { name: projectData.name, path }];
-          });
+          addRecentProject(projectData.name, projectData.projectPath || path);
         } else {
           logger.warn(`Project file load failed from fixed path: ${projectDataRes.error}`);
+          alert(`Не удалось открыть проект: ${projectDataRes.error || 'Файл не найден'}`);
         }
       } catch (error) {
         logger.error(`Exception during onLoadProject: ${error}`);
+        alert(`Ошибка при открытии проекта: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   };
@@ -196,6 +263,9 @@ export const useProject = () => {
     project,
     setProject,
     recentProjects,
+    addRecentProject,
+    removeRecentProject,
+    clearRecentProjects,
     handleNewProject,
     handleOpenProject,
     handleSaveProject,

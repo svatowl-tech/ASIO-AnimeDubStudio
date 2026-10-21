@@ -122,6 +122,9 @@ export default function App() {
     project, 
     setProject, 
     recentProjects, 
+    addRecentProject,
+    removeRecentProject,
+    clearRecentProjects,
     handleNewProject, 
     handleOpenProject, 
     handleSaveProject: origHandleSaveProject, 
@@ -133,13 +136,14 @@ export default function App() {
 
   const handleSaveProject = async () => {
     setProject(prev => {
-      if (!prev || !prev.projectPath) {
-        logger.warn("Save Project Attempted: Project not saved on disk or no projectPath.");
-        alert("Проект не сохранен на диске. Используйте 'Создать проект'.");
+      if (!prev) {
+        logger.warn("Save Project Attempted: No active project.");
+        alert("Нет открытого проекта для сохранения.");
         return prev;
       }
       return {
         ...prev,
+        projectPath: prev.projectPath || `/projects/${prev.name || 'Новый проект'}`,
         uiState: {
           zoomLevel,
           timelineHeight,
@@ -160,14 +164,16 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (saveTrigger > 0 && project && project.projectPath && window.electronAPI) {
+    if (saveTrigger > 0 && project && window.electronAPI) {
       const projectToSave = JSON.parse(JSON.stringify(project));
       delete projectToSave.audioSettings;
+      const targetPath = projectToSave.projectPath || `/projects/${projectToSave.name || 'Проект'}`;
       
-      logger.info(`Saving project: ${projectToSave.name} at ${projectToSave.projectPath}`);
-      window.electronAPI.saveProjectJson({ projectPath: projectToSave.projectPath, projectData: projectToSave })
+      logger.info(`Saving project: ${projectToSave.name} at ${targetPath}`);
+      window.electronAPI.saveProjectJson({ projectPath: targetPath, projectData: projectToSave })
         .then(() => {
           logger.info("Project saved successfully.");
+          addRecentProject(projectToSave.name, targetPath);
           alert("Проект сохранен!");
         })
         .catch((error) => {
@@ -176,6 +182,13 @@ export default function App() {
         });
     }
   }, [saveTrigger]); // We intentionally do not include 'project' to prevent auto-saving on every project change
+
+  useEffect(() => {
+    if (project && project.name && project.name !== 'Демо Превью') {
+      const targetPath = project.projectPath || `/projects/${project.name}`;
+      addRecentProject(project.name, targetPath);
+    }
+  }, [project?.name, project?.projectPath, addRecentProject]);
 
 
   const [duration, setDuration] = useState(0);
@@ -2972,7 +2985,7 @@ export default function App() {
   }, [isPopoutOpen]);
 
   const projectContextValue = {
-    project, setProject, recentProjects, handleNewProject, handleOpenProject, handleSaveProject, handleCloseProject, onLoadProject,
+    project, setProject, recentProjects, addRecentProject, removeRecentProject, clearRecentProjects, handleNewProject, handleOpenProject, handleSaveProject, handleCloseProject, onLoadProject,
     undo, redo, canUndo, canRedo, saveSnapshot
   };
   const timelineContextValue = {
@@ -3045,6 +3058,9 @@ export default function App() {
         handleImportAudio={handleImportAudioTrack}
         isDesktop={isDesktop}
         handleExport={(format) => {
+          if (!project) {
+            setProject(createDefaultProject("Новый проект"));
+          }
           setPendingExportFormat(format);
           setIsExportModalOpen(true);
         }}

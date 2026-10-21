@@ -106,7 +106,7 @@ pub async fn export_backstage_assemble(
             }
         }
 
-        let mut cmd = Command::new(crate::get_ffmpeg_path());
+        let mut cmd = crate::export_engine::new_ffmpeg_command();
         cmd.arg("-nostdin").arg("-y");
         cmd.arg("-i").arg(&video_path);
         
@@ -140,7 +140,7 @@ pub async fn export_backstage_assemble(
     f.write_all(concat_list.as_bytes()).map_err(|e| e.to_string())?;
 
     println!("[export_backstage_assemble] Склеивание {} блоков...", chunk_files.len());
-    let mut concat_cmd = Command::new(crate::get_ffmpeg_path());
+    let mut concat_cmd = crate::export_engine::new_ffmpeg_command();
     concat_cmd.args([
         "-nostdin",
         "-y",
