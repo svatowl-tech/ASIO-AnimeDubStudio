@@ -205,7 +205,7 @@ const Sidebar: React.FC<SidebarProps> = ({
           </button>
           
           {isDropdownOpen && project && (
-            <div className="absolute left-0 right-0 top-full mt-1.5 bg-zinc-800 border border-white/10 rounded-xl shadow-2xl p-2 z-50 animate-in fade-in slide-in-from-top-1 duration-100 flex flex-col gap-1.5">
+            <div className="absolute left-0 right-0 top-full mt-1.5 bg-zinc-800 border border-white/10 rounded-xl shadow-2xl p-2 z-40 animate-in fade-in slide-in-from-top-1 duration-100 flex flex-col gap-1.5">
               <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-500 px-1 pt-0.5">
                 Выберите активных персонажей
               </span>

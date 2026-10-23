@@ -109,6 +109,8 @@ import { MkvTrackSelectorModal } from './components/MkvTrackSelectorModal';
 import TopHeader from './components/layout/TopHeader';
 import StyledExportOverlay from './components/layout/ExportOverlay';
 import VideoPreparationModal from './components/VideoPreparationModal';
+import { ProjectFolderRecoveryModal } from './components/ProjectFolderRecoveryModal';
+import { PendingTakeData, sanitizeFolderName } from './lib/projectRelocation';
 import { prepareVideoProxy, syncProxyVideoWithProject } from './services/videoProxyService';
 import { useAudioEngine } from './hooks/useAudioEngine';
 import { useBackstageSession } from './hooks/useBackstageSession';
@@ -133,8 +135,18 @@ export default function App() {
   } = useProject();
 
   const [saveTrigger, setSaveTrigger] = useState(0);
+  const [folderRecoveryState, setFolderRecoveryState] = useState<{
+    isOpen: boolean;
+    error: string;
+    pendingTake?: PendingTakeData | null;
+  }>({
+    isOpen: false,
+    error: '',
+    pendingTake: null
+  });
 
   const handleSaveProject = async () => {
+    const isTauriEnv = !!(window as any).__TAURI_INTERNALS__;
     setProject(prev => {
       if (!prev) {
         logger.warn("Save Project Attempted: No active project.");
@@ -143,7 +155,7 @@ export default function App() {
       }
       return {
         ...prev,
-        projectPath: prev.projectPath || `/projects/${prev.name || 'Новый проект'}`,
+        projectPath: prev.projectPath || (isTauriEnv ? '' : `/projects/${prev.name || 'Новый проект'}`),
         uiState: {
           zoomLevel,
           timelineHeight,
@@ -165,20 +177,43 @@ export default function App() {
 
   useEffect(() => {
     if (saveTrigger > 0 && project && window.electronAPI) {
+      const isTauriEnv = !!(window as any).__TAURI_INTERNALS__;
+      if (isTauriEnv && (!project.projectPath || project.projectPath === '/mock/path' || project.projectPath.startsWith('/projects/'))) {
+        setFolderRecoveryState({
+          isOpen: true,
+          error: 'Папка проекта не задана. Выберите папку на диске, куда сохранить проект и его файлы.',
+          pendingTake: null
+        });
+        return;
+      }
+
       const projectToSave = JSON.parse(JSON.stringify(project));
       delete projectToSave.audioSettings;
       const targetPath = projectToSave.projectPath || `/projects/${projectToSave.name || 'Проект'}`;
       
       logger.info(`Saving project: ${projectToSave.name} at ${targetPath}`);
       window.electronAPI.saveProjectJson({ projectPath: targetPath, projectData: projectToSave })
-        .then(() => {
+        .then((res) => {
+          if (res && !res.success) {
+            logger.error(`Save Project Failed: ${res.error}`);
+            setFolderRecoveryState({
+              isOpen: true,
+              error: res.error || 'Не удалось сохранить файл проекта в текущую папку.',
+              pendingTake: null
+            });
+            return;
+          }
           logger.info("Project saved successfully.");
           addRecentProject(projectToSave.name, targetPath);
           alert("Проект сохранен!");
         })
         .catch((error) => {
           logger.error(`Save Project Failed: ${error}`);
-          alert(`Ошибка при сохранении проекта: ${error instanceof Error ? error.message : String(error)}`);
+          setFolderRecoveryState({
+            isOpen: true,
+            error: error instanceof Error ? error.message : String(error),
+            pendingTake: null
+          });
         });
     }
   }, [saveTrigger]); // We intentionally do not include 'project' to prevent auto-saving on every project change
@@ -224,6 +259,16 @@ export default function App() {
 
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
 
+  const { saveSnapshot, undo, redo, canUndo, canRedo } = useTimelineHistory(project, setProject);
+
+  const handleDiskSaveError = useCallback((info: { error: string; pendingTake?: PendingTakeData }) => {
+    setFolderRecoveryState({
+      isOpen: true,
+      error: info.error,
+      pendingTake: info.pendingTake || null
+    });
+  }, []);
+
   const {
     isRecording,
     recordingStream,
@@ -239,9 +284,17 @@ export default function App() {
     handleDeleteLastTake,
     isRecordingRef,
     isStartingRecordingRef
-  } = useAudioEngine(project, setProject, videoRef, currentTimeRef, isPlayingRef, togglePlay, previewStream);
-
-  const { saveSnapshot, undo, redo, canUndo, canRedo } = useTimelineHistory(project, setProject);
+  } = useAudioEngine(
+    project,
+    setProject,
+    videoRef,
+    currentTimeRef,
+    isPlayingRef,
+    togglePlay,
+    previewStream,
+    saveSnapshot,
+    handleDiskSaveError
+  );
 
 
   const {
@@ -319,7 +372,14 @@ export default function App() {
     setDuration, 
     setIsExporting, 
     setExportProgress, 
-    setExportOperation
+    setExportOperation,
+    (initError) => {
+      setFolderRecoveryState({
+        isOpen: true,
+        error: initError,
+        pendingTake: null
+      });
+    }
   );
 
   const [isDesktop, setIsDesktop] = useState(!!(window as any).__TAURI_INTERNALS__);
@@ -1015,29 +1075,41 @@ export default function App() {
         let projectRoot = project?.projectPath;
         if (!projectRoot) {
            // Create a new project folder next to the video
-           const baseName = fileName.replace(/\.[^/.]+$/, "");
+           const baseName = sanitizeFolderName(fileName.replace(/\.[^/.]+$/, ""));
            projectRoot = `${fileDir}/${baseName}_Project`.replace(/\\/g, '/');
         }
 
         if (window.electronAPI) {
           try {
-            await window.electronAPI.initProject(projectRoot);
-            
-            // Copy to assets
-            const assetsDir = `${projectRoot}/assets`.replace(/\\/g, '/');
-            const copyRes = await window.electronAPI.copyFileToProject(path, assetsDir);
-            const finalPath = copyRes.success && copyRes.data ? copyRes.data : path;
+            const initRes = await window.electronAPI.initProject(projectRoot);
+            let finalPath = path;
+
+            if (!initRes.success) {
+              logger.warn(`Failed to create project folder on drop at ${projectRoot}:`, initRes.error);
+              projectRoot = '';
+              setFolderRecoveryState({
+                isOpen: true,
+                error: initRes.error || 'Не удалось создать рабочую папку проекта рядом с медиафайлом.',
+                pendingTake: null
+              });
+            } else {
+              // Copy to assets
+              const assetsDir = `${projectRoot}/assets`.replace(/\\/g, '/');
+              const copyRes = await window.electronAPI.copyFileToProject(path, assetsDir);
+              finalPath = copyRes.success && copyRes.data ? copyRes.data : path;
+            }
 
             setProject(prev => {
               const baseProject = prev || createDefaultProject(fileName.replace(/\.[^/.]+$/, ""), projectRoot);
               return { ...baseProject, videoUrl: getSafeFileUrl(finalPath), videoPath: finalPath, projectPath: projectRoot };
             });
 
-            const takesDir = `${projectRoot}/takes`.replace(/\\/g, '/');
-            const res = await window.electronAPI.extractAudioPeaks(finalPath, takesDir);
-            if (res.success && res.data) {
-                const audioData = res.data;
-                const refPath = audioData.filePath || `${takesDir}/original_audio.wav`.replace(/\\/g, '/');
+            if (projectRoot) {
+              const takesDir = `${projectRoot}/takes`.replace(/\\/g, '/');
+              const res = await window.electronAPI.extractAudioPeaks(finalPath, takesDir);
+              if (res.success && res.data) {
+                  const audioData = res.data;
+                  const refPath = audioData.filePath || `${takesDir}/original_audio.wav`.replace(/\\/g, '/');
                 
                 setProject(p => {
                   if (!p) return p;
@@ -1084,6 +1156,7 @@ export default function App() {
                     })
                   };
                 });
+              }
             }
           } catch (err) {
             console.error("Native drop video peaks error:", err);
@@ -1286,7 +1359,7 @@ export default function App() {
         
         let projectRoot = project?.projectPath;
         if (!projectRoot && fileDir) {
-           const baseName = file.name.replace(/\.[^/.]+$/, "");
+           const baseName = sanitizeFolderName(file.name.replace(/\.[^/.]+$/, ""));
            projectRoot = `${fileDir}/${baseName}_Project`.replace(/\\/g, '/');
         }
 
@@ -1306,7 +1379,16 @@ export default function App() {
         });
         
         if (window.electronAPI && filePath && projectRoot) {
-            window.electronAPI.initProject(projectRoot).then(async () => {
+            window.electronAPI.initProject(projectRoot).then(async (initRes) => {
+              if (!initRes.success) {
+                setProject(p => p ? { ...p, projectPath: '' } : p);
+                setFolderRecoveryState({
+                  isOpen: true,
+                  error: initRes.error || 'Не удалось создать рабочую папку проекта рядом с видеофайлом.',
+                  pendingTake: null
+                });
+                return;
+              }
               const assetsDir = `${projectRoot}/assets`.replace(/\\/g, '/');
               const copyRes = await window.electronAPI.copyFileToProject(filePath, assetsDir);
               const finalPath = copyRes.success && copyRes.data ? copyRes.data : filePath;
@@ -3085,7 +3167,7 @@ export default function App() {
 
         {/* Sidebar Resizer Handle */}
         <div 
-          className="w-1 bg-zinc-800 hover:bg-indigo-500 cursor-col-resize transition-colors flex-shrink-0 z-50 relative"
+          className="w-1 bg-zinc-800 hover:bg-indigo-500 cursor-col-resize transition-colors flex-shrink-0 z-30 relative"
           onMouseDown={(e) => {
             e.preventDefault();
             const startX = e.clientX;
@@ -3586,7 +3668,7 @@ export default function App() {
             <PreRollCountdown countdown={preRollCountdown} />
 
             {videoError && (
-              <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/90 z-50 p-8 text-center">
+              <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/90 z-30 p-8 text-center">
                 <div className="max-w-md">
                   <div className="w-16 h-16 bg-rose-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
                     <AlertTriangle className="w-8 h-8 text-rose-500" />
@@ -3710,7 +3792,7 @@ export default function App() {
 
           {/* Resizer Handle */}
           <div 
-            className="h-1 bg-zinc-800 hover:bg-indigo-500 cursor-row-resize transition-colors flex-shrink-0 z-50 relative"
+            className="h-1 bg-zinc-800 hover:bg-indigo-500 cursor-row-resize transition-colors flex-shrink-0 z-30 relative"
             onMouseDown={(e) => {
               e.preventDefault();
               setIsAutoHeight(false);
@@ -3988,6 +4070,19 @@ export default function App() {
         isSuccess={videoPreparation.isSuccess}
         onClose={() => setVideoPreparation(prev => ({ ...prev, isOpen: false, error: null }))}
         onRetry={() => handleCreateProxyVideo()}
+      />
+
+      <ProjectFolderRecoveryModal
+        isOpen={folderRecoveryState.isOpen}
+        errorDetails={folderRecoveryState.error}
+        project={project}
+        pendingTake={folderRecoveryState.pendingTake}
+        onRecovered={(updatedProject, newProjectRoot) => {
+          setProject(updatedProject);
+          addRecentProject(updatedProject.name, newProjectRoot);
+          setFolderRecoveryState({ isOpen: false, error: '', pendingTake: null });
+        }}
+        onClose={() => setFolderRecoveryState({ isOpen: false, error: '', pendingTake: null })}
       />
 
       {audioSilenceError && (

@@ -2,6 +2,7 @@ import React from 'react';
 import Header from '../Header';
 import { useProjectData } from '../../contexts/ProjectContext';
 import { safeConfirm } from '../../lib/utils';
+import { relocateProjectToChosenFolder, buildProjectFolderPath } from '../../lib/projectRelocation';
 
 // ... interface TopHeaderProps ...
 interface TopHeaderProps {
@@ -39,6 +40,7 @@ export const TopHeader: React.FC<TopHeaderProps> = (props) => {
     project, 
     setProject, 
     recentProjects, 
+    addRecentProject,
     removeRecentProject, 
     clearRecentProjects, 
     handleNewProject, 
@@ -49,30 +51,40 @@ export const TopHeader: React.FC<TopHeaderProps> = (props) => {
   } = useProjectData();
 
   const handleSelectProjectFolder = async () => {
-    if (window.electronAPI && project && project.projectPath) {
-      const newFolder = await window.electronAPI.openFolder();
-      if (newFolder.success && newFolder.data && newFolder.data !== project.projectPath) {
-        const oldPath = project.projectPath;
-        const targetPath = newFolder.data;
-        
-        if (await safeConfirm(`Вы уверены, что хотите переместить все файлы проекта в новую папку?\nИз: ${oldPath}\nВ: ${targetPath}`)) {
-          props.setExportOperation("Moving project files...");
-          props.setIsExporting(true);
-          try {
-            const moveRes = await window.electronAPI.moveProject(oldPath, targetPath);
-            if (moveRes.success) {
-              setProject({ ...project, projectPath: targetPath });
-              alert("Проект успешно перемещен!");
-            } else {
-              alert(`Ошибка при перемещении: ${moveRes.error}`);
-            }
-          } catch (err) {
-            alert("Критическая ошибка при перемещении файлов.");
-          } finally {
-            props.setIsExporting(false);
-            props.setExportOperation('');
-          }
+    if (!window.electronAPI || !project) return;
+    const newFolder = await window.electronAPI.openFolder();
+    if (!newFolder.success || !newFolder.data) return;
+
+    const oldPath = project.projectPath && project.projectPath !== '/mock/path' ? project.projectPath : '';
+    const targetProjectPath = buildProjectFolderPath(newFolder.data, project.name);
+    if (oldPath && oldPath.replace(/\\/g, '/') === targetProjectPath.replace(/\\/g, '/')) {
+      return;
+    }
+
+    const confirmMessage = oldPath
+      ? `Вы уверены, что хотите перенести все файлы проекта в новую папку?\nИз: ${oldPath}\nВ: ${targetProjectPath}`
+      : `Создать папку проекта и сохранить все файлы в:\n${targetProjectPath}?`;
+
+    if (await safeConfirm(confirmMessage)) {
+      props.setExportOperation('Перенос и сохранение файлов проекта...');
+      props.setIsExporting(true);
+      try {
+        const res = await relocateProjectToChosenFolder({
+          project,
+          chosenParentDir: newFolder.data,
+          onStatus: (msg) => props.setExportOperation(msg)
+        });
+        if (res.success && res.updatedProject && res.newProjectRoot) {
+          setProject(res.updatedProject);
+          addRecentProject(res.updatedProject.name, res.newProjectRoot);
+        } else {
+          alert(`Ошибка при переносе проекта: ${res.error}`);
         }
+      } catch (err) {
+        alert('Критическая ошибка при перемещении файлов проекта.');
+      } finally {
+        props.setIsExporting(false);
+        props.setExportOperation('');
       }
     }
   };

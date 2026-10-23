@@ -3,6 +3,7 @@ import { Project, AudioSegment } from '../types';
 import { logger } from '../lib/logger';
 import { getSafeFileUrl, getGlobalAudioSettings, getFriendlyAudioErrorMessage } from '../lib/utils';
 import { punchInSegment } from '../lib/timelineUtils';
+import { encodeAudioBlobToWavAndPeaks, PendingTakeData } from '../lib/projectRelocation';
 
 export const useAudioEngine = (
   project: Project | null,
@@ -12,7 +13,8 @@ export const useAudioEngine = (
   isPlayingRef: MutableRefObject<boolean>,
   togglePlay: () => Promise<void>,
   previewStream?: MediaStream | null,
-  saveSnapshot?: () => void
+  saveSnapshot?: () => void,
+  onDiskSaveError?: (info: { error: string; pendingTake?: PendingTakeData }) => void
 ) => {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingStream, setRecordingStream] = useState<MediaStream | null>(null);
@@ -471,55 +473,60 @@ export const useAudioEngine = (
           setTimeout(() => resolve(false), 1000);
         });
 
+        const { wavBytes, peaks: jsPeaks, duration: decodedDuration } = await encodeAudioBlobToWavAndPeaks(audioBlob, 1024);
+
         const recordedDuration = tempAudio.duration && isFinite(tempAudio.duration) 
           ? tempAudio.duration 
-          : (audioBlob.size / 48000 / 2);
+          : (decodedDuration || (audioBlob.size / 48000 / 2));
 
         URL.revokeObjectURL(tempUrl);
 
-        const arrayBuffer = await audioBlob.arrayBuffer();
-        
-        if (project) {
+        if (project && isMounted.current) {
             const activeLine = project.subtitles.find(line => 
               recordingStartTimeRef.current >= line.start - 0.5 && 
               recordingStartTimeRef.current <= line.end + 0.5
             );
 
             let filePath: string | undefined;
-            let finalWaveform: number[] = [];
-            if (window.electronAPI && project.projectPath && isMounted.current) {
+            let finalWaveform: number[] = jsPeaks;
+            let diskSaveFailed = false;
+            let saveError = '';
+
+            const isTauriDesktop = !!(window as any).__TAURI_INTERNALS__;
+            const hasValidProjectPath = !!project.projectPath && project.projectPath.trim() !== '' && (!isTauriDesktop || project.projectPath !== '/mock/path');
+
+            if (window.electronAPI && hasValidProjectPath) {
               const resultRes = await window.electronAPI.saveTake({
-                projectPath: project.projectPath,
+                projectPath: project.projectPath!,
                 role: project.selectedRole || 'unknown',
                 startTime: recordingStartTimeRef.current,
-                audioData: new Uint8Array(arrayBuffer)
+                audioData: wavBytes
               });
               if (resultRes && resultRes.success && resultRes.data && isMounted.current) {
                 const result = resultRes.data;
                 filePath = result.filePath;
-                finalWaveform = Array.from(result.peaks || []);
+                const backendPeaks = Array.from(result.peaks || []);
+                if (backendPeaks.length > 0) {
+                  finalWaveform = backendPeaks;
+                }
               } else if (isMounted.current) {
-                logger.error("Failed to save take:", resultRes?.error);
-                const saveError = resultRes?.error || 'Unknown error';
-                alert([
-                  "❌ Ошибка сохранения записи на диск.",
-                  `Детали: ${saveError}`,
-                  "",
-                  "💡 Решение:",
-                  "1. Проверьте, достаточно ли свободного места на жестком диске.",
-                  "2. Убедитесь, что папка проекта доступна для записи и у приложения есть права на изменение файлов в этой директории.",
-                  "3. Попробуйте перезапустить приложение от имени администратора."
-                ].join('\n'));
+                diskSaveFailed = true;
+                saveError = resultRes?.error || 'Неизвестная ошибка записи на диск';
+                logger.error("Failed to save take:", saveError);
               }
+            } else if (isTauriDesktop && !hasValidProjectPath) {
+              diskSaveFailed = true;
+              saveError = 'Папка проекта не была создана или не выбрана.';
+              logger.error("Cannot save take to disk: projectPath is missing or invalid.");
             }
-            
-            if (filePath && isMounted.current) {
+
+            if (isMounted.current) {
               const offsetSec = (project.audioOffsetMs || 0) / 1000;
               
               // Resolve matching original file name for batch export
               let matchedOriginalFileName: string | undefined;
               if (activeLine) {
-                const origSegmentId = activeLine.id.startsWith('sub-') ? activeLine.id.substring(4) : activeLine.id;
+                const origSegmentId = String(activeLine.id).startsWith('sub-') ? String(activeLine.id).substring(4) : String(activeLine.id);
                 const originalTrack = project.tracks.find(t => t.name === 'Оригинал');
                 const origSeg = originalTrack?.segments.find(s => s.id === origSegmentId);
                 if (origSeg) {
@@ -536,53 +543,69 @@ export const useAudioEngine = (
                 }
               }
 
+              const wavBlob = new Blob([wavBytes.buffer as ArrayBuffer], { type: 'audio/wav' });
               const newSegment: AudioSegment = {
                 id: segmentId,
                 startTime: Math.max(0, recordingStartTimeRef.current - offsetSec),
                 duration: recordedDuration,
                 fileOffset: 0,
                 fileDuration: recordedDuration,
-                blobUrl: URL.createObjectURL(audioBlob),
+                blobUrl: URL.createObjectURL(wavBlob),
                 filePath,
                 backstageVideoPath: backstageVideoPathsRef.current[segmentId],
                 waveform: finalWaveform,
                 gain: 1,
                 playbackRate: 1,
                 text: activeLine?.text,
-                originalFileName: matchedOriginalFileName
+                originalFileName: matchedOriginalFileName,
+                recordedAt: Date.now()
               };
             
-            if (saveSnapshot) saveSnapshot();
-            setProject(prev => {
-              if (!prev || prev.tracks.length === 0) return prev;
-              
-              // Use armed track or fallback to Dubs/First-non-original
-              let targetTrackId = prev.tracks.find(t => t.isArmed)?.id;
-              
-              if (!targetTrackId) {
-                targetTrackId = prev.tracks.find(t => 
-                  t.name === 'Dubs' || t.name === 'Озвучка' || t.name === 'Takes' || t.name === 'Дубли'
-                )?.id;
-              }
-
-              if (!targetTrackId) {
-                // Find first track that is not Original
-                targetTrackId = prev.tracks.find(t => t.name !== 'Оригинал')?.id;
-              }
-
-              if (!targetTrackId) {
-                targetTrackId = prev.tracks[prev.tracks.length - 1].id;
-              }
-
-              const updatedTracks = prev.tracks.map(track => {
-                if (track.id === targetTrackId) {
-                  return { ...track, segments: punchInSegment(track.segments, newSegment) };
+              if (saveSnapshot) saveSnapshot();
+              setProject(prev => {
+                if (!prev || prev.tracks.length === 0) return prev;
+                
+                // Use armed track or fallback to Dubs/First-non-original
+                let targetTrackId = prev.tracks.find(t => t.isArmed)?.id;
+                
+                if (!targetTrackId) {
+                  targetTrackId = prev.tracks.find(t => 
+                    t.name === 'Dubs' || t.name === 'Озвучка' || t.name === 'Takes' || t.name === 'Дубли'
+                  )?.id;
                 }
-                return track;
+
+                if (!targetTrackId) {
+                  // Find first track that is not Original
+                  targetTrackId = prev.tracks.find(t => t.name !== 'Оригинал')?.id;
+                }
+
+                if (!targetTrackId) {
+                  targetTrackId = prev.tracks[prev.tracks.length - 1].id;
+                }
+
+                const updatedTracks = prev.tracks.map(track => {
+                  if (track.id === targetTrackId) {
+                    return { ...track, segments: punchInSegment(track.segments, newSegment) };
+                  }
+                  return track;
+                });
+                return { ...prev, tracks: updatedTracks };
               });
-              return { ...prev, tracks: updatedTracks };
-            });
-          }
+
+              if (diskSaveFailed) {
+                const pendingTake: PendingTakeData = {
+                  segmentId,
+                  role: project.selectedRole || 'unknown',
+                  startTime: recordingStartTimeRef.current,
+                  audioData: wavBytes,
+                  peaks: finalWaveform,
+                  duration: recordedDuration
+                };
+                if (onDiskSaveError) {
+                  onDiskSaveError({ error: saveError, pendingTake });
+                }
+              }
+            }
         }
         
         stream.getTracks().forEach(track => track.stop());
@@ -681,6 +704,8 @@ export const useAudioEngine = (
             });
             return { ...prev, tracks: updatedTracks };
           });
+        } else if (!res.success && onDiskSaveError) {
+          onDiskSaveError({ error: res.error || 'Не удалось сохранить ASIO-запись в папку проекта' });
         }
       } else if (mediaRecorderRef.current) {
         mediaRecorderRef.current.stop();

@@ -28,7 +28,7 @@ export const Playhead = ({ zoom }: { zoom: number }) => {
   const { currentTime } = useTimelineData();
   return (
     <div 
-      className="absolute top-0 bottom-0 w-px bg-rose-500 z-50 pointer-events-none shadow-[0_0_15px_rgba(244,63,94,0.5)]"
+      className="absolute top-0 bottom-0 w-px bg-rose-500 z-30 pointer-events-none shadow-[0_0_15px_rgba(244,63,94,0.5)]"
       style={{ left: `${currentTime * zoom}px` }}
     >
       <div className="absolute -top-1 -left-1.5 w-3 h-3 bg-rose-500 rotate-45 shadow-lg" />
@@ -652,7 +652,7 @@ export const AdvancedTimeline = ({
   return (
     <div className="flex-1 flex flex-col bg-zinc-950 border-t border-zinc-800 select-none">
       {/* DAW Transport Bar */}
-      <div className="h-14 border-b border-zinc-800 bg-zinc-900/80 backdrop-blur-md flex items-center z-50">
+      <div className="h-14 border-b border-zinc-800 bg-zinc-900/80 backdrop-blur-md flex items-center z-30">
         <div className="flex items-center gap-4 px-6">
           <div className="flex items-center bg-black/40 rounded-lg p-1 border border-white/5">
             <button 
@@ -744,8 +744,8 @@ export const AdvancedTimeline = ({
 
       <div className="flex-1 flex overflow-hidden relative">
         {/* Track Headers Column */}
-        <div className="w-64 border-r border-zinc-800 bg-zinc-950 flex flex-col z-40 relative">
-          <div className="h-10 min-h-10 border-b border-zinc-800 bg-zinc-900/50 flex items-center px-4 relative z-50">
+        <div className="w-64 border-r border-zinc-800 bg-zinc-950 flex flex-col z-30 relative">
+          <div className="h-10 min-h-10 border-b border-zinc-800 bg-zinc-900/50 flex items-center px-4 relative z-30">
             <span className="text-[10px] font-black uppercase tracking-widest text-zinc-500">Дорожки</span>
           </div>
           <div 

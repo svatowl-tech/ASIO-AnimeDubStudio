@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   FolderOpen, 
   Settings, 
@@ -68,13 +69,17 @@ interface HeaderProps {
 const HotkeyHints = ({ onClose, keyMap }: { onClose: () => void, keyMap: any }) => {
   const currentKeyMap = keyMap || getDefaultKeyMap();
   
-  return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex justify-center items-start sm:items-center overflow-y-auto p-4 py-12 scrollbar-hide">
+  const content = (
+    <div 
+      className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[300] flex justify-center items-start sm:items-center overflow-y-auto p-4 py-12 scrollbar-hide"
+      onClick={onClose}
+    >
       <motion.div 
         initial={{ opacity: 0, scale: 0.95, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        className="bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl max-w-xl w-full p-6 my-auto"
+        onClick={(e) => e.stopPropagation()}
+        className="bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl max-w-xl w-full p-6 my-auto relative z-[310]"
       >
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
@@ -116,6 +121,12 @@ const HotkeyHints = ({ onClose, keyMap }: { onClose: () => void, keyMap: any }) 
       </motion.div>
     </div>
   );
+
+  if (typeof document !== 'undefined') {
+    return createPortal(content, document.body);
+  }
+
+  return content;
 };
 
 const Header: React.FC<HeaderProps> = ({
@@ -220,7 +231,7 @@ const Header: React.FC<HeaderProps> = ({
 
   return (
     <>
-      <header className="h-14 border-b border-white/5 flex items-center justify-between px-6 bg-zinc-900/80 backdrop-blur-md relative z-50">
+      <header className="h-14 border-b border-white/5 flex items-center justify-between px-6 bg-zinc-900/90 backdrop-blur-md relative z-[150]">
         <div className="flex items-center gap-4 shrink-0">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center">
@@ -253,8 +264,13 @@ const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center gap-3 shrink-0 ml-auto">
           <HistoryControls />
           <button 
-              onClick={() => setShowImportModal(true)}
-              className="px-4 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-xs font-bold flex items-center gap-2 transition-all border border-white/5"
+              type="button"
+              onClick={() => {
+                setShowExportMenu(false);
+                setShowProjectMenu(false);
+                setShowImportModal(true);
+              }}
+              className="px-4 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-xs font-bold flex items-center gap-2 transition-all border border-white/5 cursor-pointer"
             >
               <FileVideo className="w-4 h-4 text-indigo-400" />
               Импорт
@@ -268,6 +284,7 @@ const Header: React.FC<HeaderProps> = ({
                 e.stopPropagation();
                 setShowExportMenu(prev => !prev);
                 setShowProjectMenu(false);
+                setShowImportModal(false);
               }}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 rounded-lg text-xs font-bold transition-all shadow-lg shadow-indigo-600/20 active:scale-95 cursor-pointer"
               title="Экспорт дорожек озвучки и проекта"
@@ -283,7 +300,7 @@ const Header: React.FC<HeaderProps> = ({
                   initial={{ opacity: 0, y: 10, scale: 0.95 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                  className="absolute right-0 top-full mt-2 w-64 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl z-[70] overflow-hidden"
+                  className="absolute right-0 top-full mt-2 w-64 max-h-[calc(100vh-4.5rem)] overflow-y-auto custom-scrollbar bg-zinc-900 border border-white/10 rounded-xl shadow-2xl z-[200]"
                 >
                     <div className="p-2 space-y-1">
                       <div className="px-3 py-1 text-[10px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
@@ -397,6 +414,7 @@ const Header: React.FC<HeaderProps> = ({
                 e.stopPropagation();
                 setShowProjectMenu(!showProjectMenu);
                 setShowExportMenu(false);
+                setShowImportModal(false);
               }}
               className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-bold flex items-center gap-2 transition-all shadow-lg shadow-indigo-600/20 active:scale-95 cursor-pointer"
             >
@@ -410,7 +428,7 @@ const Header: React.FC<HeaderProps> = ({
                   initial={{ opacity: 0, y: 10, scale: 0.95 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                  className="absolute top-full right-0 mt-2 w-64 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl z-[70] overflow-hidden"
+                  className="absolute top-full right-0 mt-2 w-64 max-h-[calc(100vh-4.5rem)] overflow-y-auto custom-scrollbar bg-zinc-900 border border-white/10 rounded-xl shadow-2xl z-[200]"
                 >
                     <div className="p-2 space-y-1">
                       <button 

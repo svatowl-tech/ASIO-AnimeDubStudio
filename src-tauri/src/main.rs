@@ -15,7 +15,7 @@ use script_parser::parse_script_file;
 use export_engine::{export_audio, export_stems, export_all_stems, quick_preview_export, batch_export, export_audio_book, export_backstage_video, export_blooper, process_backstage_shorts, process_backstage_remove_silence, export_backstage_assemble};
 use db::{AppState, init_db, save_project_to_db, load_project_from_db, migrate_json_to_db, save_subtitles, generate_stress_test, load_segments_in_range, check_project_assets, verify_project_files, cleanup_orphaned_files, relink_segment_file, calculate_file_hash, find_file_by_hash};
 use waveform_engine::{extract_audio_peaks_bin, generate_waveform_peaks};
-use file_io::{read_text_file, read_binary_file, list_audio_files, write_audio_file, init_project_folder, get_file_info, save_media_recorder_take, save_project_file, copy_file_to_project, delete_file, append_backstage_chunk, finalize_backstage_session, list_backstage_sessions};
+use file_io::{read_text_file, read_binary_file, list_audio_files, write_audio_file, init_project_folder, move_project_folder, get_file_info, save_media_recorder_take, save_project_file, copy_file_to_project, delete_file, append_backstage_chunk, finalize_backstage_session, list_backstage_sessions};
 use media_processor::{create_proxy_video, mux_video, merge_segments, merge_project_segments, render_final_video, concat_backstage_videos, get_media_info, extract_mkv_assets, create_blank_video};
 
 use std::sync::Arc;
@@ -102,6 +102,11 @@ pub fn get_ffmpeg_path() -> String {
                     return p.to_string_lossy().to_string();
                 }
 
+                let p_bin = parent.join("bin").join(name);
+                if p_bin.exists() {
+                    return p_bin.to_string_lossy().to_string();
+                }
+
                 let p_res_bin = parent.join("resources").join("bin").join(name);
                 if p_res_bin.exists() {
                     return p_res_bin.to_string_lossy().to_string();
@@ -110,6 +115,20 @@ pub fn get_ffmpeg_path() -> String {
                 let p_res = parent.join("resources").join(name);
                 if p_res.exists() {
                     return p_res.to_string_lossy().to_string();
+                }
+
+                // Check parent/ancestor bin folders (e.g. target/debug/../../bin)
+                if let Some(p1) = parent.parent() {
+                    let p1_bin = p1.join("bin").join(name);
+                    if p1_bin.exists() {
+                        return p1_bin.to_string_lossy().to_string();
+                    }
+                    if let Some(p2) = p1.parent() {
+                        let p2_bin = p2.join("bin").join(name);
+                        if p2_bin.exists() {
+                            return p2_bin.to_string_lossy().to_string();
+                        }
+                    }
                 }
             }
 
@@ -168,6 +187,11 @@ pub fn get_ffprobe_path() -> String {
                     return p.to_string_lossy().to_string();
                 }
 
+                let p_bin = parent.join("bin").join(name);
+                if p_bin.exists() {
+                    return p_bin.to_string_lossy().to_string();
+                }
+
                 let p_res_bin = parent.join("resources").join("bin").join(name);
                 if p_res_bin.exists() {
                     return p_res_bin.to_string_lossy().to_string();
@@ -176,6 +200,19 @@ pub fn get_ffprobe_path() -> String {
                 let p_res = parent.join("resources").join(name);
                 if p_res.exists() {
                     return p_res.to_string_lossy().to_string();
+                }
+
+                if let Some(p1) = parent.parent() {
+                    let p1_bin = p1.join("bin").join(name);
+                    if p1_bin.exists() {
+                        return p1_bin.to_string_lossy().to_string();
+                    }
+                    if let Some(p2) = p1.parent() {
+                        let p2_bin = p2.join("bin").join(name);
+                        if p2_bin.exists() {
+                            return p2_bin.to_string_lossy().to_string();
+                        }
+                    }
                 }
             }
 
@@ -351,6 +388,7 @@ fn main() {
             list_audio_files,
             write_audio_file,
             init_project_folder,
+            move_project_folder,
             get_file_info,
             save_media_recorder_take,
             append_backstage_chunk,

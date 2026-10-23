@@ -2,6 +2,7 @@ import React, { useCallback, useRef, useEffect } from 'react';
 import { logger } from '../lib/logger';
 import { Project, AudioTrack, SubtitleLine } from '../types';
 import { getGlobalAudioSettings, getSafeFileUrl, getFriendlyImportErrorMessage } from '../lib/utils';
+import { sanitizeFolderName } from '../lib/projectRelocation';
 
 export const useProjectImport = (
   project: Project | null,
@@ -9,7 +10,8 @@ export const useProjectImport = (
   setDuration: (duration: number) => void,
   setIsExporting?: (exp: boolean) => void,
   setExportProgress?: (prog: number) => void,
-  setExportOperation?: (op: string) => void
+  setExportOperation?: (op: string) => void,
+  onFolderInitError?: (error: string) => void
 ) => {
   const isMounted = useRef(true);
   useEffect(() => {
@@ -103,20 +105,29 @@ export const useProjectImport = (
         const sep = isWin ? '\\' : '/';
         const lastSepIndex = originalVideoPath.lastIndexOf(sep);
         const videoDir = lastSepIndex !== -1 ? originalVideoPath.substring(0, lastSepIndex) : '';
-        const videoNameWithoutExt = videoName.replace(/\.[^/.]+$/, "");
+        const videoNameWithoutExt = sanitizeFolderName(videoName.replace(/\.[^/.]+$/, ""));
         
         finalProjectRoot = videoDir ? `${videoDir}${sep}${videoNameWithoutExt}_Project` : `${videoNameWithoutExt}_Project`;
       }
 
       // Initialize subdirs
-      await window.electronAPI.initProject(finalProjectRoot);
+      const initRes = await window.electronAPI.initProject(finalProjectRoot);
       if (!isMounted.current) return;
-      
-      // Copy video to /assets
-      const assetsDir = `${finalProjectRoot}/assets`.replace(/\\/g, '/');
-      const copyRes = await window.electronAPI.copyFileToProject(originalVideoPath, assetsDir);
-      if (!isMounted.current) return;
-      const finalVideoPath = copyRes.success && copyRes.data ? copyRes.data : originalVideoPath;
+
+      let finalVideoPath = originalVideoPath;
+      if (!initRes.success) {
+        logger.warn(`Failed to initialize project folder at ${finalProjectRoot}:`, initRes.error);
+        finalProjectRoot = '';
+        if (onFolderInitError) {
+          onFolderInitError(initRes.error || 'Не удалось создать рабочую папку проекта рядом с импортируемым видеофайлом.');
+        }
+      } else {
+        // Copy video to /assets
+        const assetsDir = `${finalProjectRoot}/assets`.replace(/\\/g, '/');
+        const copyRes = await window.electronAPI.copyFileToProject(originalVideoPath, assetsDir);
+        if (!isMounted.current) return;
+        finalVideoPath = copyRes.success && copyRes.data ? copyRes.data : originalVideoPath;
+      }
 
       let initialSubtitles: SubtitleLine[] = project?.subtitles || [];
       let initialRoles: string[] = project?.roles || [];
@@ -167,12 +178,13 @@ export const useProjectImport = (
       
       setProject(updatedProject);
       
-      // Extract audio peaks in the background
-      try {
-        logger.info("Extracting audio peaks...");
-        const takesDir = `${finalProjectRoot}/takes`.replace(/\\/g, '/');
-        
-        const audioDataRes = await window.electronAPI.extractAudioPeaks(finalVideoPath, takesDir);
+      // Extract audio peaks in the background if project folder exists
+      if (finalProjectRoot) {
+        try {
+          logger.info("Extracting audio peaks...");
+          const takesDir = `${finalProjectRoot}/takes`.replace(/\\/g, '/');
+          
+          const audioDataRes = await window.electronAPI.extractAudioPeaks(finalVideoPath, takesDir);
         if (!isMounted.current) return;
         
         if (audioDataRes.success && audioDataRes.data) {
@@ -221,9 +233,10 @@ export const useProjectImport = (
           if (safeDuration > 0) {
             setDuration(safeDuration);
           }
+          }
+        } catch (e) {
+          logger.error("Failed to extract peaks:", e);
         }
-      } catch (e) {
-        logger.error("Failed to extract peaks:", e);
       }
     } catch (error) {
       logger.error("Failed to continue import video:", error);

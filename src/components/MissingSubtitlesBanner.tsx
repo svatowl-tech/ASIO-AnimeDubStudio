@@ -60,7 +60,7 @@ export const MissingSubtitlesBanner: React.FC<MissingSubtitlesBannerProps> = ({
         initial={{ y: 50, opacity: 0, scale: 0.95 }}
         animate={{ y: 0, opacity: 1, scale: 1 }}
         exit={{ y: 50, opacity: 0, scale: 0.95 }}
-        className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2.5 bg-zinc-900/95 border border-amber-500/40 backdrop-blur-md rounded-2xl shadow-2xl shadow-amber-500/10 text-white font-sans max-w-lg w-full"
+        className="fixed bottom-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 px-4 py-2.5 bg-zinc-900/95 border border-amber-500/40 backdrop-blur-md rounded-2xl shadow-2xl shadow-amber-500/10 text-white font-sans max-w-lg w-full"
       >
         {isComplete ? (
           <div className="flex items-center gap-2 text-emerald-400 font-bold text-xs flex-1">

@@ -199,6 +199,10 @@ pub async fn finalize_backstage_session(project_path: String, session_id: String
 
 #[tauri::command]
 pub async fn save_media_recorder_take(project_path: String, role: String, data: Vec<u8>) -> Result<String, String> {
+    if project_path.trim().is_empty() || project_path == "/mock/path" {
+        return Err("Папка проекта не задана или недоступна для записи".to_string());
+    }
+
     let epoch_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_else(|_| std::time::Duration::from_millis(0))
@@ -207,21 +211,33 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
     // Use hierarchy: {project_path}/takes/
     let takes_dir = Path::new(&project_path).join("takes");
     if !takes_dir.exists() {
-        fs::create_dir_all(&takes_dir).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&takes_dir).map_err(|e| format!("Не удалось создать папку takes ({}): {}", takes_dir.display(), e))?;
     }
 
     let is_backstage = role.contains("backstage");
+    let safe_role: String = role
+        .chars()
+        .map(|c| if "<>:\"/\\|?*".contains(c) || c.is_control() { '_' } else { c })
+        .collect();
+    let safe_role = if safe_role.trim().is_empty() { "unknown".to_string() } else { safe_role };
+
     let file_ext = if is_backstage { "mp4" } else { "wav" };
-    let file_name = format!("take_{}_{}.{}", role, epoch_ms, file_ext);
+    let file_name = format!("take_{}_{}.{}", safe_role, epoch_ms, file_ext);
+    let target_path = takes_dir.join(&file_name);
+    let target_path_str = target_path.to_string_lossy().to_string();
+
+    // Fast & dependency-free path: if audio data is already encoded as RIFF WAVE in the browser, write directly!
+    if !is_backstage && data.len() > 44 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE" {
+        fs::write(&target_path, &data).map_err(|e| format!("Не удалось записать WAV-файл на диск: {}", e))?;
+        return Ok(target_path_str);
+    }
     
     // Write webm data to a temporary file in takes dir
     let temp_name = format!("temp_{}.webm", epoch_ms);
     let temp_path = takes_dir.join(&temp_name);
-    fs::write(&temp_path, data).map_err(|e| e.to_string())?;
+    fs::write(&temp_path, &data).map_err(|e| format!("Не удалось записать временный файл в папку проекта: {}", e))?;
 
-    let target_path = takes_dir.join(&file_name);
     let temp_path_str = temp_path.to_string_lossy().to_string();
-    let target_path_str = target_path.to_string_lossy().to_string();
 
     // Use FFmpeg to convert
     // If backstage, convert to MP4 with consistent specs for later concatenation
@@ -248,7 +264,13 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
         ]);
     }
 
-    let status = command.output().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let status = command.output().map_err(|e| format!("FFmpeg execution error: {}", e))?;
 
     // Clean up temporary webm file
     let _ = fs::remove_file(&temp_path);
@@ -262,6 +284,9 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
 
 #[tauri::command]
 pub fn init_project_folder(path: String) -> Result<(), String> {
+    if path.trim().is_empty() || path == "/mock/path" {
+        return Err("Путь к папке проекта пуст или некорректен".to_string());
+    }
     let project_dir = Path::new(&path);
     
     // Create hierarchy
@@ -281,6 +306,43 @@ pub fn init_project_folder(path: String) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    if !dst.exists() {
+        fs::create_dir_all(dst).map_err(|e| format!("Не удалось создать папку {}: {}", dst.display(), e))?;
+    }
+    let entries = fs::read_dir(src).map_err(|e| format!("Не удалось прочитать папку {}: {}", src.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            // Avoid infinite recursion if dst is inside src
+            if dst.starts_with(&src_path) {
+                continue;
+            }
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            let _ = fs::copy(&src_path, &dst_path);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn move_project_folder(old_path: String, new_path: String) -> Result<String, String> {
+    init_project_folder(new_path.clone())?;
+
+    let old_dir = Path::new(&old_path);
+    let new_dir = Path::new(&new_path);
+
+    if !old_path.trim().is_empty() && old_path != "/mock/path" && old_dir.exists() && old_dir != new_dir {
+        let _ = copy_dir_recursive(old_dir, new_dir);
+    }
+
+    Ok(new_path)
 }
 
 #[tauri::command]
@@ -314,7 +376,9 @@ pub fn copy_file_to_project(src: String, dest_dir: String) -> Result<String, Str
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
     }
-    fs::copy(&src, &dest_path).map_err(|e| format!("Failed to copy file: {}", e))?;
+    if src_path != dest_path {
+        fs::copy(&src, &dest_path).map_err(|e| format!("Failed to copy file: {}", e))?;
+    }
     
     Ok(dest_path.to_string_lossy().to_string())
 }
