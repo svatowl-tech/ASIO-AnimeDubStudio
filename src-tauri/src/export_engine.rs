@@ -97,9 +97,10 @@ pub async fn export_all_stems(
                 current_pos_samples = seg_start_samples;
             }
 
-            // Write segment
+                // Write segment
             if let Some(path) = seg.file_path {
-                if let Ok(mut reader) = WavReader::open(path) {
+                let resolved = crate::file_io::resolve_existing_media_path(&path, None, Some(&output_path), &[]);
+                if let Ok(mut reader) = WavReader::open(&resolved) {
                     for sample in reader.samples::<i16>() {
                         if let Ok(s) = sample {
                             writer.write_sample(s).map_err(|e| e.to_string())?;
@@ -173,6 +174,7 @@ pub struct ProjectTrack {
     pub name: String,
     pub is_muted: Option<bool>,
     pub is_solo: Option<bool>,
+    pub volume: Option<f64>,
     #[serde(default)]
     pub segments: Vec<ExportSegmentData>,
 }
@@ -185,6 +187,8 @@ pub struct ExportProjectData {
     #[serde(default)]
     #[allow(dead_code)]
     pub audio_offset_ms: f64,
+    #[serde(default)]
+    pub project_path: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -202,6 +206,408 @@ struct StemProgress {
     current: usize,
     total: usize,
     track_name: String,
+}
+
+fn read_wav_mono_48k(path: &str) -> Result<Vec<f32>, String> {
+    let mut reader = WavReader::open(path).map_err(|e| format!("Failed to open WAV {}: {}", path, e))?;
+    let spec = reader.spec();
+    let channels = (spec.channels as usize).max(1);
+    let src_rate = spec.sample_rate.max(1);
+
+    let raw_samples: Vec<f32> = match spec.sample_format {
+        SampleFormat::Int => {
+            if spec.bits_per_sample == 16 {
+                reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / i16::MAX as f32).collect()
+            } else if spec.bits_per_sample == 24 {
+                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 8_388_607.0).collect()
+            } else if spec.bits_per_sample == 32 {
+                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / i32::MAX as f32).collect()
+            } else if spec.bits_per_sample == 8 {
+                reader.samples::<i8>().map(|s| s.unwrap_or(0) as f32 / i8::MAX as f32).collect()
+            } else {
+                let max_val = ((1i64 << (spec.bits_per_sample.saturating_sub(1))) - 1).max(1) as f32;
+                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / max_val).collect()
+            }
+        }
+        SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap_or(0.0)).collect(),
+    };
+
+    let frames = raw_samples.len() / channels;
+    let mut mono = Vec::with_capacity(frames);
+    if channels == 1 {
+        mono = raw_samples;
+    } else {
+        for f in 0..frames {
+            let mut sum = 0.0f32;
+            for c in 0..channels {
+                sum += raw_samples[f * channels + c];
+            }
+            mono.push(sum / channels as f32);
+        }
+    }
+
+    if src_rate == 48000 || mono.is_empty() {
+        return Ok(mono);
+    }
+
+    let out_len = ((mono.len() as f64) * 48000.0 / (src_rate as f64)).round() as usize;
+    let mut resampled = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let pos = (i as f64) * (src_rate as f64) / 48000.0;
+        let idx = pos.floor() as usize;
+        let frac = (pos - idx as f64) as f32;
+        let s0 = mono.get(idx).copied().unwrap_or(0.0);
+        let s1 = mono.get(idx + 1).copied().unwrap_or(s0);
+        resampled.push(s0 + (s1 - s0) * frac);
+    }
+    Ok(resampled)
+}
+
+pub fn mix_segments_to_mono_48k_pure_rust(
+    segments: &[ExportSegmentData],
+    normalize: bool,
+    target_lufs: f64,
+    max_peak_db: f64,
+    normalization_mode: &str,
+    fixed_duration: Option<f64>,
+    project_path_hint: Option<&str>,
+    output_path_hint: Option<&str>,
+) -> Vec<f32> {
+    let sample_rate = 48000usize;
+    let mut total_duration = fixed_duration.unwrap_or(0.0);
+    if fixed_duration.is_none() {
+        for seg in segments {
+            let end_t = (seg.start_time.max(0.0)) + seg.duration.max(0.0);
+            if end_t > total_duration {
+                total_duration = end_t;
+            }
+        }
+    }
+
+    let total_samples = ((total_duration.max(0.1)) * sample_rate as f64).ceil() as usize;
+    let mut mix_buf = vec![0.0f32; total_samples];
+
+    for seg in segments {
+        let Some(ref path_str) = seg.file_path else { continue };
+        if path_str.is_empty() {
+            continue;
+        }
+        let resolved_path = crate::file_io::resolve_existing_media_path(
+            path_str,
+            project_path_hint,
+            output_path_hint,
+            &[],
+        );
+        if !resolved_path.exists() {
+            continue;
+        }
+        let resolved_str = resolved_path.to_string_lossy().to_string();
+        let Ok(file_samples) = read_wav_mono_48k(&resolved_str) else { continue };
+        if file_samples.is_empty() {
+            continue;
+        }
+
+        let rate = seg.playback_rate.unwrap_or(1.0).clamp(0.25, 4.0);
+        let gain = if seg.gain > 0.0 { seg.gain as f32 } else { 1.0 };
+        let start_in_file = (seg.file_offset.max(0.0) * sample_rate as f64) as usize;
+        let out_dur_samples = (seg.duration.max(0.0) * sample_rate as f64).round() as usize;
+        let dest_start = (seg.start_time.max(0.0) * sample_rate as f64).round() as usize;
+
+        for i in 0..out_dur_samples {
+            let dest_idx = dest_start + i;
+            if dest_idx >= mix_buf.len() {
+                break;
+            }
+            let src_pos = start_in_file as f64 + (i as f64) * rate;
+            let src_idx = src_pos.floor() as usize;
+            if src_idx >= file_samples.len() {
+                break;
+            }
+            let frac = (src_pos - src_idx as f64) as f32;
+            let s0 = file_samples[src_idx];
+            let s1 = file_samples.get(src_idx + 1).copied().unwrap_or(s0);
+            let sample = (s0 + (s1 - s0) * frac) * gain;
+            mix_buf[dest_idx] += sample;
+        }
+    }
+
+    if normalize && !mix_buf.is_empty() {
+        let max_peak_linear = 10.0f32.powf((max_peak_db as f32) / 20.0);
+        let mut current_peak = 0.0f32;
+        for &s in &mix_buf {
+            let a = s.abs();
+            if a > current_peak {
+                current_peak = a;
+            }
+        }
+
+        if normalization_mode == "peak" {
+            if current_peak > 1e-6 {
+                let gain_factor = max_peak_linear / current_peak;
+                for s in &mut mix_buf {
+                    *s = (*s * gain_factor).clamp(-1.0, 1.0);
+                }
+            }
+        } else {
+            let mut gain_factor = 1.0f32;
+            if let Ok(mut meter) = ebur128::EbuR128::new(1, sample_rate as u32, ebur128::Mode::I) {
+                let _ = meter.add_frames_f32(&mix_buf);
+                if let Ok(measured_lufs) = meter.loudness_global() {
+                    if measured_lufs.is_finite() && measured_lufs > -70.0 {
+                        let delta_db = (target_lufs - measured_lufs).clamp(-24.0, 24.0) as f32;
+                        gain_factor = 10.0f32.powf(delta_db / 20.0);
+                    }
+                }
+            }
+            if current_peak * gain_factor > max_peak_linear && current_peak > 1e-6 {
+                gain_factor = max_peak_linear / current_peak;
+            }
+            for s in &mut mix_buf {
+                *s = (*s * gain_factor).clamp(-1.0, 1.0);
+            }
+        }
+    }
+
+    mix_buf
+}
+
+fn flac_crc8(data: &[u8]) -> u8 {
+    let mut crc = 0u8;
+    for &b in data {
+        crc ^= b;
+        for _ in 0..8 {
+            if (crc & 0x80) != 0 {
+                crc = (crc << 1) ^ 0x07;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
+
+fn flac_crc16(data: &[u8]) -> u16 {
+    let mut crc = 0u16;
+    for &b in data {
+        crc ^= (b as u16) << 8;
+        for _ in 0..8 {
+            if (crc & 0x8000) != 0 {
+                crc = (crc << 1) ^ 0x8005;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
+
+fn encode_flac_utf8_u64(val: u64, out: &mut Vec<u8>) {
+    if val < 0x80 {
+        out.push(val as u8);
+    } else if val < (1 << 11) {
+        out.push((0xC0 | (val >> 6)) as u8);
+        out.push((0x80 | (val & 0x3F)) as u8);
+    } else if val < (1 << 16) {
+        out.push((0xE0 | (val >> 12)) as u8);
+        out.push((0x80 | ((val >> 6) & 0x3F)) as u8);
+        out.push((0x80 | (val & 0x3F)) as u8);
+    } else if val < (1 << 21) {
+        out.push((0xF0 | (val >> 18)) as u8);
+        out.push((0x80 | ((val >> 12) & 0x3F)) as u8);
+        out.push((0x80 | ((val >> 6) & 0x3F)) as u8);
+        out.push((0x80 | (val & 0x3F)) as u8);
+    } else if val < (1 << 26) {
+        out.push((0xF8 | (val >> 24)) as u8);
+        out.push((0x80 | ((val >> 18) & 0x3F)) as u8);
+        out.push((0x80 | ((val >> 12) & 0x3F)) as u8);
+        out.push((0x80 | ((val >> 6) & 0x3F)) as u8);
+        out.push((0x80 | (val & 0x3F)) as u8);
+    } else {
+        out.push((0xFC | (val >> 30)) as u8);
+        out.push((0x80 | ((val >> 24) & 0x3F)) as u8);
+        out.push((0x80 | ((val >> 18) & 0x3F)) as u8);
+        out.push((0x80 | ((val >> 12) & 0x3F)) as u8);
+        out.push((0x80 | ((val >> 6) & 0x3F)) as u8);
+        out.push((0x80 | (val & 0x3F)) as u8);
+    }
+}
+
+/// Pure-Rust lossless FLAC encoder (RFC 9639) for 48kHz 16-bit mono audio.
+/// Uses SUBFRAME_CONSTANT for silent/uniform blocks and SUBFRAME_VERBATIM for active audio blocks,
+/// with full STREAMINFO MD5 checksum, CRC-8 frame headers, and CRC-16 frame footers.
+pub fn write_flac_mono_16bit_pure_rust(samples: &[f32], out_file: &Path) -> Result<(), String> {
+    if let Some(parent) = out_file.parent() {
+        if !parent.exists() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+
+    let pcm_samples: Vec<i16> = if samples.is_empty() {
+        vec![0i16; 4800]
+    } else {
+        samples
+            .iter()
+            .map(|&s| (s.clamp(-1.0, 1.0) * 32_767.0) as i16)
+            .collect()
+    };
+
+    let mut pcm_le_bytes = Vec::with_capacity(pcm_samples.len() * 2);
+    for &s in &pcm_samples {
+        pcm_le_bytes.extend_from_slice(&s.to_le_bytes());
+    }
+    let md5_digest = md5::compute(&pcm_le_bytes);
+
+    let mut out_bytes = Vec::with_capacity(42 + pcm_samples.len() * 2);
+    // 1. Magic "fLaC"
+    out_bytes.extend_from_slice(b"fLaC");
+
+    // 2. STREAMINFO metadata block header (last block = 1, type = 0, length = 34)
+    out_bytes.extend_from_slice(&[0x80, 0x00, 0x00, 34]);
+
+    let block_size: u16 = 4096;
+    out_bytes.extend_from_slice(&block_size.to_be_bytes()); // min block size
+    out_bytes.extend_from_slice(&block_size.to_be_bytes()); // max block size
+    out_bytes.extend_from_slice(&[0x00, 0x00, 0x00]); // min frame size (0 = unknown)
+    out_bytes.extend_from_slice(&[0x00, 0x00, 0x00]); // max frame size (0 = unknown)
+
+    // 20 bits sample rate (48000 = 0x0BB80), 3 bits channels-1 (0), 5 bits bps-1 (15 = 0x0F), 36 bits total samples
+    let sr: u64 = 48000;
+    let ch_minus_1: u64 = 0;
+    let bps_minus_1: u64 = 15;
+    let total_samples: u64 = (pcm_samples.len() as u64) & 0x0F_FFFF_FFFF;
+    let packed_64: u64 = (sr << 44) | (ch_minus_1 << 41) | (bps_minus_1 << 36) | total_samples;
+    out_bytes.extend_from_slice(&packed_64.to_be_bytes());
+    out_bytes.extend_from_slice(&md5_digest.0);
+
+    // 3. Encode frames of up to 4096 samples
+    let mut frame_Bytes = Vec::with_capacity(8224);
+    for (frame_idx, chunk) in pcm_samples.chunks(4096).enumerate() {
+        frame_Bytes.clear();
+        // Sync code 0b11111111111110 + reserved(0) + blocking_strategy(0 = fixed-blocksize)
+        frame_Bytes.push(0xFF);
+        frame_Bytes.push(0xF8);
+
+        let is_standard_4096 = chunk.len() == 4096;
+        // Block size bits: 0b1100 (4096) or 0b0111 (16-bit block_size-1 at end of header)
+        // Sample rate bits: 0b1010 (48 kHz)
+        if is_standard_4096 {
+            frame_Bytes.push(0xCA); // 0b1100_1010
+        } else {
+            frame_Bytes.push(0x7A); // 0b0111_1010
+        }
+
+        // Channel assignment: 0b0000 (1 channel mono), Sample size: 0b100 (16 bits), Reserved: 0
+        frame_Bytes.push(0x08);
+
+        encode_flac_utf8_u64(frame_idx as u64, &mut frame_Bytes);
+
+        if !is_standard_4096 {
+            let bs_minus_1 = (chunk.len().saturating_sub(1)) as u16;
+            frame_Bytes.extend_from_slice(&bs_minus_1.to_be_bytes());
+        }
+
+        let crc8 = flac_crc8(&frame_Bytes);
+        frame_Bytes.push(crc8);
+
+        // Check if all samples in chunk are identical (e.g. silence)
+        let first_sample = chunk[0];
+        let is_constant = chunk.iter().all(|&s| s == first_sample);
+        if is_constant {
+            // SUBFRAME_CONSTANT: pad(0) + type(000000) + wasted(0) = 0x00
+            frame_Bytes.push(0x00);
+            frame_Bytes.extend_from_slice(&first_sample.to_be_bytes());
+        } else {
+            // SUBFRAME_VERBATIM: pad(0) + type(000001) + wasted(0) = 0x02
+            frame_Bytes.push(0x02);
+            for &s in chunk {
+                frame_Bytes.extend_from_slice(&s.to_be_bytes());
+            }
+        }
+
+        let crc16 = flac_crc16(&frame_Bytes);
+        frame_Bytes.extend_from_slice(&crc16.to_be_bytes());
+
+        out_bytes.extend_from_slice(&frame_Bytes);
+    }
+
+    fs::write(out_file, &out_bytes)
+        .map_err(|e| format!("Failed to write FLAC file {}: {}", out_file.display(), e))?;
+    Ok(())
+}
+
+pub fn render_segments_to_wav_pure_rust(
+    segments: &[ExportSegmentData],
+    out_file: &Path,
+    bit_depth: &str,
+    normalize: bool,
+    target_lufs: f64,
+    max_peak_db: f64,
+    fixed_duration: Option<f64>,
+) -> Result<(), String> {
+    let sample_rate = 48000usize;
+    let out_hint = out_file.to_string_lossy().to_string();
+    let mix_buf = mix_segments_to_mono_48k_pure_rust(
+        segments,
+        normalize,
+        target_lufs,
+        max_peak_db,
+        "lufs",
+        fixed_duration,
+        None,
+        Some(&out_hint),
+    );
+
+    if let Some(parent) = out_file.parent() {
+        if !parent.exists() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+
+    match bit_depth {
+        "32float" | "32" => {
+            let spec = WavSpec {
+                channels: 1,
+                sample_rate: sample_rate as u32,
+                bits_per_sample: 32,
+                sample_format: SampleFormat::Float,
+            };
+            let mut writer = WavWriter::create(out_file, spec).map_err(|e| e.to_string())?;
+            for s in mix_buf {
+                writer.write_sample(s.clamp(-1.0, 1.0)).map_err(|e| e.to_string())?;
+            }
+            writer.finalize().map_err(|e| e.to_string())?;
+        }
+        "24" => {
+            let spec = WavSpec {
+                channels: 1,
+                sample_rate: sample_rate as u32,
+                bits_per_sample: 24,
+                sample_format: SampleFormat::Int,
+            };
+            let mut writer = WavWriter::create(out_file, spec).map_err(|e| e.to_string())?;
+            for s in mix_buf {
+                let v = (s.clamp(-1.0, 1.0) * 8_388_607.0) as i32;
+                writer.write_sample(v).map_err(|e| e.to_string())?;
+            }
+            writer.finalize().map_err(|e| e.to_string())?;
+        }
+        _ => {
+            let spec = WavSpec {
+                channels: 1,
+                sample_rate: sample_rate as u32,
+                bits_per_sample: 16,
+                sample_format: SampleFormat::Int,
+            };
+            let mut writer = WavWriter::create(out_file, spec).map_err(|e| e.to_string())?;
+            for s in mix_buf {
+                let v = (s.clamp(-1.0, 1.0) * 32_767.0) as i16;
+                writer.write_sample(v).map_err(|e| e.to_string())?;
+            }
+            writer.finalize().map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -231,87 +637,137 @@ pub async fn export_stems(
 
     let mut handles = Vec::new();
 
-        let norm_clone = options.normalize;
-        let lufs_clone = options.target_lufs;
-        let peak_clone = options.max_peak;
+    let norm_clone = options.normalize;
+    let lufs_clone = options.target_lufs;
+    let peak_clone = options.max_peak;
+    let project_path_hint = project.project_path.clone();
 
-        for (i, track) in project.tracks.into_iter().enumerate() {
-            let sem_clone = Arc::clone(&semaphore);
-            let app_clone = app_handle.clone();
-            let enc_clone = encoder.to_string();
-            let out_dir_clone = output_dir.to_path_buf();
-            let track_idx = i + 1;
-            let norm_enabled = norm_clone.unwrap_or(false);
-            let target_lufs_val = lufs_clone.unwrap_or(-20.0).clamp(-70.0, -5.0);
-            let max_peak_val = peak_clone.unwrap_or(-9.0).clamp(-9.0, 0.0);
+    for (i, track) in project.tracks.into_iter().enumerate() {
+        let sem_clone = Arc::clone(&semaphore);
+        let app_clone = app_handle.clone();
+        let enc_clone = encoder.to_string();
+        let out_dir_clone = output_dir.to_path_buf();
+        let track_idx = i + 1;
+        let norm_enabled = norm_clone.unwrap_or(false);
+        let target_lufs_val = lufs_clone.unwrap_or(-20.0).clamp(-70.0, -5.0);
+        let max_peak_val = peak_clone.unwrap_or(-9.0).clamp(-9.0, 0.0);
+        let proj_hint_clone = project_path_hint.clone();
 
-            let handle = tokio::spawn(async move {
-                let _permit = sem_clone.acquire().await.map_err(|e| e.to_string())?;
+        let handle = tokio::spawn(async move {
+            let _permit = sem_clone.acquire().await.map_err(|e| e.to_string())?;
 
-                let sanitized_name = track.name.replace(|c: char| !c.is_alphanumeric(), "_");
-                let file_name = format!("{:02}_{}.wav", track_idx, sanitized_name);
-                let out_file = out_dir_clone.join(file_name);
+            let sanitized_name = track.name.replace(|c: char| !c.is_alphanumeric(), "_");
+            let file_name = format!("{:02}_{}.wav", track_idx, sanitized_name);
+            let out_file = out_dir_clone.join(file_name);
+            let out_dir_str = out_dir_clone.to_string_lossy().to_string();
 
-                let _ = app_clone.emit("stem-progress", StemProgress {
-                    current: track_idx,
-                    total: total_tracks,
-                    track_name: track.name.clone(),
-                });
+            let _ = app_clone.emit("stem-progress", StemProgress {
+                current: track_idx,
+                total: total_tracks,
+                track_name: track.name.clone(),
+            });
 
-                let valid_segments: Vec<_> = track.segments.iter()
-                    .filter(|s| s.file_path.is_some() && !s.file_path.as_ref().unwrap().is_empty())
-                    .collect();
-                
-                if valid_segments.is_empty() {
-                    return Ok::<(), String>(());
-                }
-
-                // --- FFmpeg Logic for Stem ---
-                // We use filter_complex to place each segment at its correct timeline position
-                let mut cmd = new_ffmpeg_command();
-                cmd.arg("-nostdin");
-                cmd.arg("-y");
-
-                for seg in &valid_segments {
-                    cmd.arg("-i").arg(seg.file_path.as_ref().unwrap());
-                }
-
-                let mut filter = String::new();
-                for (idx, seg) in valid_segments.iter().enumerate() {
-                    let delay_ms = (seg.start_time * 1000.0) as i64;
-                    let playback_rate = seg.playback_rate.unwrap_or(1.0);
-                    
-                    // [idx:a]atrim=start:end,asetpts=PTS-STARTPTS,atempo=rate,adelay=ms|ms[a_idx]
-                    // atrim is in file time
-                    filter.push_str(&format!(
-                        "[{}:a]atrim=start={}:duration={},asetpts=PTS-STARTPTS", 
-                        idx, seg.file_offset, seg.duration * playback_rate
-                    ));
-                    
-                    if (playback_rate - 1.0).abs() > 0.001 {
-                        filter.push_str(&format!(",atempo={}", playback_rate));
+            let mut valid_segments: Vec<ExportSegmentData> = Vec::new();
+            for seg in &track.segments {
+                if let Some(ref raw_p) = seg.file_path {
+                    if !raw_p.is_empty() {
+                        let resolved = crate::file_io::resolve_existing_media_path(
+                            raw_p,
+                            proj_hint_clone.as_deref(),
+                            Some(&out_dir_str),
+                            &[],
+                        );
+                        if resolved.exists() {
+                            let mut cloned = seg.clone();
+                            cloned.file_path = Some(resolved.to_string_lossy().to_string());
+                            valid_segments.push(cloned);
+                        }
                     }
-                    
-                    filter.push_str(&format!(",volume={},adelay={}|{}[a{}];", seg.gain, delay_ms, delay_ms, idx));
                 }
+            }
 
-            // Mix weighted segments
+            if valid_segments.is_empty() {
+                return Ok::<(), String>(());
+            }
+
+            let depth = match enc_clone.as_str() {
+                "pcm_s24le" => "24",
+                "pcm_f32le" => "32float",
+                _ => "16",
+            };
+
+            // Use pure-Rust stem renderer first if all segments are WAV, or FFmpeg with pure-Rust fallback
+            let all_wav = valid_segments.iter().all(|s| {
+                s.file_path
+                    .as_ref()
+                    .map(|p| p.to_lowercase().ends_with(".wav"))
+                    .unwrap_or(false)
+            });
+
+            if all_wav || !crate::is_ffmpeg_available() {
+                render_segments_to_wav_pure_rust(
+                    &valid_segments,
+                    &out_file,
+                    depth,
+                    norm_enabled,
+                    target_lufs_val,
+                    max_peak_val,
+                    None,
+                )?;
+                return Ok(());
+            }
+
+            let mut cmd = new_ffmpeg_command();
+            cmd.arg("-nostdin");
+            cmd.arg("-y");
+
+            for seg in &valid_segments {
+                cmd.arg("-i").arg(seg.file_path.as_ref().unwrap());
+            }
+
+            let mut filter = String::new();
+            for (idx, seg) in valid_segments.iter().enumerate() {
+                let delay_ms = (seg.start_time * 1000.0) as i64;
+                let playback_rate = seg.playback_rate.unwrap_or(1.0);
+                filter.push_str(&format!(
+                    "[{}:a]atrim=start={}:duration={},asetpts=PTS-STARTPTS",
+                    idx, seg.file_offset, seg.duration * playback_rate
+                ));
+                if (playback_rate - 1.0).abs() > 0.001 {
+                    filter.push_str(&format!(",atempo={}", playback_rate));
+                }
+                filter.push_str(&format!(",volume={},adelay={}|{}[a{}];", seg.gain, delay_ms, delay_ms, idx));
+            }
+
             for idx in 0..valid_segments.len() {
                 filter.push_str(&format!("[a{}]", idx));
             }
-            filter.push_str(&format!("amix=inputs={}:duration=longest:dropout_transition=0:normalize=0", valid_segments.len()));
+            filter.push_str(&format!(
+                "amix=inputs={}:duration=longest:dropout_transition=0:normalize=0",
+                valid_segments.len()
+            ));
 
             if norm_enabled {
                 filter.push_str(&format!(",loudnorm=I={:.1}:TP={:.1}:LRA=11", target_lufs_val, max_peak_val));
             }
 
             cmd.arg("-filter_complex").arg(filter);
-            cmd.arg("-c:a").arg(enc_clone);
+            cmd.arg("-c:a").arg(&enc_clone);
             cmd.arg(out_file.to_string_lossy().to_string());
 
-            let status = cmd.output().await.map_err(|e| e.to_string())?;
-            if !status.status.success() {
-                return Err(String::from_utf8_lossy(&status.stderr).to_string());
+            match cmd.output().await {
+                Ok(status) if status.status.success() => {}
+                _ => {
+                    render_segments_to_wav_pure_rust(
+                        &valid_segments,
+                        &out_file,
+                        depth,
+                        norm_enabled,
+                        target_lufs_val,
+                        max_peak_val,
+                        None,
+                    )?;
+                }
             }
 
             Ok(())
@@ -325,6 +781,104 @@ pub async fn export_stems(
     }
 
     Ok(())
+}
+
+/// Discovers orphaned `take_*.wav` files in `takes/` directories near `project_path` or `output_path`
+/// when a project's segments list became empty or had stale paths after moving folders.
+fn discover_orphaned_takes(project_path_hint: Option<&str>, output_path_hint: Option<&str>) -> Vec<ExportSegmentData> {
+    let mut candidate_takes_dirs = Vec::new();
+    if let Some(proj) = project_path_hint {
+        let p = PathBuf::from(proj);
+        candidate_takes_dirs.push(p.join("takes"));
+        if let Some(parent) = p.parent() {
+            candidate_takes_dirs.push(parent.join("takes"));
+        }
+    }
+    if let Some(out) = output_path_hint {
+        let out_p = PathBuf::from(out);
+        let base_dir = if out_p.extension().is_some() {
+            out_p.parent().map(|p| p.to_path_buf()).unwrap_or(out_p)
+        } else {
+            out_p
+        };
+        let mut curr: Option<&Path> = Some(base_dir.as_path());
+        for _ in 0..3 {
+            if let Some(dir) = curr {
+                candidate_takes_dirs.push(dir.join("takes"));
+                if let Ok(entries) = fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let ep = entry.path();
+                        if ep.is_dir() {
+                            candidate_takes_dirs.push(ep.join("takes"));
+                        }
+                    }
+                }
+                curr = dir.parent();
+            } else {
+                break;
+            }
+        }
+    }
+
+    let mut found_files: Vec<(u128, PathBuf)> = Vec::new();
+    for takes_dir in candidate_takes_dirs {
+        if takes_dir.exists() && takes_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&takes_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    if !fname.to_lowercase().ends_with(".wav") || fname == "original_audio.wav" {
+                        continue;
+                    }
+                    if !fname.starts_with("take_") {
+                        continue;
+                    }
+                    let stem = fname.trim_end_matches(".wav").trim_end_matches(".WAV");
+                    let parts: Vec<&str> = stem.split('_').collect();
+                    let epoch = parts
+                        .last()
+                        .and_then(|s| s.parse::<u128>().ok())
+                        .or_else(|| parts.get(1).and_then(|s| s.parse::<u128>().ok()))
+                        .unwrap_or(0);
+                    found_files.push((epoch, path));
+                }
+            }
+            if !found_files.is_empty() {
+                break;
+            }
+        }
+    }
+
+    found_files.sort_by_key(|(epoch, _)| *epoch);
+    let mut recovered = Vec::new();
+    let mut cursor = 0.0f64;
+    for (idx, (_, wav_path)) in found_files.into_iter().enumerate() {
+        let mut dur = 2.5f64;
+        if let Ok(reader) = WavReader::open(&wav_path) {
+            let spec = reader.spec();
+            if spec.sample_rate > 0 && spec.channels > 0 {
+                let d = (reader.duration() as f64) / (spec.sample_rate as f64);
+                if d.is_finite() && d > 0.05 {
+                    dur = d;
+                }
+            }
+        }
+        recovered.push(ExportSegmentData {
+            id: format!("recovered_{}", idx),
+            start_time: cursor,
+            duration: dur,
+            file_path: Some(wav_path.to_string_lossy().to_string().replace('\\', "/")),
+            gain: 1.0,
+            file_offset: 0.0,
+            file_duration: dur,
+            playback_rate: Some(1.0),
+        });
+        cursor += dur + 0.35;
+    }
+    recovered
 }
 
 #[tauri::command]
@@ -345,8 +899,9 @@ pub async fn export_audio(
         .map_err(|e| format!("Failed to parse project JSON: {}", e))?;
 
     let any_solo = project.tracks.iter().any(|t| t.is_solo.unwrap_or(false));
+    let project_path_hint = project.project_path.as_deref();
 
-    let mut all_segments = Vec::new();
+    let mut raw_segments = Vec::new();
     for track in &project.tracks {
         if any_solo {
             if !track.is_solo.unwrap_or(false) {
@@ -356,243 +911,284 @@ pub async fn export_audio(
             continue;
         }
 
+        let track_vol = track.volume.unwrap_or(1.0);
+        let safe_track_vol = if track_vol > 0.0 { track_vol } else { 1.0 };
+
         for segment in &track.segments {
-            if segment.file_path.is_some() && !segment.file_path.as_ref().unwrap().is_empty() {
-                all_segments.push(segment.clone());
+            if let Some(ref p) = segment.file_path {
+                if !p.is_empty() {
+                    let mut seg_clone = segment.clone();
+                    let seg_gain = if seg_clone.gain > 0.0 { seg_clone.gain } else { 1.0 };
+                    seg_clone.gain = seg_gain * safe_track_vol;
+                    raw_segments.push(seg_clone);
+                }
             }
+        }
+    }
+
+    // Resolve moved file paths across project folder, output folder, and sibling *_Project folders
+    let mut all_segments = Vec::new();
+    for mut seg in raw_segments {
+        if let Some(ref raw_path) = seg.file_path {
+            let resolved = crate::file_io::resolve_existing_media_path(
+                raw_path,
+                project_path_hint,
+                Some(&output_path),
+                &[],
+            );
+            if resolved.exists() {
+                seg.file_path = Some(resolved.to_string_lossy().to_string());
+                all_segments.push(seg);
+            } else {
+                println!(
+                    "[export_audio] Warning: Segment file not found even after path resolution, skipping: {}",
+                    raw_path
+                );
+            }
+        }
+    }
+
+    // If all segments were missing or empty (e.g., user moved folder and .dub lost track links),
+    // try recovering takes from takes/ folder automatically
+    if all_segments.is_empty() {
+        let recovered = discover_orphaned_takes(project_path_hint, Some(&output_path));
+        if !recovered.is_empty() {
+            println!(
+                "[export_audio] Auto-recovered {} takes from takes/ directory for export",
+                recovered.len()
+            );
+            all_segments = recovered;
         }
     }
 
     if all_segments.is_empty() {
-        return Err("No audio segments found to export. Please check if tracks are muted or empty.".to_string());
+        return Err(
+            "Не найдено аудиофайлов дублей для экспорта (возможно, папка проекта была перемещена без папки takes или все дорожки заглушены)."
+                .to_string(),
+        );
     }
 
+    let fmt_lower = format.to_lowercase();
+    let norm_enabled = normalize.unwrap_or(false);
+    let target_lufs_val = target_lufs.unwrap_or(-20.0).clamp(-70.0, -5.0);
+    let max_peak_val = max_peak.unwrap_or(-9.0);
+    let norm_mode = normalization_mode.clone().unwrap_or_else(|| "lufs".to_string());
+    let depth = bit_depth.clone().unwrap_or_else(|| "16".to_string());
+
+    let _ = app_handle.emit("export-progress", 15.0);
+
+    // Check if any segment is non-WAV (e.g. MP3/OGG imported onto track) and needs FFmpeg decoding to WAV first
     let temp_dir = env::temp_dir().join(format!("dubstudio_export_{}", std::process::id()));
-    if temp_dir.exists() {
-        let _ = fs::remove_dir_all(&temp_dir);
-    }
-    fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed creating temp dir: {}", e))?;
+    let mut created_temp_dir = false;
 
-    let total_tasks = all_segments.len() + 1;
-    let mut completed_tasks = 0;
-
-    let emit_progress = |completed: usize, total: usize, app: &AppHandle| {
-        let pct = (completed as f64 / total as f64) * 100.0;
-        let _ = app.emit("export-progress", pct);
-    };
-
-    emit_progress(0, total_tasks, &app_handle);
-
-    let max_concurrent = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let semaphore = Arc::new(Semaphore::new(max_concurrent));
-
-    let mut handles = Vec::new();
-
-    for (i, segment) in all_segments.into_iter().enumerate() {
-        let temp_dir_clone = temp_dir.clone();
-        let sem_clone = Arc::clone(&semaphore);
-        
-        let handle = tokio::spawn(async move {
-            let _permit = sem_clone.acquire().await.map_err(|e| e.to_string())?;
-
-            let out_file = temp_dir_clone.join(format!("seg_{}.wav", i));
-            let delay_ms = (segment.start_time * 1000.0) as i64;
-            let playback_rate = segment.playback_rate.unwrap_or(1.0);
-            
-            let mut filter = format!(
-                "atrim=start={}:duration={},asetpts=PTS-STARTPTS", 
-                segment.file_offset, segment.duration * playback_rate
-            );
-            
-            if (playback_rate - 1.0).abs() > 0.001 {
-                filter.push_str(&format!(",atempo={}", playback_rate));
+    for (idx, seg) in all_segments.iter_mut().enumerate() {
+        let Some(ref seg_path) = seg.file_path else { continue };
+        let is_readable_wav = WavReader::open(seg_path).is_ok();
+        if !is_readable_wav && crate::is_ffmpeg_available() {
+            if !created_temp_dir {
+                let _ = fs::create_dir_all(&temp_dir);
+                created_temp_dir = true;
             }
-            
-            filter.push_str(&format!(",volume={},adelay={}|{}", segment.gain, delay_ms, delay_ms));
-            
-            let seg_path = segment.file_path.clone().unwrap_or_default();
-            let out_file_str = out_file.to_string_lossy().to_string();
-
+            let decoded_wav = temp_dir.join(format!("decoded_{}.wav", idx));
+            let decoded_str = decoded_wav.to_string_lossy().to_string();
             let status = new_ffmpeg_command()
-                .arg("-nostdin")
-                .arg("-y")
-                .arg("-i").arg(&seg_path)
-                .arg("-af").arg(&filter)
-                .arg("-c:a").arg("pcm_s16le")
-                .arg(&out_file_str)
+                .args([
+                    "-nostdin",
+                    "-y",
+                    "-i",
+                    seg_path,
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "48000",
+                    "-c:a",
+                    "pcm_s16le",
+                    &decoded_str,
+                ])
                 .output()
-                .await
-                .map_err(|e| format!("Failed spawning ffmpeg: {}", e))?;
-
-            if !status.status.success() {
-                return Err(format!("FFmpeg error processing {}: {}", seg_path, String::from_utf8_lossy(&status.stderr)));
+                .await;
+            if let Ok(out) = status {
+                if out.status.success() && decoded_wav.exists() {
+                    seg.file_path = Some(decoded_str);
+                }
             }
-
-            Ok::<PathBuf, String>(out_file)
-        });
-        
-        handles.push(handle);
-    }
-
-    let mut processed_files = Vec::new();
-    for handle in handles {
-        let res = handle.await.map_err(|e| e.to_string())??;
-        processed_files.push(res);
-        completed_tasks += 1;
-        emit_progress(completed_tasks, total_tasks, &app_handle);
-    }
-
-    // Mix and encode robustly in batches if there are too many files (avoiding OS argument/path list length limits)
-    let mut current_files = processed_files.clone();
-    let mut pass = 0;
-    while current_files.len() > 30 {
-        let mut mixed_files = Vec::new();
-        let chunks: Vec<_> = current_files.chunks(30).collect();
-        for (chunk_idx, chunk) in chunks.into_iter().enumerate() {
-            let out_file = temp_dir.join(format!("mix_pass_{}_{}.wav", pass, chunk_idx));
-            let mut chunk_args = vec!["-nostdin".to_string(), "-y".to_string()];
-            for path in chunk {
-                chunk_args.push("-i".to_string());
-                chunk_args.push(path.to_string_lossy().to_string());
-            }
-            if chunk.len() > 1 {
-                let filter = format!("amix=inputs={}:duration=longest:dropout_transition=0:normalize=0", chunk.len());
-                chunk_args.push("-filter_complex".to_string());
-                chunk_args.push(filter);
-            }
-            chunk_args.push("-c:a".to_string());
-            chunk_args.push("pcm_s16le".to_string());
-            chunk_args.push(out_file.to_string_lossy().to_string());
-
-            let status = new_ffmpeg_command()
-                .args(&chunk_args)
-                .output()
-                .await
-                .map_err(|e| format!("FFmpeg mix pass failed to execute: {}", e))?;
-
-            if !status.status.success() {
-                return Err(format!("FFmpeg intermediate mix failed: {}", String::from_utf8_lossy(&status.stderr)));
-            }
-            mixed_files.push(out_file);
         }
-        current_files = mixed_files;
-        pass += 1;
     }
 
-    let combined_file = if current_files.len() > 1 {
-        let mix_out = temp_dir.join("combined_mix.wav");
-        let mut mix_args = vec!["-nostdin".to_string(), "-y".to_string()];
-        for path in &current_files {
-            mix_args.push("-i".to_string());
-            mix_args.push(path.to_string_lossy().to_string());
+    let _ = app_handle.emit("export-progress", 45.0);
+
+    // Mix all segments in memory at 48kHz with EBU R128 / Peak normalization
+    let mixed_samples = mix_segments_to_mono_48k_pure_rust(
+        &all_segments,
+        norm_enabled,
+        target_lufs_val,
+        max_peak_val,
+        &norm_mode,
+        None,
+        project_path_hint,
+        Some(&output_path),
+    );
+
+    let _ = app_handle.emit("export-progress", 75.0);
+
+    let out_path_ref = Path::new(&output_path);
+    if let Some(parent) = out_path_ref.parent() {
+        if !parent.exists() {
+            let _ = fs::create_dir_all(parent);
         }
-        let filter = format!("amix=inputs={}:duration=longest:dropout_transition=0:normalize=0", current_files.len());
-        mix_args.push("-filter_complex".to_string());
-        mix_args.push(filter);
-        mix_args.push("-c:a".to_string());
-        mix_args.push("pcm_s16le".to_string());
-        mix_args.push(mix_out.to_string_lossy().to_string());
-
-        let status = new_ffmpeg_command()
-            .args(&mix_args)
-            .output()
-            .await
-            .map_err(|e| format!("FFmpeg final mix failed to execute: {}", e))?;
-
-        if !status.status.success() {
-            return Err(format!("FFmpeg final mix failed: {}", String::from_utf8_lossy(&status.stderr)));
-        }
-        mix_out
-    } else if !current_files.is_empty() {
-        current_files[0].clone()
-    } else {
-        return Err("No audio files were generated to mix".to_string());
-    };
-
-    let mut audio_filters = Vec::new();
-
-    if force_mono.unwrap_or(false) {
-        audio_filters.push("pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1".to_string());
     }
 
-    if normalize.unwrap_or(false) {
-        let target_lufs_val = target_lufs.unwrap_or(-20.0).clamp(-70.0, -5.0);
-        let max_peak_val = max_peak.unwrap_or(-9.0);
-        let mode = normalization_mode.unwrap_or_else(|| "lufs".to_string());
-
-        if mode == "peak" {
-            // Measure actual peak of the combined audio
-            let (_mean_v, max_v) = get_volume_stats(&combined_file.to_string_lossy(), None, None).await;
-            if let Some(peak_val) = max_v {
-                if peak_val > -85.0 {
-                    let gain_db = max_peak_val - peak_val;
-                    if gain_db.abs() > 0.05 {
-                        audio_filters.push(format!("volume={:.2}dB", gain_db));
+    match fmt_lower.as_str() {
+        "wav" => {
+            // Write final WAV directly via hound (16, 24, or 32-bit float)
+            match depth.as_str() {
+                "32float" | "32" => {
+                    let spec = WavSpec {
+                        channels: 1,
+                        sample_rate: 48000,
+                        bits_per_sample: 32,
+                        sample_format: SampleFormat::Float,
+                    };
+                    let mut writer = WavWriter::create(out_path_ref, spec).map_err(|e| e.to_string())?;
+                    for s in &mixed_samples {
+                        writer.write_sample(s.clamp(-1.0, 1.0)).map_err(|e| e.to_string())?;
+                    }
+                    writer.finalize().map_err(|e| e.to_string())?;
+                }
+                "24" => {
+                    let spec = WavSpec {
+                        channels: 1,
+                        sample_rate: 48000,
+                        bits_per_sample: 24,
+                        sample_format: SampleFormat::Int,
+                    };
+                    let mut writer = WavWriter::create(out_path_ref, spec).map_err(|e| e.to_string())?;
+                    for s in &mixed_samples {
+                        let v = (s.clamp(-1.0, 1.0) * 8_388_607.0) as i32;
+                        writer.write_sample(v).map_err(|e| e.to_string())?;
+                    }
+                    writer.finalize().map_err(|e| e.to_string())?;
+                }
+                _ => {
+                    let spec = WavSpec {
+                        channels: 1,
+                        sample_rate: 48000,
+                        bits_per_sample: 16,
+                        sample_format: SampleFormat::Int,
+                    };
+                    let mut writer = WavWriter::create(out_path_ref, spec).map_err(|e| e.to_string())?;
+                    for s in &mixed_samples {
+                        let v = (s.clamp(-1.0, 1.0) * 32_767.0) as i16;
+                        writer.write_sample(v).map_err(|e| e.to_string())?;
+                    }
+                    writer.finalize().map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        "flac" => {
+            // Try FFmpeg FLAC compression first if available; otherwise (or on any FFmpeg error)
+            // automatically fall back to pure-Rust lossless FLAC encoding!
+            let mut encoded_via_ffmpeg = false;
+            if crate::is_ffmpeg_available() {
+                if !created_temp_dir {
+                    let _ = fs::create_dir_all(&temp_dir);
+                    created_temp_dir = true;
+                }
+                let combined_wav = temp_dir.join("combined_mix.wav");
+                let spec = WavSpec {
+                    channels: 1,
+                    sample_rate: 48000,
+                    bits_per_sample: 16,
+                    sample_format: SampleFormat::Int,
+                };
+                if let Ok(mut writer) = WavWriter::create(&combined_wav, spec) {
+                    for s in &mixed_samples {
+                        let v = (s.clamp(-1.0, 1.0) * 32_767.0) as i16;
+                        let _ = writer.write_sample(v);
+                    }
+                    if writer.finalize().is_ok() {
+                        let mut cmd = new_ffmpeg_command();
+                        cmd.arg("-nostdin")
+                            .arg("-y")
+                            .arg("-i")
+                            .arg(combined_wav.to_string_lossy().to_string());
+                        if force_mono.unwrap_or(false) {
+                            cmd.arg("-ac").arg("1");
+                        }
+                        cmd.arg("-c:a").arg("flac").arg(&output_path);
+                        if let Ok(out) = cmd.output().await {
+                            if out.status.success() && out_path_ref.exists() {
+                                encoded_via_ffmpeg = true;
+                            }
+                        }
                     }
                 }
             }
-        } else {
-            // Mode is "lufs" (default: target -20 LUFS, peak <= -9 dBTP)
-            if max_peak_val >= -9.0 {
-                let tp = max_peak_val.clamp(-9.0, 0.0);
-                audio_filters.push(format!("loudnorm=I={:.1}:TP={:.1}:LRA=11", target_lufs_val, tp));
-            } else {
-                let extra_attenuation = max_peak_val - (-9.0);
-                audio_filters.push(format!("loudnorm=I={:.1}:TP=-9.0:LRA=11,volume={:.1}dB", target_lufs_val, extra_attenuation));
+
+            if !encoded_via_ffmpeg {
+                println!("[export_audio] Encoding FLAC via built-in pure-Rust FLAC encoder: {}", output_path);
+                write_flac_mono_16bit_pure_rust(&mixed_samples, out_path_ref)?;
             }
         }
-    }
-
-    let mut final_args = vec![
-        "-y".to_string(),
-        "-i".to_string(),
-        combined_file.to_string_lossy().to_string(),
-    ];
-
-    if !audio_filters.is_empty() {
-        final_args.push("-af".to_string());
-        final_args.push(audio_filters.join(","));
-    }
-
-    // Format specific settings
-    match format.as_str() {
         "mp3" => {
-            final_args.push("-c:a".to_string());
-            final_args.push("libmp3lame".to_string());
-            final_args.push("-b:a".to_string());
-            final_args.push(bitrate.unwrap_or_else(|| "320k".to_string()));
-        },
-        "flac" => {
-            final_args.push("-c:a".to_string());
-            final_args.push("flac".to_string());
-        },
-        _ => { // default wav
-            let depth = bit_depth.unwrap_or_else(|| "16".to_string());
-            let pcm = match depth.as_str() {
-                "24" => "pcm_s24le",
-                "32" => "pcm_s32le",
-                _ => "pcm_s16le",
+            if !created_temp_dir {
+                let _ = fs::create_dir_all(&temp_dir);
+                created_temp_dir = true;
+            }
+            let combined_wav = temp_dir.join("combined_mix.wav");
+            let spec = WavSpec {
+                channels: 1,
+                sample_rate: 48000,
+                bits_per_sample: 16,
+                sample_format: SampleFormat::Int,
             };
-            final_args.push("-c:a".to_string());
-            final_args.push(pcm.to_string());
+            let mut writer = WavWriter::create(&combined_wav, spec).map_err(|e| e.to_string())?;
+            for s in &mixed_samples {
+                let v = (s.clamp(-1.0, 1.0) * 32_767.0) as i16;
+                writer.write_sample(v).map_err(|e| e.to_string())?;
+            }
+            writer.finalize().map_err(|e| e.to_string())?;
+
+            let mut cmd = new_ffmpeg_command();
+            cmd.arg("-nostdin")
+                .arg("-y")
+                .arg("-i")
+                .arg(combined_wav.to_string_lossy().to_string())
+                .arg("-c:a")
+                .arg("libmp3lame")
+                .arg("-b:a")
+                .arg(bitrate.unwrap_or_else(|| "320k".to_string()))
+                .arg(&output_path);
+
+            match cmd.output().await {
+                Ok(out) if out.status.success() => {}
+                Ok(out) => {
+                    let _ = fs::remove_dir_all(&temp_dir);
+                    return Err(format!(
+                        "FFmpeg MP3 encoding error: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    ));
+                }
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&temp_dir);
+                    return Err(format!(
+                        "Не удалось запустить FFmpeg для кодирования MP3 ({}). Пожалуйста, используйте формат WAV или FLAC (они работают автономно без FFmpeg).",
+                        e
+                    ));
+                }
+            }
+        }
+        _ => {
+            write_flac_mono_16bit_pure_rust(&mixed_samples, out_path_ref)?;
         }
     }
 
-    final_args.push(output_path.clone());
+    if created_temp_dir {
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 
-    crate::media_processor::run_ffmpeg_with_progress(
-        app_handle.clone(),
-        final_args,
-        "Final Audio Mix & Normalization".to_string(),
-        None,
-    ).await?;
-
-    completed_tasks += 1;
-    emit_progress(completed_tasks, total_tasks, &app_handle);
-
-    let _ = fs::remove_dir_all(&temp_dir);
+    let _ = app_handle.emit("export-progress", 100.0);
 
     Ok(())
 }
@@ -615,14 +1211,14 @@ pub async fn quick_preview_export(
 
     let file_path: Option<String> = row.get("file_path");
     let src_str = file_path.ok_or("Segment has no file path")?;
-    let src = Path::new(&src_str);
+    let src = crate::file_io::resolve_existing_media_path(&src_str, Some(&project_path), None, &[]);
     
     if !src.exists() {
         return Err(format!("Source file does not exist: {}", src_str));
     }
 
     let dest = Path::new(&project_path).join(format!("preview_{}.wav", segment_id));
-    fs::copy(src, &dest).map_err(|e| format!("Failed to copy segment: {}", e))?;
+    fs::copy(&src, &dest).map_err(|e| format!("Failed to copy segment: {}", e))?;
 
     Ok(dest.to_string_lossy().to_string())
 }
@@ -667,6 +1263,19 @@ pub async fn batch_export(
         return Ok(Vec::new());
     }
 
+    let resolved_dubs: Vec<BatchDubSegment> = dub_segments
+        .into_iter()
+        .filter_map(|mut d| {
+            let resolved = crate::file_io::resolve_existing_media_path(&d.file_path, None, Some(&out_dir), &[]);
+            if resolved.exists() {
+                d.file_path = resolved.to_string_lossy().to_string();
+                Some(d)
+            } else {
+                None
+            }
+        })
+        .collect();
+
     let mut exported_paths = Vec::new();
 
     // Spawn parallel processes using a bounded semaphore
@@ -680,7 +1289,7 @@ pub async fn batch_export(
     for orig_seg in orig_segments {
         let sem_clone = Arc::clone(&semaphore);
         let out_dir_clone = export_dir.to_path_buf();
-        let dubs_clone = dub_segments.clone();
+        let dubs_clone = resolved_dubs.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = sem_clone.acquire().await.map_err(|e| e.to_string())?;
@@ -767,10 +1376,39 @@ pub async fn batch_export(
             cmd.arg("-c:a").arg("pcm_s16le");
             cmd.arg(&out_file_str);
 
-            let output = cmd.output().await.map_err(|e| format!("FFmpeg execution failed: {}", e))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("FFmpeg error during {} render: {}", final_name, stderr));
+            match cmd.output().await {
+                Ok(output) if output.status.success() => {}
+                _ => {
+                    let mut fallback_segs = Vec::new();
+                    for dub in &overlaps {
+                        let overlap_start = t_start.max(dub.start_time);
+                        let overlap_end = t_end.min(dub.start_time + dub.duration);
+                        let overlap_dur = overlap_end - overlap_start;
+                        if overlap_dur <= 0.0 {
+                            continue;
+                        }
+                        let file_offset_delta = (overlap_start - dub.start_time) * dub.playback_rate;
+                        fallback_segs.push(ExportSegmentData {
+                            id: String::new(),
+                            start_time: (overlap_start - t_start).max(0.0),
+                            duration: overlap_dur,
+                            file_path: Some(dub.file_path.clone()),
+                            gain: dub.gain,
+                            file_offset: dub.file_offset + file_offset_delta,
+                            file_duration: overlap_dur,
+                            playback_rate: Some(dub.playback_rate),
+                        });
+                    }
+                    render_segments_to_wav_pure_rust(
+                        &fallback_segs,
+                        &out_file,
+                        "16",
+                        false,
+                        -20.0,
+                        -1.0,
+                        Some(orig_seg.duration),
+                    )?;
+                }
             }
 
             Ok::<String, String>(out_file_str)
@@ -833,15 +1471,83 @@ pub async fn export_audio_book(
     let gap = gap_duration.unwrap_or(1.5);
     let mut inputs = Vec::new();
 
-    // Prepare inputs
+    // Prepare inputs (resolving moved files automatically)
     for (_i, seg) in segments.iter().enumerate() {
-        if !seg.file_path.is_empty() && Path::new(&seg.file_path).exists() {
-            inputs.push(seg.file_path.clone());
+        if !seg.file_path.is_empty() {
+            let resolved = crate::file_io::resolve_existing_media_path(
+                &seg.file_path,
+                Some(&project_path),
+                Some(&output_path),
+                &[],
+            );
+            if resolved.exists() {
+                inputs.push((resolved.to_string_lossy().to_string(), seg.gain));
+            }
         }
     }
 
     if inputs.is_empty() {
         return Err("No segments to export".to_string());
+    }
+
+    let final_format = format.unwrap_or_else(|| "wav".to_string()).to_lowercase();
+    let mut final_output_path = output_path.clone();
+    
+    // If output_path is just a filename, put it in project_path
+    let p = Path::new(&output_path);
+    if p.parent() == Some(Path::new("")) {
+        final_output_path = Path::new(&project_path).join(output_path).to_string_lossy().to_string();
+    }
+
+    // Build sequential segments list for pure-Rust fallback or direct render
+    let mut sequential_segs = Vec::new();
+    let mut cursor = 0.0f64;
+    for (idx, (path, gain)) in inputs.iter().enumerate() {
+        let mut dur = 2.0f64;
+        if let Ok(reader) = WavReader::open(path) {
+            let sr = reader.spec().sample_rate.max(1) as f64;
+            dur = (reader.duration() as f64) / sr;
+        }
+        sequential_segs.push(ExportSegmentData {
+            id: format!("ab_{}", idx),
+            start_time: cursor,
+            duration: dur,
+            file_path: Some(path.clone()),
+            gain: if *gain > 0.0 { *gain } else { 1.0 },
+            file_offset: 0.0,
+            file_duration: dur,
+            playback_rate: Some(1.0),
+        });
+        cursor += dur + gap;
+    }
+
+    if !crate::is_ffmpeg_available() {
+        let samples = mix_segments_to_mono_48k_pure_rust(
+            &sequential_segs,
+            normalize_lufs.unwrap_or(false),
+            -16.0,
+            -1.5,
+            "lufs",
+            Some(cursor),
+            Some(&project_path),
+            Some(&final_output_path),
+        );
+        if final_format == "flac" {
+            write_flac_mono_16bit_pure_rust(&samples, Path::new(&final_output_path))?;
+        } else {
+            render_segments_to_wav_pure_rust(
+                &sequential_segs,
+                Path::new(&final_output_path),
+                "16",
+                normalize_lufs.unwrap_or(false),
+                -16.0,
+                -1.5,
+                Some(cursor),
+            )?;
+        }
+        let _ = fs::remove_dir_all(&temp_dir);
+        let _ = app_handle.emit("export-progress", 100.0);
+        return Ok(final_output_path);
     }
 
     let mut args = vec!["-y".to_string()];
@@ -850,15 +1556,11 @@ pub async fn export_audio_book(
     let mut filter_complex = String::new();
     let mut inputs_str = String::new();
     
-    for (i, path) in inputs.iter().enumerate() {
+    for (i, (path, _)) in inputs.iter().enumerate() {
         args.push("-i".to_string());
         args.push(path.clone());
-        // [i:a]
         let silence_label = format!("s{}", i);
-        
-        // Generate silence for the gap (except after the last one if preferred, but here we just follow gaps)
         filter_complex.push_str(&format!("anullsrc=r=48000:cl=mono:d={} [{}];", gap, silence_label));
-        
         inputs_str.push_str(&format!("[{}:a][{}]", i, silence_label));
     }
 
@@ -875,31 +1577,27 @@ pub async fn export_audio_book(
         args.push("loudnorm=I=-16:TP=-1.5:LRA=11".to_string());
     }
 
-    let _final_format = format.unwrap_or_else(|| "wav".to_string());
-    let mut final_output_path = output_path.clone();
-    
-    // If output_path is just a filename, put it in project_path
-    let p = Path::new(&output_path);
-    if p.parent() == Some(Path::new("")) {
-        final_output_path = Path::new(&project_path).join(output_path).to_string_lossy().to_string();
-    }
-
     args.push(final_output_path.clone());
 
-    // Calculate total duration for progress
-    let mut total_duration = 0.0;
-    for path in &inputs {
-        if let Ok(reader) = WavReader::open(path) {
-            total_duration += (reader.duration() as f64 / reader.spec().sample_rate as f64) + gap;
-        }
-    }
+    let total_duration = cursor.max(1.0);
 
-    crate::media_processor::run_ffmpeg_with_progress(
-        app_handle, 
+    if let Err(_e) = crate::media_processor::run_ffmpeg_with_progress(
+        app_handle.clone(), 
         args, 
         "Exporting Audio Book".to_string(), 
         Some(total_duration)
-    ).await?;
+    ).await {
+        render_segments_to_wav_pure_rust(
+            &sequential_segs,
+            Path::new(&final_output_path),
+            "16",
+            normalize_lufs.unwrap_or(false),
+            -16.0,
+            -1.5,
+            Some(cursor),
+        )?;
+        let _ = app_handle.emit("export-progress", 100.0);
+    }
 
     let _ = fs::remove_dir_all(&temp_dir);
 

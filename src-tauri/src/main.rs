@@ -15,7 +15,7 @@ use script_parser::parse_script_file;
 use export_engine::{export_audio, export_stems, export_all_stems, quick_preview_export, batch_export, export_audio_book, export_backstage_video, export_blooper, process_backstage_shorts, process_backstage_remove_silence, export_backstage_assemble};
 use db::{AppState, init_db, save_project_to_db, load_project_from_db, migrate_json_to_db, save_subtitles, generate_stress_test, load_segments_in_range, check_project_assets, verify_project_files, cleanup_orphaned_files, relink_segment_file, calculate_file_hash, find_file_by_hash};
 use waveform_engine::{extract_audio_peaks_bin, generate_waveform_peaks};
-use file_io::{read_text_file, read_binary_file, list_audio_files, write_audio_file, init_project_folder, move_project_folder, get_file_info, save_media_recorder_take, save_project_file, copy_file_to_project, delete_file, append_backstage_chunk, finalize_backstage_session, list_backstage_sessions};
+use file_io::{read_text_file, read_binary_file, list_audio_files, write_audio_file, init_project_folder, move_project_folder, get_file_info, save_media_recorder_take, save_project_file, relink_project_paths_on_disk, copy_file_to_project, delete_file, append_backstage_chunk, finalize_backstage_session, list_backstage_sessions};
 use media_processor::{create_proxy_video, mux_video, merge_segments, merge_project_segments, render_final_video, concat_backstage_videos, get_media_info, extract_mkv_assets, create_blank_video};
 
 use std::sync::Arc;
@@ -76,52 +76,117 @@ fn open_devtools(_window: tauri::WebviewWindow) {
     }
 }
 
-pub fn get_ffmpeg_path() -> String {
+const EMBEDDED_FFMPEG_ZIP: &[u8] = include_bytes!("../bin/embedded_ffmpeg.zip");
+static EXTRACT_EMBEDDED_ONCE: std::sync::Once = std::sync::Once::new();
+
+fn get_portable_bin_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            return std::path::PathBuf::from(local_app_data)
+                .join("com.dubstudio.pro")
+                .join("bin");
+        }
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            return std::path::PathBuf::from(app_data)
+                .join("com.dubstudio.pro")
+                .join("bin");
+        }
+    }
+    std::env::temp_dir().join("com.dubstudio.pro").join("bin")
+}
+
+fn ensure_embedded_binaries_extracted() -> Option<std::path::PathBuf> {
+    let target_dir = get_portable_bin_dir();
+    if EMBEDDED_FFMPEG_ZIP.is_empty() {
+        return if target_dir.exists() { Some(target_dir) } else { None };
+    }
+
+    EXTRACT_EMBEDDED_ONCE.call_once(|| {
+        let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+        let ffmpeg_target = target_dir.join(format!("ffmpeg{}", ext));
+        let ffprobe_target = target_dir.join(format!("ffprobe{}", ext));
+
+        if ffmpeg_target.exists() && ffprobe_target.exists() {
+            return;
+        }
+
+        if std::fs::create_dir_all(&target_dir).is_err() {
+            return;
+        }
+
+        let cursor = std::io::Cursor::new(EMBEDDED_FFMPEG_ZIP);
+        if let Ok(mut archive) = zip::ZipArchive::new(cursor) {
+            for i in 0..archive.len() {
+                if let Ok(mut file) = archive.by_index(i) {
+                    if let Some(enclosed_name) = file.enclosed_name().and_then(|p| p.file_name().map(|f| f.to_os_string())) {
+                        let out_path = target_dir.join(enclosed_name);
+                        if !out_path.exists() {
+                            if let Ok(mut out_file) = std::fs::File::create(&out_path) {
+                                let _ = std::io::copy(&mut file, &mut out_file);
+                            }
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    if target_dir.exists() {
+        Some(target_dir)
+    } else {
+        None
+    }
+}
+
+fn resolve_binary_path(bin_base: &str) -> String {
+    let (target_triple, ext) = if cfg!(target_os = "windows") {
+        ("x86_64-pc-windows-msvc", ".exe")
+    } else if cfg!(target_arch = "aarch64") {
+        ("aarch64-apple-darwin", "")
+    } else {
+        ("x86_64-apple-darwin", "")
+    };
+
+    let candidates = [
+        format!("{}-{}{}", bin_base, target_triple, ext),
+        format!("{}{}", bin_base, ext),
+        format!("{}-aarch64-apple-darwin", bin_base),
+        format!("{}-x86_64-apple-darwin", bin_base),
+        format!("{}-x86_64-unknown-linux-gnu", bin_base),
+        bin_base.to_string(),
+    ];
+
+    // 1. Check relative to current_exe()
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
-            let (target_triple, ext) = if cfg!(target_os = "windows") {
-                ("x86_64-pc-windows-msvc", ".exe")
-            } else if cfg!(target_arch = "aarch64") {
-                ("aarch64-apple-darwin", "")
-            } else {
-                ("x86_64-apple-darwin", "")
-            };
-            
-            // Check candidate filenames in various locations
-            let candidates = [
-                format!("ffmpeg-{}{}", target_triple, ext),
-                format!("ffmpeg{}", ext),
-                "ffmpeg-aarch64-apple-darwin".to_string(),
-                "ffmpeg-x86_64-apple-darwin".to_string(),
-                "ffmpeg".to_string(),
-            ];
-
             for name in &candidates {
-                let p = parent.join(name);
-                if p.exists() {
-                    return p.to_string_lossy().to_string();
+                for candidate_path in [
+                    parent.join(name),
+                    parent.join("bin").join(name),
+                    parent.join("resources").join("bin").join(name),
+                    parent.join("resources").join(name),
+                    parent.join("ffmpeg-static").join(name),
+                ] {
+                    if candidate_path.exists() {
+                        return candidate_path.to_string_lossy().to_string();
+                    }
                 }
 
-                let p_bin = parent.join("bin").join(name);
-                if p_bin.exists() {
-                    return p_bin.to_string_lossy().to_string();
-                }
-
-                let p_res_bin = parent.join("resources").join("bin").join(name);
-                if p_res_bin.exists() {
-                    return p_res_bin.to_string_lossy().to_string();
-                }
-
-                let p_res = parent.join("resources").join(name);
-                if p_res.exists() {
-                    return p_res.to_string_lossy().to_string();
-                }
-
-                // Check parent/ancestor bin folders (e.g. target/debug/../../bin)
                 if let Some(p1) = parent.parent() {
-                    let p1_bin = p1.join("bin").join(name);
-                    if p1_bin.exists() {
-                        return p1_bin.to_string_lossy().to_string();
+                    for candidate_path in [
+                        p1.join("bin").join(name),
+                        p1.join("resources").join("bin").join(name),
+                        p1.join("ffmpeg-static").join(name),
+                    ] {
+                        if candidate_path.exists() {
+                            return candidate_path.to_string_lossy().to_string();
+                        }
                     }
                     if let Some(p2) = p1.parent() {
                         let p2_bin = p2.join("bin").join(name);
@@ -132,7 +197,6 @@ pub fn get_ffmpeg_path() -> String {
                 }
             }
 
-            // On macOS, check ../Resources in .app bundle
             #[cfg(not(target_os = "windows"))]
             if let Some(macos_parent) = parent.parent() {
                 for name in &candidates {
@@ -140,7 +204,6 @@ pub fn get_ffmpeg_path() -> String {
                     if macos_bin.exists() {
                         return macos_bin.to_string_lossy().to_string();
                     }
-
                     let macos_res = macos_parent.join("Resources").join(name);
                     if macos_res.exists() {
                         return macos_res.to_string_lossy().to_string();
@@ -150,100 +213,87 @@ pub fn get_ffmpeg_path() -> String {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        for path in &["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"] {
-            if std::path::Path::new(path).exists() {
-                return path.to_string();
+    // 2. Check portable self-extracted bin directory
+    if let Some(portable_dir) = ensure_embedded_binaries_extracted() {
+        for name in &candidates {
+            let p = portable_dir.join(name);
+            if p.exists() {
+                return p.to_string_lossy().to_string();
             }
         }
     }
 
-    "ffmpeg".to_string()
+    // 3. Check standard Windows installation & package manager directories
+    #[cfg(target_os = "windows")]
+    {
+        let mut win_dirs = Vec::new();
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            let lad = std::path::PathBuf::from(&local_app_data);
+            win_dirs.push(lad.join("com.dubstudio.pro").join("bin"));
+            win_dirs.push(lad.join("DubStudio Pro").join("bin"));
+            win_dirs.push(lad.join("DubStudio Pro"));
+            win_dirs.push(lad.join("Programs").join("DubStudio Pro").join("bin"));
+            win_dirs.push(lad.join("Programs").join("DubStudio Pro").join("resources").join("bin"));
+            win_dirs.push(lad.join("Programs").join("DubStudio Pro"));
+            win_dirs.push(lad.join("Microsoft").join("WinGet").join("Links"));
+        }
+        if let Ok(program_files) = std::env::var("ProgramFiles") {
+            let pf = std::path::PathBuf::from(&program_files);
+            win_dirs.push(pf.join("DubStudio Pro").join("bin"));
+            win_dirs.push(pf.join("DubStudio Pro").join("resources").join("bin"));
+            win_dirs.push(pf.join("DubStudio Pro"));
+        }
+        if let Ok(user_profile) = std::env::var("USERPROFILE") {
+            win_dirs.push(std::path::PathBuf::from(user_profile).join("scoop").join("shims"));
+        }
+        win_dirs.push(std::path::PathBuf::from(r"C:\ProgramData\chocolatey\bin"));
+        win_dirs.push(std::path::PathBuf::from(r"C:\ffmpeg\bin"));
+
+        for dir in win_dirs {
+            for name in &candidates {
+                let p = dir.join(name);
+                if p.exists() {
+                    return p.to_string_lossy().to_string();
+                }
+            }
+        }
+    }
+
+    // 4. Check standard macOS / Linux paths
+    #[cfg(not(target_os = "windows"))]
+    {
+        for dir in &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+            let p = std::path::Path::new(dir).join(bin_base);
+            if p.exists() {
+                return p.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    bin_base.to_string()
+}
+
+pub fn get_ffmpeg_path() -> String {
+    resolve_binary_path("ffmpeg")
 }
 
 pub fn get_ffprobe_path() -> String {
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(parent) = exe_path.parent() {
-            let (target_triple, ext) = if cfg!(target_os = "windows") {
-                ("x86_64-pc-windows-msvc", ".exe")
-            } else if cfg!(target_arch = "aarch64") {
-                ("aarch64-apple-darwin", "")
-            } else {
-                ("x86_64-apple-darwin", "")
-            };
-            
-            let candidates = [
-                format!("ffprobe-{}{}", target_triple, ext),
-                format!("ffprobe{}", ext),
-                "ffprobe-aarch64-apple-darwin".to_string(),
-                "ffprobe-x86_64-apple-darwin".to_string(),
-                "ffprobe".to_string(),
-            ];
+    resolve_binary_path("ffprobe")
+}
 
-            for name in &candidates {
-                let p = parent.join(name);
-                if p.exists() {
-                    return p.to_string_lossy().to_string();
-                }
-
-                let p_bin = parent.join("bin").join(name);
-                if p_bin.exists() {
-                    return p_bin.to_string_lossy().to_string();
-                }
-
-                let p_res_bin = parent.join("resources").join("bin").join(name);
-                if p_res_bin.exists() {
-                    return p_res_bin.to_string_lossy().to_string();
-                }
-
-                let p_res = parent.join("resources").join(name);
-                if p_res.exists() {
-                    return p_res.to_string_lossy().to_string();
-                }
-
-                if let Some(p1) = parent.parent() {
-                    let p1_bin = p1.join("bin").join(name);
-                    if p1_bin.exists() {
-                        return p1_bin.to_string_lossy().to_string();
-                    }
-                    if let Some(p2) = p1.parent() {
-                        let p2_bin = p2.join("bin").join(name);
-                        if p2_bin.exists() {
-                            return p2_bin.to_string_lossy().to_string();
-                        }
-                    }
-                }
-            }
-
-            // On macOS, check ../Resources in .app bundle
-            #[cfg(not(target_os = "windows"))]
-            if let Some(macos_parent) = parent.parent() {
-                for name in &candidates {
-                    let macos_bin = macos_parent.join("Resources").join("bin").join(name);
-                    if macos_bin.exists() {
-                        return macos_bin.to_string_lossy().to_string();
-                    }
-
-                    let macos_res = macos_parent.join("Resources").join(name);
-                    if macos_res.exists() {
-                        return macos_res.to_string_lossy().to_string();
-                    }
-                }
-            }
-        }
+pub fn is_ffmpeg_available() -> bool {
+    let path = get_ffmpeg_path();
+    if std::path::Path::new(&path).is_absolute() && std::path::Path::new(&path).exists() {
+        return true;
     }
-
-    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new(&path);
+    cmd.arg("-version");
+    #[cfg(target_os = "windows")]
     {
-        for path in &["/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe", "/usr/bin/ffprobe"] {
-            if std::path::Path::new(path).exists() {
-                return path.to_string();
-            }
-        }
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
-
-    "ffprobe".to_string()
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn main() {
@@ -395,6 +445,7 @@ fn main() {
             finalize_backstage_session,
             list_backstage_sessions,
             save_project_file,
+            relink_project_paths_on_disk,
             copy_file_to_project,
             delete_file,
             save_subtitles,

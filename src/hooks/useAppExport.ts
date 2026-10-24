@@ -1,3 +1,4 @@
+import React from 'react';
 import { Project, AudioSegment } from '../types';
 import { logger } from '../lib/logger';
 import { getFriendlyExportErrorMessage, getTrackLinearVolume, getSegmentLinearGain, safeConfirm } from '../lib/utils';
@@ -10,7 +11,8 @@ export function useAppExport(
   setExportOperation: (v: string) => void,
   setIsExportModalOpen: (v: boolean) => void,
   isRecording: boolean,
-  selectedSegmentIds: string[]
+  selectedSegmentIds: string[],
+  setProject?: React.Dispatch<React.SetStateAction<Project | null>>
 ) {
   const handleBatchExport = async () => {
     if (!project || !project.projectPath || !window.electronAPI) {
@@ -233,6 +235,7 @@ export function useAppExport(
       logger.info(`Starting stem export to ${outDir}`);
       const resultRes = await window.electronAPI.exportStems({
         projectData: {
+          projectPath: project.projectPath,
           tracks: project.tracks.map(t => ({
             name: t.name,
             isMuted: t.isMuted,
@@ -361,27 +364,55 @@ export function useAppExport(
     } = options;
     const safeFormat = format || 'WAV';
 
-    const exportTracks = project.tracks.filter(t => {
-      if (t.name === 'Оригинал') return includeOriginalAudio;
-      return !t.isMuted; // Only include unmuted tracks by default for export if requested
-    }).map(track => ({
-      id: track.id,
-      volume: getTrackLinearVolume(track.volume),
-      isMuted: track.isMuted,
-      isSolo: track.isSolo,
-      segments: track.segments.map(seg => ({
-        id: seg.id || `seg-${Date.now()}-${Math.random()}`,
-        filePath: seg.filePath || '',
-        startTime: seg.startTime,
-        duration: seg.duration,
-        fileOffset: seg.fileOffset || 0,
-        fileDuration: seg.fileDuration || seg.duration,
-        gain: getSegmentLinearGain(seg.gain),
-        playbackRate: seg.playbackRate,
-      })).filter(s => s.filePath !== '')
-    }));
+    let activeProject = project;
+    const buildExportTracks = (proj: Project) =>
+      proj.tracks.filter(t => {
+        if (t.name === 'Оригинал') return includeOriginalAudio;
+        return !t.isMuted; // Only include unmuted tracks by default for export if requested
+      }).map(track => ({
+        id: track.id,
+        volume: getTrackLinearVolume(track.volume),
+        isMuted: track.isMuted,
+        isSolo: track.isSolo,
+        segments: track.segments.map(seg => ({
+          id: seg.id || `seg-${Date.now()}-${Math.random()}`,
+          filePath: seg.filePath || '',
+          startTime: seg.startTime,
+          duration: seg.duration,
+          fileOffset: seg.fileOffset || 0,
+          fileDuration: seg.fileDuration || seg.duration,
+          gain: getSegmentLinearGain(seg.gain),
+          playbackRate: seg.playbackRate,
+        })).filter(s => s.filePath !== '')
+      }));
 
-    const hasSegments = exportTracks.some(t => t.segments.length > 0);
+    let exportTracks = buildExportTracks(activeProject);
+    let hasSegments = exportTracks.some(t => t.segments.length > 0);
+
+    // If the project appears to have no segments (e.g., user moved folder and re-imported video),
+    // try recovering takes from disk (<projectPath>/takes or .dub.bak) automatically!
+    if (!hasSegments && activeProject.projectPath && (window.electronAPI as any)?.relinkProjectPathsOnDisk) {
+      try {
+        const relinkRes = await (window.electronAPI as any).relinkProjectPathsOnDisk(
+          activeProject.projectPath,
+          activeProject
+        );
+        if (relinkRes?.success && relinkRes.data) {
+          activeProject = {
+            ...activeProject,
+            ...relinkRes.data,
+            audioSettings: activeProject.audioSettings
+          };
+          exportTracks = buildExportTracks(activeProject);
+          hasSegments = exportTracks.some(t => t.segments.length > 0);
+          if (hasSegments && setProject) {
+            setProject(activeProject);
+          }
+        }
+      } catch (e) {
+        logger.warn("Auto-recovery of takes before export failed:", e);
+      }
+    }
 
     if (!hasSegments) {
       alert("Нет сегментов (или все дорожки заглушены) для экспорта.");
@@ -389,33 +420,33 @@ export function useAppExport(
     }
     
     let videoName = '';
-    if (project.videoPath) {
-      const base = project.videoPath.split(/[/\\]/).pop() || '';
+    if (activeProject.videoPath) {
+      const base = activeProject.videoPath.split(/[/\\]/).pop() || '';
       const extIdx = base.lastIndexOf('.');
       videoName = extIdx !== -1 ? base.substring(0, extIdx) : base;
-    } else if (project.videoUrl) {
-      const base = project.videoUrl.split('/').pop()?.split('?')[0] || '';
+    } else if (activeProject.videoUrl) {
+      const base = activeProject.videoUrl.split('/').pop()?.split('?')[0] || '';
       const extIdx = base.lastIndexOf('.');
       videoName = extIdx !== -1 ? base.substring(0, extIdx) : base;
     }
     if (!videoName) {
-      videoName = project.name || 'project';
+      videoName = activeProject.name || 'project';
     }
 
     let exportFileName = '';
     if (customFileName && customFileName.trim()) {
       exportFileName = customFileName.trim();
     } else {
-      const activeRoles = project.selectedRoles && project.selectedRoles.length > 0
-        ? project.selectedRoles
-        : (project.selectedRole ? [project.selectedRole] : []);
-      const hasLoadedFixes = !!(project.fixes && project.fixes.length > 0);
-      const dubberNick = project.dubberNick || localStorage.getItem('dubstudio_dubber_nick') || '';
+      const activeRoles = activeProject.selectedRoles && activeProject.selectedRoles.length > 0
+        ? activeProject.selectedRoles
+        : (activeProject.selectedRole ? [activeProject.selectedRole] : []);
+      const hasLoadedFixes = !!(activeProject.fixes && activeProject.fixes.length > 0);
+      const dubberNick = activeProject.dubberNick || localStorage.getItem('dubstudio_dubber_nick') || '';
 
       exportFileName = buildCleanExportFilename({
         dubberNick,
         activeRoles,
-        projectName: project.name,
+        projectName: activeProject.name,
         videoName,
         prefix: hasLoadedFixes ? 'fix' : '',
         extension: safeFormat.toLowerCase()
@@ -453,20 +484,21 @@ export function useAppExport(
         logger.info(`Starting audio export to ${outputPath} in format ${safeFormat}`);
         const resultRes = await window.electronAPI.exportAudio({ 
           projectJson: JSON.stringify({
+            projectPath: activeProject.projectPath || '',
             tracks: exportTracks.map(t => ({
-              name: project.tracks.find(pt => pt.id === t.id)?.name || 'Track',
+              name: activeProject.tracks.find(pt => pt.id === t.id)?.name || 'Track',
               isMuted: t.isMuted,
               isSolo: t.isSolo,
               volume: t.volume, // Pass track volume!
               segments: t.segments
             })),
-            audioOffsetMs: project.audioOffsetMs || 0
+            audioOffsetMs: activeProject.audioOffsetMs || 0
           }),
           outputPath,
           format: safeFormat.toLowerCase() as any,
-          bitDepth: project.audioSettings?.bitDepth?.toString() || '16',
-          ...(project.audioSettings?.exportSettings && {
-            bitrate: `${project.audioSettings.exportSettings.mp3Bitrate}k`
+          bitDepth: activeProject.audioSettings?.bitDepth?.toString() || '16',
+          ...(activeProject.audioSettings?.exportSettings && {
+            bitrate: `${activeProject.audioSettings.exportSettings.mp3Bitrate}k`
           }),
           forceMono,
           normalize: normalizeAudio ?? false,

@@ -129,8 +129,43 @@ export const useProjectImport = (
         finalVideoPath = copyRes.success && copyRes.data ? copyRes.data : originalVideoPath;
       }
 
-      let initialSubtitles: SubtitleLine[] = project?.subtitles || [];
-      let initialRoles: string[] = project?.roles || [];
+      // Check if finalProjectRoot already contains an existing .dub project or takes on disk
+      let baseProjectFromDisk: Project | null = null;
+      const hasActiveDubSegments = project?.tracks?.some(
+        t => t.name !== 'Оригинал' && t.name !== 'Original' && (t.segments?.length || 0) > 0
+      );
+      if (finalProjectRoot && !hasActiveDubSegments) {
+        try {
+          const existingRes = await window.electronAPI.loadProjectJson(finalProjectRoot);
+          if (existingRes.success && existingRes.data) {
+            baseProjectFromDisk = existingRes.data;
+          } else if ((window.electronAPI as any).relinkProjectPathsOnDisk) {
+            const defaultCandidate = createDefaultProject(videoName.replace(/\.[^/.]+$/, ""), finalProjectRoot);
+            const relinkRes = await (window.electronAPI as any).relinkProjectPathsOnDisk(finalProjectRoot, defaultCandidate);
+            if (relinkRes?.success && relinkRes.data) {
+              const recoveredHasSegs = relinkRes.data.tracks?.some(
+                (t: any) => t.name !== 'Оригинал' && t.name !== 'Original' && (t.segments?.length || 0) > 0
+              );
+              if (recoveredHasSegs) {
+                baseProjectFromDisk = relinkRes.data;
+              }
+            }
+          }
+        } catch (e) {
+          logger.warn("Could not check existing project in folder:", e);
+        }
+      }
+
+      const currentProject = baseProjectFromDisk || project || createDefaultProject(videoName.replace(/\.[^/.]+$/, ""), finalProjectRoot);
+
+      let initialSubtitles: SubtitleLine[] =
+        (project?.subtitles && project.subtitles.length > 0)
+          ? project.subtitles
+          : (currentProject.subtitles || []);
+      let initialRoles: string[] =
+        (project?.roles && project.roles.length > 0)
+          ? project.roles
+          : (currentProject.roles || []);
       
       if (subImportedPath) {
          try {
@@ -147,8 +182,6 @@ export const useProjectImport = (
            logger.error("Failed to load extracted subtitles", err);
          }
       }
-
-      const currentProject = project || createDefaultProject(videoName.replace(/\.[^/.]+$/, ""), finalProjectRoot);
       
       let updatedTracks = [...currentProject.tracks];
       if (!updatedTracks.find(t => t.name === 'Оригинал')) {

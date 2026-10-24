@@ -5,8 +5,13 @@ import { safeConfirm, getGlobalAudioSettings, getSafeFileUrl } from '../lib/util
 
 const sanitizeProjectData = (p: Project): Project => {
   if (!p || !p.tracks) return p;
+  let cleanVideoUrl = p.videoUrl;
+  if (p.videoPath && !p.videoPath.startsWith('blob:') && !p.videoPath.startsWith('http')) {
+    cleanVideoUrl = getSafeFileUrl(p.videoPath) || cleanVideoUrl;
+  }
   return {
     ...p,
+    videoUrl: cleanVideoUrl,
     tracks: (p.tracks || []).map(track => {
       let cleanVolume = track.volume;
       if (cleanVolume === undefined) {
@@ -175,16 +180,14 @@ export const useProject = () => {
         const filePath = fileRes.data.path;
         logger.info(`Selected project file: ${filePath}`);
         let projectData: any = null;
-        if (fileRes.data.content) {
+        // Always prefer loadProjectJson first so moved folder paths are relocalized & takes are relinked on disk
+        const projectDataRes = await window.electronAPI.loadProjectJson(filePath);
+        if (projectDataRes.success && projectDataRes.data) {
+          projectData = projectDataRes.data;
+        } else if (fileRes.data.content) {
           try {
             projectData = JSON.parse(fileRes.data.content);
           } catch (_) {}
-        }
-        if (!projectData) {
-          const projectDataRes = await window.electronAPI.loadProjectJson(filePath);
-          if (projectDataRes.success && projectDataRes.data) {
-            projectData = projectDataRes.data;
-          }
         }
         if (projectData) {
           logger.info(`Project data loaded successfully, sanitizing...`);

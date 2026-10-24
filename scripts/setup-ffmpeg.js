@@ -50,4 +50,29 @@ if (osName === 'win32') {
 copyToDestinations(ffmpegStaticPath, ffmpegNames);
 copyToDestinations(ffprobeStatic && ffprobeStatic.path, ffprobeNames);
 
+// Create embedded_ffmpeg.zip for single-file portable builds when DUBSTUDIO_EMBED_FFMPEG=1
+const embeddedZipPath = path.join(binDir, 'embedded_ffmpeg.zip');
+if (process.env.DUBSTUDIO_EMBED_FFMPEG === '1') {
+    try {
+        const AdmZip = require('adm-zip');
+        const zip = new AdmZip();
+        const exeSuffix = osName === 'win32' ? '.exe' : '';
+        const ffmpegBin = path.join(binDir, `ffmpeg${exeSuffix}`);
+        const ffprobeBin = path.join(binDir, `ffprobe${exeSuffix}`);
+        if (fs.existsSync(ffmpegBin)) {
+            zip.addLocalFile(ffmpegBin);
+        }
+        if (fs.existsSync(ffprobeBin)) {
+            zip.addLocalFile(ffprobeBin);
+        }
+        zip.writeZip(embeddedZipPath);
+        console.log(`Created portable embedded archive: ${embeddedZipPath}`);
+    } catch (e) {
+        console.warn('Could not create embedded_ffmpeg.zip, writing empty placeholder:', e.message);
+        fs.writeFileSync(embeddedZipPath, Buffer.alloc(0));
+    }
+} else if (!fs.existsSync(embeddedZipPath)) {
+    fs.writeFileSync(embeddedZipPath, Buffer.alloc(0));
+}
+
 console.log('Successfully set up FFmpeg sidecars for Tauri.');

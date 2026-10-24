@@ -6,6 +6,7 @@ import { listen, emit, UnlistenFn } from '@tauri-apps/api/event';
 import { safeConfirm } from './utils';
 import { UniversalParserService } from '../services/UniversalParserService';
 import { SubtitleLine, TimelineBlock, ExportSettings } from '../types';
+import { relocalizeMovedProjectPaths } from './projectRelocation';
 
 /**
  * Standard interface for IPC communication responses
@@ -361,23 +362,33 @@ export const tauriAPI = {
         let actualPath = filePath;
         // If user provided a folder path instead of .dub file, try to resolve to .dub
         if (!actualPath.endsWith('.dub')) {
-            const folderName = actualPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || 'project';
-            const candidate1 = `${actualPath}/${folderName}.dub`.replace(/\\/g, '/');
-            try {
-              const testContent = await invoke<string>('read_text_file', { path: candidate1 });
-              if (testContent) {
-                actualPath = candidate1;
-              }
-            } catch (_) {
-              actualPath = `${actualPath}/project.dub`.replace(/\\/g, '/');
+            const cleanFolder = actualPath.replace(/\\/g, '/').replace(/\/+$/, '');
+            const folderName = cleanFolder.split('/').filter(Boolean).pop() || 'project';
+            const strippedName = folderName.replace(/_Project$/i, '');
+            const candidates = [
+              `${cleanFolder}/${strippedName}.dub`,
+              `${cleanFolder}/${folderName}.dub`,
+              `${cleanFolder}/project.dub`
+            ];
+            for (const cand of candidates) {
+              try {
+                const testContent = await invoke<string>('read_text_file', { path: cand });
+                if (testContent) {
+                  actualPath = cand;
+                  break;
+                }
+              } catch (_) {}
             }
         }
 
         const content = await invoke<string>('read_text_file', { path: actualPath });
         let projectData = JSON.parse(content);
         
-        // Update projectPath to the context of the .dub file
-        const projectPath = actualPath.replace(/\\/g, '/').substring(0, actualPath.replace(/\\/g, '/').lastIndexOf('/'));
+        const normActual = actualPath.replace(/\\/g, '/');
+        const projectPath = normActual.substring(0, normActual.lastIndexOf('/'));
+
+        // Re-localize any moved paths BEFORE overwriting projectData.projectPath
+        projectData = relocalizeMovedProjectPaths(projectData, projectPath);
         projectData.projectPath = projectPath;
         
         if (!projectData.tracks) projectData.tracks = [];
@@ -387,6 +398,19 @@ export const tauriAPI = {
         // Auto-resolve studio workspace path references to the local structure
         projectData = resolveStudioWorkspacePaths(projectData, actualPath);
 
+        // Relink paths on disk and recover takes from .dub.bak or takes/ if .dub lost its segments
+        try {
+          const relinkedJson = await invoke<string>('relink_project_paths_on_disk', {
+            projectPath,
+            projectJson: JSON.stringify(projectData)
+          });
+          if (relinkedJson) {
+            projectData = JSON.parse(relinkedJson);
+          }
+        } catch (relinkErr) {
+          console.warn('[Bridge] relink_project_paths_on_disk warning:', relinkErr);
+        }
+
         return {
            success: true,
            data: projectData
@@ -394,6 +418,25 @@ export const tauriAPI = {
     } catch(err) {
         console.warn("Project file load failed:", err);
         return { success: false, error: String(err) };
+    }
+  },
+
+  relinkProjectPathsOnDisk: async (projectPath: string, projectData: any): Promise<BridgeResponse<any>> => {
+    const relocalized = relocalizeMovedProjectPaths(projectData, projectPath);
+    if (!IS_TAURI) {
+      return { success: true, data: relocalized };
+    }
+    try {
+      const relinkedJson = await invoke<string>('relink_project_paths_on_disk', {
+        projectPath,
+        projectJson: JSON.stringify(relocalized)
+      });
+      return {
+        success: true,
+        data: relinkedJson ? JSON.parse(relinkedJson) : relocalized
+      };
+    } catch (err) {
+      return { success: true, data: relocalized, error: String(err) };
     }
   },
 
@@ -951,15 +994,17 @@ export const tauriAPI = {
             data: Array.from(args.audioData) 
         });
         
-        // Generate peaks (non-fatal if JS already computed peaks)
+        // Generate peaks for WAV audio takes (non-fatal if JS already computed peaks)
         let peaksRaw: number[] = [];
-        try {
-            peaksRaw = await invoke<number[]>('generate_waveform_peaks', { 
-                filePath: filePath, 
-                points: 1024 
-            });
-        } catch (peakErr) {
-            console.warn('[Bridge] generate_waveform_peaks failed after saving take, using client peaks:', peakErr);
+        if (!args.role.includes('backstage') && filePath.toLowerCase().endsWith('.wav')) {
+            try {
+                peaksRaw = await invoke<number[]>('generate_waveform_peaks', { 
+                    filePath: filePath, 
+                    points: 1024 
+                });
+            } catch (peakErr) {
+                console.warn('[Bridge] generate_waveform_peaks failed after saving take, using client peaks:', peakErr);
+            }
         }
 
         return { 

@@ -5,13 +5,10 @@ use rayon::prelude::*;
 use std::path::Path;
 
 use crate::logger::log_debug;
-use tauri_plugin_shell::ShellExt;
+use crate::export_engine::{new_ffmpeg_command, new_ffprobe_command};
 
-async fn get_video_duration(app_handle: &AppHandle, file_path: &str) -> Result<f64, String> {
-    let ffprobe_cmd = app_handle.shell().sidecar("ffprobe")
-        .map_err(|e| format!("Failed to find ffprobe sidecar: {}", e))?;
-
-    let output = ffprobe_cmd
+async fn get_video_duration(_app_handle: &AppHandle, file_path: &str) -> Result<f64, String> {
+    let output = new_ffprobe_command()
         .args(&[
             "-v", "error",
             "-show_entries", "format=duration",
@@ -23,23 +20,6 @@ async fn get_video_duration(app_handle: &AppHandle, file_path: &str) -> Result<f
         .map_err(|e| format!("ffprobe failed: {}", e))?;
 
     if !output.status.success() {
-        // Fallback to system ffprobe
-        let fallback = tokio::process::Command::new(crate::get_ffprobe_path())
-            .args(&[
-                "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                file_path,
-            ])
-            .output()
-            .await;
-            
-        if let Ok(fo) = fallback {
-            if fo.status.success() {
-                let duration_str = String::from_utf8_lossy(&fo.stdout).trim().to_string();
-                return duration_str.parse::<f64>().map_err(|_| format!("Failed to parse duration: {}", duration_str));
-            }
-        }
         return Err(format!("ffprobe error: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
@@ -49,6 +29,8 @@ async fn get_video_duration(app_handle: &AppHandle, file_path: &str) -> Result<f
 
 #[tauri::command]
 pub async fn extract_audio_peaks_bin(app_handle: AppHandle, file_path: String, output_dir: String) -> Result<Vec<u8>, String> {
+    let resolved = crate::file_io::resolve_existing_media_path(&file_path, None, Some(&output_dir), &[]);
+    let file_path = if resolved.exists() { resolved.to_string_lossy().to_string() } else { file_path };
     log_debug(&format!("extract_audio_peaks_bin called for: {}, output_dir: {}", file_path, output_dir));
     
     let output_wav_path = if output_dir.is_empty() {
@@ -60,6 +42,37 @@ pub async fn extract_audio_peaks_bin(app_handle: AppHandle, file_path: String, o
     
     let output_wav_str = output_wav_path.to_str().ok_or("Invalid output path")?;
     let output_wav_str_owned = output_wav_str.to_string();
+
+    // Fast path: if input is already a WAV file, copy or read directly without FFmpeg!
+    let is_input_wav = Path::new(&file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase() == "wav")
+        .unwrap_or(false);
+
+    if is_input_wav && Path::new(&file_path).exists() {
+        if Path::new(&file_path) != output_wav_path {
+            let _ = std::fs::copy(&file_path, &output_wav_path);
+        }
+        let wav_to_read = if output_wav_path.exists() {
+            output_wav_str_owned.clone()
+        } else {
+            file_path.clone()
+        };
+        let peaks_result = tokio::task::spawn_blocking(move || {
+            let reader = WavReader::open(&wav_to_read)
+                .map_err(|e| format!("Failed to open wav: {}", e))?;
+            let spec = reader.spec();
+            let audio_duration = reader.duration() as f64 / f64::from(spec.sample_rate.max(1));
+            let points = ((audio_duration * 50.0) as usize).max(100);
+            generate_waveform_peaks_internal(&wav_to_read, points)
+        }).await.map_err(|e| e.to_string())??;
+
+        let peaks_u8: Vec<u8> = peaks_result.into_iter()
+            .map(|p| (p.abs().sqrt().min(1.0) * 255.0) as u8)
+            .collect();
+        return Ok(peaks_u8);
+    }
 
     // 0. Get original video duration for verification
     let video_duration = match get_video_duration(&app_handle, &file_path).await {
@@ -73,18 +86,12 @@ pub async fn extract_audio_peaks_bin(app_handle: AppHandle, file_path: String, o
     // 1. Spawning FFmpeg with synchronization filters
     let sync_filters = "aresample=async=1:min_hard_comp=0.100000:first_pts=0";
 
-    let ffmpeg_cmd = app_handle.shell().sidecar("ffmpeg")
-        .map_err(|e| {
-            let err_msg = format!("Failed to find ffmpeg sidecar: {}", e);
-            log_debug(&err_msg);
-            err_msg
-        })?;
-
-    let output = ffmpeg_cmd
+    let output = new_ffmpeg_command()
         .args(&[
+            "-nostdin",
             "-y",
             "-v", "quiet",
-            "-copyts", 
+            "-copyts",
             "-i", &file_path,
             "-vn",
             "-af", sync_filters,
@@ -101,36 +108,9 @@ pub async fn extract_audio_peaks_bin(app_handle: AppHandle, file_path: String, o
         })?;
 
     if !output.status.success() {
-        let err_msg = String::from_utf8_lossy(&output.stderr);
-        log_debug(&format!("FFmpeg error during extraction: {}", err_msg));
-        // Fallback to system ffmpeg
-        let fallback_output = tokio::process::Command::new(crate::get_ffmpeg_path())
-            .args(&[
-                "-nostdin",
-                "-y",
-                "-v", "quiet",
-                "-copyts",
-                "-i", &file_path,
-                "-vn",
-                "-af", sync_filters,
-                "-ac", "1",
-                "-ar", "48000",
-                &output_wav_str_owned,
-            ])
-            .output()
-            .await;
-            
-        if let Ok(fo) = fallback_output {
-            if !fo.status.success() {
-                let msg = format!("FFmpeg failed (both sidecar and system): {}", String::from_utf8_lossy(&fo.stderr));
-                log_debug(&msg);
-                return Err(msg);
-            }
-        } else {
-             let msg = format!("FFmpeg sidecar failed and system ffmpeg not found: {}", err_msg);
-             log_debug(&msg);
-             return Err(msg);
-        }
+        let msg = format!("FFmpeg failed: {}", String::from_utf8_lossy(&output.stderr));
+        log_debug(&msg);
+        return Err(msg);
     }
 
     // 2. Read the WAV file and generate peaks
@@ -250,7 +230,9 @@ pub fn generate_waveform_peaks_internal(file_path: &str, points: usize) -> Resul
 }
 
 #[tauri::command]
-pub async fn generate_waveform_peaks(app_handle: AppHandle, file_path: String, points: usize) -> Result<Vec<f32>, String> {
+pub async fn generate_waveform_peaks(_app_handle: AppHandle, file_path: String, points: usize) -> Result<Vec<f32>, String> {
+    let resolved = crate::file_io::resolve_existing_media_path(&file_path, None, None, &[]);
+    let file_path = if resolved.exists() { resolved.to_string_lossy().to_string() } else { file_path };
     log_debug(&format!("generate_waveform_peaks called for: {}, points: {}", file_path, points));
     
     let is_wav = Path::new(&file_path)
@@ -273,28 +255,16 @@ pub async fn generate_waveform_peaks(app_handle: AppHandle, file_path: String, p
         log_debug(&format!("Converting to temp wav for peaks: {}", temp_wav_str));
         
         let mut success = false;
-        if let Ok(cmd) = app_handle.shell().sidecar("ffmpeg") {
-            if let Ok(out) = cmd.args(&["-y", "-v", "quiet", "-i", &file_path, "-vn", "-ac", "1", "-ar", "48000", &temp_wav_str]).output().await {
-                if out.status.success() {
-                    success = true;
-                } else {
-                    log_debug(&format!("FFmpeg sidecar error: {}", String::from_utf8_lossy(&out.stderr)));
-                }
+        let fallback = new_ffmpeg_command()
+            .args(&["-nostdin", "-y", "-v", "quiet", "-i", &file_path, "-vn", "-ac", "1", "-ar", "48000", &temp_wav_str])
+            .output().await;
+            
+        if let Ok(fo) = fallback {
+            if fo.status.success() {
+                success = true;
+            } else {
+                log_debug(&format!("FFmpeg error: {}", String::from_utf8_lossy(&fo.stderr)));
             }
-        }
-        
-        if !success {
-           let fallback = tokio::process::Command::new(crate::get_ffmpeg_path())
-               .args(&["-nostdin", "-y", "-v", "quiet", "-i", &file_path, "-vn", "-ac", "1", "-ar", "48000", &temp_wav_str])
-               .output().await;
-               
-           if let Ok(fo) = fallback {
-               if fo.status.success() {
-                   success = true;
-               } else {
-                   log_debug(&format!("FFmpeg system error: {}", String::from_utf8_lossy(&fo.stderr)));
-               }
-           }
         }
         
         if !success {

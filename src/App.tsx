@@ -1099,8 +1099,34 @@ export default function App() {
               finalPath = copyRes.success && copyRes.data ? copyRes.data : path;
             }
 
+            let existingDiskProject: Project | null = null;
+            if (projectRoot) {
+              try {
+                const loadRes = await window.electronAPI.loadProjectJson(projectRoot);
+                if (loadRes.success && loadRes.data) {
+                  existingDiskProject = loadRes.data;
+                } else if ((window.electronAPI as any).relinkProjectPathsOnDisk) {
+                  const candidate = createDefaultProject(fileName.replace(/\.[^/.]+$/, ""), projectRoot);
+                  const relinkRes = await (window.electronAPI as any).relinkProjectPathsOnDisk(projectRoot, candidate);
+                  if (relinkRes?.success && relinkRes.data) {
+                    const hasRecoveredSegs = relinkRes.data.tracks?.some(
+                      (t: any) => t.name !== 'Оригинал' && t.name !== 'Original' && (t.segments?.length || 0) > 0
+                    );
+                    if (hasRecoveredSegs) {
+                      existingDiskProject = relinkRes.data;
+                    }
+                  }
+                }
+              } catch (e) {
+                logger.warn("Could not check existing project on native drop:", e);
+              }
+            }
+
             setProject(prev => {
-              const baseProject = prev || createDefaultProject(fileName.replace(/\.[^/.]+$/, ""), projectRoot);
+              const prevHasDubSegs = prev?.tracks?.some(
+                t => t.name !== 'Оригинал' && t.name !== 'Original' && (t.segments?.length || 0) > 0
+              );
+              const baseProject = (prevHasDubSegs ? prev : (existingDiskProject || prev)) || createDefaultProject(fileName.replace(/\.[^/.]+$/, ""), projectRoot);
               return { ...baseProject, videoUrl: getSafeFileUrl(finalPath), videoPath: finalPath, projectPath: projectRoot };
             });
 
@@ -1392,6 +1418,26 @@ export default function App() {
               const assetsDir = `${projectRoot}/assets`.replace(/\\/g, '/');
               const copyRes = await window.electronAPI.copyFileToProject(filePath, assetsDir);
               const finalPath = copyRes.success && copyRes.data ? copyRes.data : filePath;
+
+              // Check if projectRoot already had a .dub or takes on disk
+              try {
+                const loadRes = await window.electronAPI.loadProjectJson(projectRoot);
+                if (loadRes.success && loadRes.data) {
+                  setProject(p => {
+                    const pHasDubSegs = p?.tracks?.some(
+                      t => t.name !== 'Оригинал' && t.name !== 'Original' && (t.segments?.length || 0) > 0
+                    );
+                    if (pHasDubSegs) return p;
+                    return {
+                      ...loadRes.data,
+                      videoPath: finalPath,
+                      videoUrl: getSafeFileUrl(finalPath),
+                      projectPath: projectRoot,
+                      audioSettings: p?.audioSettings || getGlobalAudioSettings()
+                    };
+                  });
+                }
+              } catch (_) {}
 
               const takesDir = `${projectRoot}/takes`.replace(/\\/g, '/');
               window.electronAPI.extractAudioPeaks(finalPath, takesDir).then(res => {
@@ -2637,7 +2683,7 @@ export default function App() {
     handleMergeBackstage,
     handleSaveBlooper,
     handleQuickPreview
-  } = useAppExport(project, setIsExporting, setExportProgress, setExportOperation, setIsExportModalOpen, isRecording, selectedSegmentIds);
+  } = useAppExport(project, setIsExporting, setExportProgress, setExportOperation, setIsExportModalOpen, isRecording, selectedSegmentIds, setProject);
 
   const handleImportAudioTrack = async () => {
     logger.info("handleImportAudioTrack: Start");

@@ -1,8 +1,187 @@
 use std::fs;
 // sync
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use serde::Serialize;
 use hound;
+
+/// Resolves a media file path that may have been moved with its project folder
+/// (e.g., when a user moves or renames `<Project>_Project` on disk).
+pub fn resolve_existing_media_path(
+    raw_path: &str,
+    project_path_hint: Option<&str>,
+    output_path_hint: Option<&str>,
+    extra_dirs: &[PathBuf],
+) -> PathBuf {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return PathBuf::new();
+    }
+
+    let direct = PathBuf::from(trimmed);
+    if direct.exists() {
+        return direct;
+    }
+
+    let normalized = trimmed.replace('\\', "/");
+    let norm_path = PathBuf::from(&normalized);
+    if norm_path.exists() {
+        return norm_path;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let win_str = trimmed.replace('/', "\\");
+        let win_path = PathBuf::from(&win_str);
+        if win_path.exists() {
+            return win_path;
+        }
+    }
+
+    let parts: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+    let Some(&file_name) = parts.last() else {
+        return direct;
+    };
+
+    // Identify known project subfolder ("takes", "assets", "proxies", ".dubstudio") and old project folder name
+    let mut known_subdir: Option<&str> = None;
+    let mut old_project_dir_name: Option<&str> = None;
+    for (idx, part) in parts.iter().enumerate() {
+        let lower = part.to_lowercase();
+        if matches!(lower.as_str(), "takes" | "assets" | "proxies" | ".dubstudio") {
+            known_subdir = Some(*part);
+            if idx > 0 {
+                old_project_dir_name = Some(parts[idx - 1]);
+            }
+            break;
+        }
+        if lower.ends_with("_project") {
+            old_project_dir_name = Some(*part);
+        }
+    }
+
+    let mut search_roots: Vec<PathBuf> = Vec::new();
+    let mut push_unique = |p: PathBuf| {
+        if !p.as_os_str().is_empty() && !search_roots.contains(&p) {
+            search_roots.push(p);
+        }
+    };
+
+    if let Some(proj) = project_path_hint {
+        let p = PathBuf::from(proj.trim());
+        push_unique(p.clone());
+        if let Some(parent) = p.parent() {
+            push_unique(parent.to_path_buf());
+        }
+    }
+
+    for d in extra_dirs {
+        push_unique(d.clone());
+        if let Some(parent) = d.parent() {
+            push_unique(parent.to_path_buf());
+        }
+    }
+
+    if let Some(out) = output_path_hint {
+        let out_p = PathBuf::from(out.trim());
+        let mut curr = if out_p.is_dir() { Some(out_p.as_path()) } else { out_p.parent() };
+        for _ in 0..4 {
+            if let Some(c) = curr {
+                push_unique(c.to_path_buf());
+                curr = c.parent();
+            } else {
+                break;
+            }
+        }
+    }
+
+    let subdirs = ["takes", "assets", "proxies", ".dubstudio"];
+
+    // 1. Direct candidate checks inside each root
+    for root in &search_roots {
+        if !root.exists() {
+            continue;
+        }
+
+        if let Some(sub) = known_subdir {
+            let cand = root.join(sub).join(file_name);
+            if cand.exists() {
+                return cand;
+            }
+        }
+
+        let direct_in_root = root.join(file_name);
+        if direct_in_root.exists() {
+            return direct_in_root;
+        }
+
+        for sub in &subdirs {
+            let cand = root.join(sub).join(file_name);
+            if cand.exists() {
+                return cand;
+            }
+        }
+
+        if let Some(proj_name) = old_project_dir_name {
+            let proj_cand = root.join(proj_name);
+            if proj_cand.exists() {
+                if let Some(sub) = known_subdir {
+                    let cand = proj_cand.join(sub).join(file_name);
+                    if cand.exists() {
+                        return cand;
+                    }
+                }
+                for sub in &subdirs {
+                    let cand = proj_cand.join(sub).join(file_name);
+                    if cand.exists() {
+                        return cand;
+                    }
+                }
+                let cand = proj_cand.join(file_name);
+                if cand.exists() {
+                    return cand;
+                }
+            }
+        }
+    }
+
+    // 2. Shallow scan (up to 2 levels) under search_roots for moved `*_Project` or `takes/` directories
+    for root in &search_roots {
+        let Ok(entries) = fs::read_dir(root) else { continue };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if !child.is_dir() {
+                continue;
+            }
+            for sub in &subdirs {
+                let cand = child.join(sub).join(file_name);
+                if cand.exists() {
+                    return cand;
+                }
+            }
+            let cand_direct = child.join(file_name);
+            if cand_direct.exists() {
+                return cand_direct;
+            }
+            // Level 2 (e.g., C:\киберпанк2\1\<Project>_Project\takes\<file>)
+            if let Ok(sub_entries) = fs::read_dir(&child) {
+                for sub_entry in sub_entries.flatten() {
+                    let grandchild = sub_entry.path();
+                    if !grandchild.is_dir() {
+                        continue;
+                    }
+                    for sub in &subdirs {
+                        let cand = grandchild.join(sub).join(file_name);
+                        if cand.exists() {
+                            return cand;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    direct
+}
 
 #[derive(Serialize)]
 pub struct AudioFileEntry {
@@ -21,7 +200,8 @@ pub struct FileInfo {
 
 #[tauri::command]
 pub fn get_file_info(path: String) -> Result<FileInfo, String> {
-    let p = Path::new(&path);
+    let resolved_buf = resolve_existing_media_path(&path, None, None, &[]);
+    let p = if resolved_buf.exists() { resolved_buf.as_path() } else { Path::new(&path) };
     let metadata = fs::metadata(p).map_err(|e| e.to_string())?;
     
     let resolved_path = if let Ok(canonical) = fs::canonicalize(p) {
@@ -31,7 +211,7 @@ pub fn get_file_info(path: String) -> Result<FileInfo, String> {
         }
         s.replace('\\', "/")
     } else {
-        path.clone().replace('\\', "/")
+        p.to_string_lossy().replace('\\', "/")
     };
 
     let mut duration = None;
@@ -184,17 +364,16 @@ pub async fn finalize_backstage_session(project_path: String, session_id: String
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
     
-    let output = cmd.output().map_err(|e| format!("FFmpeg failed: {}", e))?;
-    
-    if !output.status.success() {
-        let err_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("FFmpeg error: {}", err_msg));
+    match cmd.output() {
+        Ok(output) if output.status.success() && mp4_path.exists() => {
+            let _ = fs::remove_file(&webm_path);
+            Ok(mp4_str)
+        }
+        _ => {
+            // If FFmpeg is unavailable in portable mode or transcode fails, keep the native .webm file
+            Ok(webm_str)
+        }
     }
-    
-    // Optionally remove the webm file to save space
-    let _ = fs::remove_file(&webm_path);
-    
-    Ok(mp4_str)
 }
 
 #[tauri::command]
@@ -239,9 +418,7 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
 
     let temp_path_str = temp_path.to_string_lossy().to_string();
 
-    // Use FFmpeg to convert
-    // If backstage, convert to MP4 with consistent specs for later concatenation
-    // If not backstage (audio), convert to WAV
+    // Use FFmpeg to convert if available
     let mut command = std::process::Command::new(crate::get_ffmpeg_path());
     command.arg("-nostdin").arg("-y").arg("-i").arg(&temp_path_str);
     
@@ -270,16 +447,24 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
 
-    let status = command.output().map_err(|e| format!("FFmpeg execution error: {}", e))?;
-
-    // Clean up temporary webm file
-    let _ = fs::remove_file(&temp_path);
-
-    if !status.status.success() {
-        return Err(format!("FFmpeg failed: {}", String::from_utf8_lossy(&status.stderr)));
+    match command.output() {
+        Ok(status) if status.status.success() && target_path.exists() => {
+            let _ = fs::remove_file(&temp_path);
+            Ok(target_path_str)
+        }
+        _ => {
+            // Portable fallback if FFmpeg is missing ("program not found") or fails:
+            // Preserve the recorded file as .webm so the user never loses a take
+            let fallback_name = format!("take_{}_{}.webm", safe_role, epoch_ms);
+            let fallback_path = takes_dir.join(&fallback_name);
+            let fallback_str = fallback_path.to_string_lossy().to_string();
+            if fs::rename(&temp_path, &fallback_path).is_ok() {
+                Ok(fallback_str)
+            } else {
+                Ok(temp_path_str)
+            }
+        }
     }
-
-    Ok(target_path_str)
 }
 
 #[tauri::command]
@@ -353,7 +538,263 @@ pub fn save_project_file(path: String, data: String) -> Result<(), String> {
             fs::create_dir_all(parent).map_err(|e| format!("Failed to create directories for project file: {}", e))?;
         }
     }
+    // Protect against accidental overwrite of a project that had recorded takes with an empty project
+    if p.exists() {
+        if let Ok(existing_content) = fs::read_to_string(p) {
+            let old_has_takes = existing_content.contains("take_");
+            let new_has_takes = data.contains("take_");
+            if old_has_takes && !new_has_takes {
+                let bak_path = PathBuf::from(format!("{}.bak", path));
+                let _ = fs::write(&bak_path, &existing_content);
+            }
+        }
+    }
     fs::write(p, data).map_err(|e| format!("Failed to save project file: {}", e))
+}
+
+#[tauri::command]
+pub fn relink_project_paths_on_disk(project_path: String, project_json: String) -> Result<String, String> {
+    let proj_dir = PathBuf::from(project_path.trim());
+    let proj_dir_norm = project_path.trim().replace('\\', "/");
+
+    let mut root: serde_json::Value = serde_json::from_str(&project_json)
+        .map_err(|e| format!("Invalid project JSON: {}", e))?;
+
+    if !proj_dir_norm.is_empty() {
+        root["projectPath"] = serde_json::Value::String(proj_dir_norm.clone());
+    }
+
+    // 1. Relink top-level media paths (videoPath, referenceAudioPath, documentPath)
+    for key in ["videoPath", "referenceAudioPath", "documentPath"] {
+        if let Some(val_str) = root.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()) {
+            if !val_str.is_empty() && !val_str.starts_with("blob:") && !val_str.starts_with("http") {
+                let resolved = resolve_existing_media_path(&val_str, Some(&proj_dir_norm), None, &[]);
+                if resolved.exists() {
+                    root[key] = serde_json::Value::String(resolved.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+
+    // 2. Count existing dub segments on non-original tracks
+    let count_dub_segments = |val: &serde_json::Value| -> usize {
+        let mut count = 0usize;
+        if let Some(tracks) = val.get("tracks").and_then(|t| t.as_array()) {
+            for t in tracks {
+                let t_name = t.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let t_id = t.get("id").and_then(|n| n.as_str()).unwrap_or("");
+                if t_name == "Оригинал" || t_name == "Original" || t_id == "originals-track" {
+                    continue;
+                }
+                if let Some(segs) = t.get("segments").and_then(|s| s.as_array()) {
+                    count += segs.len();
+                }
+            }
+        }
+        count
+    };
+
+    let mut dub_seg_count = count_dub_segments(&root);
+
+    // 3. If project has 0 dub segments, check if a `.dub.bak` backup in `project_path` has segments
+    if dub_seg_count == 0 && proj_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&proj_dir) {
+            for entry in entries.flatten() {
+                let ep = entry.path();
+                let fname = ep.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if fname.ends_with(".dub.bak") {
+                    if let Ok(bak_str) = fs::read_to_string(&ep) {
+                        if let Ok(bak_val) = serde_json::from_str::<serde_json::Value>(&bak_str) {
+                            if count_dub_segments(&bak_val) > 0 {
+                                if let Some(bak_tracks) = bak_val.get("tracks").cloned() {
+                                    root["tracks"] = bak_tracks;
+                                    dub_seg_count = count_dub_segments(&root);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Relink all existing segments in tracks to current `project_path`
+    if let Some(tracks) = root.get_mut("tracks").and_then(|t| t.as_array_mut()) {
+        for track in tracks.iter_mut() {
+            if let Some(segments) = track.get_mut("segments").and_then(|s| s.as_array_mut()) {
+                for seg in segments.iter_mut() {
+                    for path_key in ["filePath", "backstageVideoPath"] {
+                        if let Some(fp) = seg.get(path_key).and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                            if !fp.is_empty() && !fp.starts_with("blob:") && !fp.starts_with("http") {
+                                let resolved = resolve_existing_media_path(&fp, Some(&proj_dir_norm), None, &[]);
+                                if resolved.exists() {
+                                    let clean_p = resolved.to_string_lossy().replace('\\', "/");
+                                    seg[path_key] = serde_json::Value::String(clean_p);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. If dub_seg_count is STILL 0, check if `<project_path>/takes/` has recorded `take_*.wav` files
+    // and automatically recover them onto the Dubs track so the user never loses their takes!
+    if dub_seg_count == 0 && proj_dir.exists() {
+        let takes_dir = proj_dir.join("takes");
+        if takes_dir.exists() {
+            struct OrphanTake {
+                file_path: String,
+                role: String,
+                epoch_ms: u128,
+                duration: f64,
+            }
+            let mut found_takes: Vec<OrphanTake> = Vec::new();
+            if let Ok(entries) = fs::read_dir(&takes_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if !p.is_file() {
+                        continue;
+                    }
+                    let fname = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    let lower = fname.to_lowercase();
+                    if !lower.starts_with("take_") || (!lower.ends_with(".wav") && !lower.ends_with(".webm")) {
+                        continue;
+                    }
+                    if lower.contains("backstage") {
+                        continue;
+                    }
+                    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    let without_prefix = stem.strip_prefix("take_").unwrap_or(stem);
+                    let (role_part, epoch_val) = if let Some(last_underscore) = without_prefix.rfind('_') {
+                        let r = &without_prefix[..last_underscore];
+                        let e_str = &without_prefix[last_underscore + 1..];
+                        let e = e_str.parse::<u128>().unwrap_or(0);
+                        (r.to_string(), e)
+                    } else {
+                        ("Default".to_string(), 0)
+                    };
+
+                    let duration = if lower.ends_with(".wav") {
+                        match hound::WavReader::open(&p) {
+                            Ok(reader) => {
+                                let spec = reader.spec();
+                                (reader.duration() as f64 / spec.sample_rate.max(1) as f64).max(0.2)
+                            }
+                            Err(_) => 2.5,
+                        }
+                    } else {
+                        2.5
+                    };
+
+                    found_takes.push(OrphanTake {
+                        file_path: p.to_string_lossy().replace('\\', "/"),
+                        role: role_part,
+                        epoch_ms: epoch_val,
+                        duration,
+                    });
+                }
+            }
+
+            if !found_takes.is_empty() {
+                found_takes.sort_by_key(|t| t.epoch_ms);
+
+                // Collect subtitle lines to align recovered takes if possible
+                #[derive(Clone)]
+                struct SubInfo {
+                    start: f64,
+                    role: String,
+                    used: bool,
+                }
+                let mut subs: Vec<SubInfo> = Vec::new();
+                if let Some(sub_arr) = root.get("subtitles").and_then(|s| s.as_array()) {
+                    for s in sub_arr {
+                        let start = s.get("start").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let role = s.get("role").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        subs.push(SubInfo { start, role, used: false });
+                    }
+                }
+
+                let mut recovered_segments: Vec<serde_json::Value> = Vec::new();
+                let mut fallback_cursor = 0.0f64;
+
+                for (idx, take) in found_takes.iter().enumerate() {
+                    let take_role_norm = take.role.to_lowercase();
+                    // Try matching unused subtitle with same role
+                    let mut matched_start: Option<f64> = None;
+                    for sub in subs.iter_mut() {
+                        if !sub.used {
+                            let sub_role_norm: String = sub.role
+                                .chars()
+                                .map(|c| if "<>:\"/\\|?*".contains(c) || c.is_control() { '_' } else { c })
+                                .collect::<String>()
+                                .to_lowercase();
+                            if !take_role_norm.is_empty()
+                                && take_role_norm != "unknown"
+                                && take_role_norm != "default"
+                                && sub_role_norm == take_role_norm
+                            {
+                                sub.used = true;
+                                matched_start = Some(sub.start);
+                                break;
+                            }
+                        }
+                    }
+                    // If no role-specific subtitle matched, try next unused subtitle if any
+                    if matched_start.is_none() && !subs.is_empty() {
+                        if let Some(sub) = subs.iter_mut().find(|s| !s.used && s.start >= fallback_cursor) {
+                            sub.used = true;
+                            matched_start = Some(sub.start);
+                        }
+                    }
+
+                    let start_time = matched_start.unwrap_or(fallback_cursor);
+                    fallback_cursor = (start_time + take.duration + 0.3).max(fallback_cursor + take.duration);
+
+                    recovered_segments.push(serde_json::json!({
+                        "id": format!("recovered-{}-{}", take.epoch_ms, idx),
+                        "startTime": start_time,
+                        "duration": take.duration,
+                        "fileOffset": 0.0,
+                        "fileDuration": take.duration,
+                        "filePath": take.file_path,
+                        "blobUrl": "",
+                        "gain": 1.0,
+                        "playbackRate": 1.0
+                    }));
+                }
+
+                if !recovered_segments.is_empty() {
+                    let mut placed = false;
+                    if let Some(tracks) = root.get_mut("tracks").and_then(|t| t.as_array_mut()) {
+                        for track in tracks.iter_mut() {
+                            let t_name = track.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            let t_id = track.get("id").and_then(|n| n.as_str()).unwrap_or("");
+                            if t_name != "Оригинал" && t_name != "Original" && t_id != "originals-track" {
+                                track["segments"] = serde_json::Value::Array(recovered_segments.clone());
+                                placed = true;
+                                break;
+                            }
+                        }
+                        if !placed {
+                            tracks.push(serde_json::json!({
+                                "id": "track-recovered-dubs",
+                                "name": "Dubs 1",
+                                "volume": 1.0,
+                                "isMuted": false,
+                                "isArmed": true,
+                                "segments": recovered_segments
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    serde_json::to_string(&root).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

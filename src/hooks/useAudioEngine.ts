@@ -3,7 +3,7 @@ import { Project, AudioSegment } from '../types';
 import { logger } from '../lib/logger';
 import { getSafeFileUrl, getGlobalAudioSettings, getFriendlyAudioErrorMessage } from '../lib/utils';
 import { punchInSegment } from '../lib/timelineUtils';
-import { encodeAudioBlobToWavAndPeaks, PendingTakeData } from '../lib/projectRelocation';
+import { encodeAudioBlobToWavAndPeaks, encodeFloat32SamplesToWavAndPeaks, PendingTakeData } from '../lib/projectRelocation';
 
 export const useAudioEngine = (
   project: Project | null,
@@ -418,8 +418,29 @@ export const useAudioEngine = (
       gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.05); // Initial silence
       gainNode.gain.linearRampToValueAtTime(1, audioCtx.currentTime + 0.3); // Smooth ramp
       
-      source.connect(gainNode);
       gainNode.connect(destination);
+
+      // Direct PCM capture so we can always encode RIFF WAVE in pure JS without relying on FFmpeg or WebM decoding
+      const pcmChunks: Float32Array[] = [];
+      const captureSampleRate = audioCtx.sampleRate || 48000;
+      let scriptProcessor: ScriptProcessorNode | null = null;
+      let silentSink: GainNode | null = null;
+      try {
+        scriptProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+        silentSink = audioCtx.createGain();
+        silentSink.gain.value = 0;
+        scriptProcessor.onaudioprocess = (e) => {
+          if (!isDiscardingRef.current) {
+            const inputData = e.inputBuffer.getChannelData(0);
+            pcmChunks.push(new Float32Array(inputData));
+          }
+        };
+        gainNode.connect(scriptProcessor);
+        scriptProcessor.connect(silentSink);
+        silentSink.connect(audioCtx.destination);
+      } catch (spErr) {
+        logger.warn("Direct PCM ScriptProcessor setup fallback:", spErr);
+      }
       
       const processedAudioTrack = destination.stream.getAudioTracks()[0];
       const recordedStream = new MediaStream([processedAudioTrack]);
@@ -452,6 +473,15 @@ export const useAudioEngine = (
 
       mediaRecorder.onstop = async () => {
         logger.info("Recording stopped, processing audio...");
+        try {
+          if (scriptProcessor) {
+            scriptProcessor.onaudioprocess = null;
+            scriptProcessor.disconnect();
+          }
+          if (silentSink) {
+            silentSink.disconnect();
+          }
+        } catch {}
         // Close audio context to free resources
         audioCtx.close().catch(e => logger.error("Error closing audio context", e));
 
@@ -463,23 +493,28 @@ export const useAudioEngine = (
           return;
         }
 
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
-        const tempAudio = document.createElement('audio');
-        const tempUrl = URL.createObjectURL(audioBlob);
-        tempAudio.src = tempUrl;
-        
-        await new Promise((resolve) => {
-          tempAudio.onloadedmetadata = () => resolve(true);
-          setTimeout(() => resolve(false), 1000);
-        });
+        const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
 
-        const { wavBytes, peaks: jsPeaks, duration: decodedDuration } = await encodeAudioBlobToWavAndPeaks(audioBlob, 1024);
+        let wavBytes: Uint8Array;
+        let jsPeaks: number[];
+        let decodedDuration: number;
 
-        const recordedDuration = tempAudio.duration && isFinite(tempAudio.duration) 
-          ? tempAudio.duration 
-          : (decodedDuration || (audioBlob.size / 48000 / 2));
+        const totalPcmSamples = pcmChunks.reduce((acc, c) => acc + c.length, 0);
+        if (totalPcmSamples > 0) {
+          const encoded = encodeFloat32SamplesToWavAndPeaks(pcmChunks, captureSampleRate, 1024);
+          wavBytes = encoded.wavBytes;
+          jsPeaks = encoded.peaks;
+          decodedDuration = encoded.duration;
+        } else {
+          const encoded = await encodeAudioBlobToWavAndPeaks(audioBlob, 1024);
+          wavBytes = encoded.wavBytes;
+          jsPeaks = encoded.peaks;
+          decodedDuration = encoded.duration;
+        }
 
-        URL.revokeObjectURL(tempUrl);
+        const recordedDuration = decodedDuration && isFinite(decodedDuration) && decodedDuration > 0
+          ? decodedDuration
+          : Math.max(0.5, (wavBytes.length - 44) / 48000 / 2);
 
         if (project && isMounted.current) {
             const activeLine = project.subtitles.find(line => 

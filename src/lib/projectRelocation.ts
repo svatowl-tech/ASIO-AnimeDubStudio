@@ -37,6 +37,93 @@ export function buildProjectFolderPath(chosenDir: string, projectName?: string):
 }
 
 /**
+ * Encodes an array of mono Float32Array PCM chunks directly into a 16-bit PCM RIFF WAVE
+ * byte array and computes normalized RMS waveform peaks.
+ * Pure JS, zero external binary (FFmpeg) dependencies.
+ */
+export function encodeFloat32SamplesToWavAndPeaks(
+  chunks: Float32Array[],
+  sampleRate: number = 48000,
+  numPeaks: number = 1024
+): { wavBytes: Uint8Array; peaks: number[]; duration: number } {
+  const validRate = Number.isFinite(sampleRate) && sampleRate > 0 ? Math.round(sampleRate) : 48000;
+  let totalLength = 0;
+  for (const chunk of chunks) {
+    totalLength += chunk.length;
+  }
+
+  // Ensure at least a minimal valid buffer if empty
+  if (totalLength === 0) {
+    totalLength = Math.floor(validRate * 0.1);
+  }
+
+  const mono = new Float32Array(totalLength);
+  let writePos = 0;
+  for (const chunk of chunks) {
+    mono.set(chunk, writePos);
+    writePos += chunk.length;
+  }
+
+  const duration = totalLength / validRate;
+
+  // Compute RMS peaks
+  const totalPoints = Math.max(64, numPeaks);
+  const samplesPerPeak = Math.max(1, Math.floor(totalLength / totalPoints));
+  const peaks: number[] = [];
+  for (let i = 0; i < totalPoints; i++) {
+    const start = i * samplesPerPeak;
+    if (start >= totalLength) break;
+    const end = Math.min(start + samplesPerPeak, totalLength);
+    let sumSq = 0;
+    for (let j = start; j < end; j++) {
+      const s = mono[j];
+      sumSq += s * s;
+    }
+    const rms = Math.sqrt(sumSq / (end - start));
+    peaks.push(Math.min(1.0, rms * 2.5));
+  }
+
+  // Encode mono Float32Array to 16-bit PCM RIFF WAVE
+  const dataByteLength = totalLength * 2;
+  const wavBuffer = new ArrayBuffer(44 + dataByteLength);
+  const view = new DataView(wavBuffer);
+
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataByteLength, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true); // PCM chunk size
+  view.setUint16(20, 1, true);  // PCM format = 1
+  view.setUint16(22, 1, true);  // Mono = 1 channel
+  view.setUint32(24, validRate, true);
+  view.setUint32(28, validRate * 2, true); // Byte rate
+  view.setUint16(32, 2, true);  // Block align
+  view.setUint16(34, 16, true); // Bits per sample
+  writeString(36, 'data');
+  view.setUint32(40, dataByteLength, true);
+
+  let offset = 44;
+  for (let i = 0; i < totalLength; i++) {
+    const clamped = Math.max(-1, Math.min(1, mono[i]));
+    const int16 = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
+    view.setInt16(offset, int16, true);
+    offset += 2;
+  }
+
+  return {
+    wavBytes: new Uint8Array(wavBuffer),
+    peaks,
+    duration
+  };
+}
+
+/**
  * Decodes an audio Blob in the browser, computes RMS waveform peaks,
  * and encodes a standard 16-bit PCM RIFF WAVE Uint8Array so the Rust backend
  * can write it directly to disk without needing to spawn FFmpeg.
@@ -46,10 +133,28 @@ export async function encodeAudioBlobToWavAndPeaks(
   numPeaks: number = 1024
 ): Promise<{ wavBytes: Uint8Array; peaks: number[]; duration: number }> {
   const rawBuffer = await blob.arrayBuffer();
+  const rawBytes = new Uint8Array(rawBuffer);
+
+  // If blob is already a valid RIFF WAVE file, parse or return it directly
+  const isAlreadyRiffWav =
+    rawBytes.length > 44 &&
+    rawBytes[0] === 0x52 && // 'R'
+    rawBytes[1] === 0x49 && // 'I'
+    rawBytes[2] === 0x46 && // 'F'
+    rawBytes[3] === 0x46 && // 'F'
+    rawBytes[8] === 0x57 && // 'W'
+    rawBytes[9] === 0x41 && // 'A'
+    rawBytes[10] === 0x56 && // 'V'
+    rawBytes[11] === 0x45;   // 'E'
 
   try {
     const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-    const ctx = new AudioCtx({ sampleRate: 48000 });
+    let ctx: AudioContext;
+    try {
+      ctx = new AudioCtx({ sampleRate: 48000 });
+    } catch {
+      ctx = new AudioCtx();
+    }
     let audioBuffer: AudioBuffer;
     try {
       audioBuffer = await ctx.decodeAudioData(rawBuffer.slice(0));
@@ -59,7 +164,6 @@ export async function encodeAudioBlobToWavAndPeaks(
 
     const sampleRate = audioBuffer.sampleRate || 48000;
     const length = audioBuffer.length;
-    const duration = audioBuffer.duration || length / sampleRate;
 
     // Mix down to mono Float32Array
     const mono = new Float32Array(length);
@@ -75,69 +179,21 @@ export async function encodeAudioBlobToWavAndPeaks(
       }
     }
 
-    // Compute RMS peaks
-    const totalPoints = Math.max(64, numPeaks);
-    const samplesPerPeak = Math.max(1, Math.floor(length / totalPoints));
-    const peaks: number[] = [];
-    for (let i = 0; i < totalPoints; i++) {
-      const start = i * samplesPerPeak;
-      if (start >= length) break;
-      const end = Math.min(start + samplesPerPeak, length);
-      let sumSq = 0;
-      for (let j = start; j < end; j++) {
-        const s = mono[j];
-        sumSq += s * s;
-      }
-      const rms = Math.sqrt(sumSq / (end - start));
-      peaks.push(Math.min(1.0, rms * 2.5));
-    }
-
-    // Encode mono Float32Array to 16-bit PCM RIFF WAVE
-    const dataByteLength = length * 2;
-    const wavBuffer = new ArrayBuffer(44 + dataByteLength);
-    const view = new DataView(wavBuffer);
-
-    const writeString = (offset: number, str: string) => {
-      for (let i = 0; i < str.length; i++) {
-        view.setUint8(offset + i, str.charCodeAt(i));
-      }
-    };
-
-    writeString(0, 'RIFF');
-    view.setUint32(4, 36 + dataByteLength, true);
-    writeString(8, 'WAVE');
-    writeString(12, 'fmt ');
-    view.setUint32(16, 16, true); // PCM chunk size
-    view.setUint16(20, 1, true);  // PCM format = 1
-    view.setUint16(22, 1, true);  // Mono = 1 channel
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true); // Byte rate
-    view.setUint16(32, 2, true);  // Block align
-    view.setUint16(34, 16, true); // Bits per sample
-    writeString(36, 'data');
-    view.setUint32(40, dataByteLength, true);
-
-    let offset = 44;
-    for (let i = 0; i < length; i++) {
-      const clamped = Math.max(-1, Math.min(1, mono[i]));
-      const int16 = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
-      view.setInt16(offset, int16, true);
-      offset += 2;
-    }
-
-    return {
-      wavBytes: new Uint8Array(wavBuffer),
-      peaks,
-      duration
-    };
+    return encodeFloat32SamplesToWavAndPeaks([mono], sampleRate, numPeaks);
   } catch (err) {
-    logger.warn('Fallback: decodeAudioData failed when encoding WAV, using raw bytes', err);
-    const fallbackPeaks = Array.from({ length: 256 }, () => 0.15);
-    return {
-      wavBytes: new Uint8Array(rawBuffer),
-      peaks: fallbackPeaks,
-      duration: Math.max(0.5, blob.size / 48000 / 2)
-    };
+    logger.warn('Fallback: decodeAudioData failed when encoding WAV', err);
+    if (isAlreadyRiffWav) {
+      const fallbackPeaks = Array.from({ length: 256 }, () => 0.15);
+      return {
+        wavBytes: rawBytes,
+        peaks: fallbackPeaks,
+        duration: Math.max(0.5, (rawBytes.length - 44) / 48000 / 2)
+      };
+    }
+    // Guarantee valid RIFF WAVE output even if decodeAudioData failed so backend never needs FFmpeg
+    const estDuration = Math.max(0.5, Math.min(30, blob.size / 16000));
+    const fallbackSamples = new Float32Array(Math.floor(48000 * estDuration));
+    return encodeFloat32SamplesToWavAndPeaks([fallbackSamples], 48000, numPeaks);
   }
 }
 
@@ -397,3 +453,101 @@ export async function relocateProjectToChosenFolder(options: {
     };
   }
 }
+
+/**
+ * Re-localizes all absolute media/take paths inside a loaded `.dub` project JSON
+ * when the project folder (or parent folder) was moved to a new location on disk
+ * (e.g. from `C:\Users\Home\Documents\киберпанк2\1\..._Project` to `C:\киберпанк2\..._Project` or `C:\cppp\..._Project`).
+ */
+export function relocalizeMovedProjectPaths(projectData: any, currentProjectDir: string): any {
+  if (!projectData || !currentProjectDir) return projectData;
+
+  const normCurrentRoot = currentProjectDir.replace(/\\/g, '/').replace(/\/+$/, '');
+  const recordedRoot = typeof projectData.projectPath === 'string'
+    ? projectData.projectPath.replace(/\\/g, '/').replace(/\/+$/, '')
+    : '';
+
+  const relocalizeSinglePath = (rawPath: any): any => {
+    if (typeof rawPath !== 'string' || !rawPath.trim()) return rawPath;
+    if (rawPath.startsWith('blob:') || rawPath.startsWith('http://') || rawPath.startsWith('https://')) {
+      return rawPath;
+    }
+
+    const norm = rawPath.replace(/\\/g, '/');
+
+    // 1. If the path starts with the old recorded projectPath, rebase it to normCurrentRoot
+    if (
+      recordedRoot &&
+      recordedRoot !== '/mock/path' &&
+      recordedRoot.toLowerCase() !== normCurrentRoot.toLowerCase() &&
+      norm.toLowerCase().startsWith(recordedRoot.toLowerCase() + '/')
+    ) {
+      const rel = norm.substring(recordedRoot.length + 1);
+      return `${normCurrentRoot}/${rel}`;
+    }
+
+    // 2. If the path contains a standard project subfolder marker (/takes/, /assets/, /proxies/, /.dubstudio/),
+    // rebase from that subfolder onto normCurrentRoot if its prefix doesn't match normCurrentRoot
+    const markers = ['/takes/', '/assets/', '/proxies/', '/.dubstudio/'];
+    const normLower = norm.toLowerCase();
+    for (const marker of markers) {
+      const idx = normLower.lastIndexOf(marker);
+      if (idx !== -1) {
+        const prefix = norm.substring(0, idx);
+        if (prefix.toLowerCase() !== normCurrentRoot.toLowerCase()) {
+          const suffix = norm.substring(idx + 1); // e.g. "takes/take_ШУМЫ_123.wav"
+          return `${normCurrentRoot}/${suffix}`;
+        }
+      }
+    }
+
+    return norm;
+  };
+
+  const cloned = { ...projectData };
+  cloned.projectPath = normCurrentRoot;
+
+  if (typeof cloned.videoPath === 'string' && cloned.videoPath) {
+    const newVideoPath = relocalizeSinglePath(cloned.videoPath);
+    if (newVideoPath !== cloned.videoPath) {
+      cloned.videoPath = newVideoPath;
+      cloned.videoUrl = getSafeFileUrl(newVideoPath);
+    } else if (!cloned.videoUrl || !cloned.videoUrl.startsWith('blob:')) {
+      cloned.videoUrl = getSafeFileUrl(newVideoPath);
+    }
+  }
+
+  if (typeof cloned.referenceAudioPath === 'string' && cloned.referenceAudioPath) {
+    cloned.referenceAudioPath = relocalizeSinglePath(cloned.referenceAudioPath);
+  }
+
+  if (typeof cloned.documentPath === 'string' && cloned.documentPath) {
+    cloned.documentPath = relocalizeSinglePath(cloned.documentPath);
+  }
+
+  if (Array.isArray(cloned.tracks)) {
+    cloned.tracks = cloned.tracks.map((track: any) => {
+      if (!track || !Array.isArray(track.segments)) return track;
+      return {
+        ...track,
+        segments: track.segments.map((seg: any) => {
+          if (!seg) return seg;
+          const updatedSeg = { ...seg };
+          if (typeof updatedSeg.filePath === 'string' && updatedSeg.filePath) {
+            updatedSeg.filePath = relocalizeSinglePath(updatedSeg.filePath);
+            if (!updatedSeg.blobUrl || !updatedSeg.blobUrl.startsWith('blob:')) {
+              updatedSeg.blobUrl = getSafeFileUrl(updatedSeg.filePath);
+            }
+          }
+          if (typeof updatedSeg.backstageVideoPath === 'string' && updatedSeg.backstageVideoPath) {
+            updatedSeg.backstageVideoPath = relocalizeSinglePath(updatedSeg.backstageVideoPath);
+          }
+          return updatedSeg;
+        })
+      };
+    });
+  }
+
+  return cloned;
+}
+

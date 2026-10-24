@@ -1,11 +1,12 @@
-use tauri_plugin_shell::process::CommandEvent;
-use tauri_plugin_shell::ShellExt;
 use tauri::{AppHandle, Emitter, State};
 use regex::Regex;
 use std::fs;
+use std::process::Stdio;
+use tokio::io::AsyncReadExt;
 use crate::db::AppState;
 use sqlx::Row;
 use crate::waveform_engine::generate_waveform_peaks;
+use crate::export_engine::{new_ffmpeg_command, new_ffprobe_command};
 
 use crate::logger::log_debug;
 
@@ -48,7 +49,7 @@ pub async fn concat_backstage_videos(
     // Склеиваем видео без перекодирования (stream copy), если это возможно
     // Внимание: это работает стабильно, если все исходники имеют одинаковые параметры (кодек, разрешение)
     let temp_file_str = temp_file_path.to_string_lossy().to_string();
-    let output = tokio::process::Command::new(crate::get_ffmpeg_path())
+    let output = new_ffmpeg_command()
         .args(&[
             "-nostdin",
             "-y",
@@ -280,82 +281,82 @@ pub(crate) async fn run_ffmpeg_with_progress(
     operation_name: String,
     duration_secs: Option<f64>,
 ) -> Result<(), String> {
-    let mut shell_args = vec!["-hide_banner".to_string(), "-stats".to_string()];
-    shell_args.extend(args);
+    let mut cmd = new_ffmpeg_command();
+    cmd.arg("-nostdin")
+       .arg("-hide_banner")
+       .arg("-stats")
+       .args(&args)
+       .stdout(Stdio::piped())
+       .stderr(Stdio::piped());
 
-    let sidecar_command = app_handle
-        .shell()
-        .sidecar("ffmpeg")
-        .map_err(|e| format!("Failed to create sidecar command: {}", e))?
-        .args(shell_args);
-
-    let (mut rx, _child) = sidecar_command
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
 
-    // Regex to capture time=00:00:00.00
     let re = Regex::new(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})").unwrap();
+    let mut stderr_tail = String::new();
 
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stderr(line_bytes) => {
-                let line = String::from_utf8_lossy(&line_bytes);
-                println!("[ffmpeg] {}", line.trim_end());
-                if let Some(caps) = re.captures(&line) {
-                    let h: f64 = caps[1].parse().unwrap_or(0.0);
-                    let m: f64 = caps[2].parse().unwrap_or(0.0);
-                    let s: f64 = caps[3].parse().unwrap_or(0.0);
-                    let ms: f64 = caps[4].parse().unwrap_or(0.0);
-                    
-                    let current_secs = h * 3600.0 + m * 60.0 + s + ms / 100.0;
-                    
-                    let percent = if let Some(total) = duration_secs {
+    if let Some(mut stderr) = child.stderr.take() {
+        let mut buf = [0u8; 2048];
+        while let Ok(n) = stderr.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            let chunk = String::from_utf8_lossy(&buf[..n]);
+            stderr_tail.push_str(&chunk);
+            if stderr_tail.len() > 4096 {
+                let drain_len = stderr_tail.len() - 2048;
+                stderr_tail.drain(..drain_len);
+            }
+            if let Some(caps) = re.captures(&chunk) {
+                let h: f64 = caps[1].parse().unwrap_or(0.0);
+                let m: f64 = caps[2].parse().unwrap_or(0.0);
+                let s: f64 = caps[3].parse().unwrap_or(0.0);
+                let ms: f64 = caps[4].parse().unwrap_or(0.0);
+
+                let current_secs = h * 3600.0 + m * 60.0 + s + ms / 100.0;
+                let percent = if let Some(total) = duration_secs {
+                    if total > 0.0 {
                         (current_secs / total * 100.0).min(100.0)
                     } else {
                         0.0
-                    };
-
-                    let _ = app_handle.emit("media-progress", MediaProgress {
-                        time: format!("{:02}:{:02}:{:02}", h as i32, m as i32, s as i32),
-                        percent,
-                        operation: operation_name.clone(),
-                    });
-                }
-            },
-            CommandEvent::Stdout(line_bytes) => {
-                let line = String::from_utf8_lossy(&line_bytes);
-                println!("[ffmpeg stdout] {}", line.trim_end());
-            },
-            CommandEvent::Error(err) => {
-                eprintln!("[ffmpeg command error] {}", err);
-            },
-            CommandEvent::Terminated(status) => {
-                println!("[ffmpeg terminated] with status: {:?}", status.code);
-                if let Some(code) = status.code {
-                    if code != 0 {
-                        return Err(format!("FFmpeg failed with exit code {}", code));
                     }
-                }
+                } else {
+                    0.0
+                };
+
+                let _ = app_handle.emit("media-progress", MediaProgress {
+                    time: format!("{:02}:{:02}:{:02}", h as i32, m as i32, s as i32),
+                    percent,
+                    operation: operation_name.clone(),
+                });
             }
-            _ => {}
         }
+    }
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("Failed waiting for ffmpeg: {}", e))?;
+
+    if !status.success() {
+        return Err(format!(
+            "FFmpeg failed with exit code {:?}: {}",
+            status.code(),
+            stderr_tail.trim()
+        ));
     }
 
     Ok(())
 }
 
 // Helper to detect hardware encoder
-async fn get_hw_encoder(app_handle: &AppHandle) -> String {
-    let output_result = app_handle.shell().sidecar("ffmpeg")
-        .map(|cmd| cmd.args(["-encoders"]));
-
-    if let Ok(cmd) = output_result {
-        if let Ok(out) = cmd.output().await {
-            let out_str = String::from_utf8_lossy(&out.stdout);
-            if out_str.contains("h264_nvenc") { return "h264_nvenc".to_string(); }
-            if out_str.contains("h264_amf") { return "h264_amf".to_string(); }
-            if out_str.contains("h264_qsv") { return "h264_qsv".to_string(); }
-        }
+async fn get_hw_encoder(_app_handle: &AppHandle) -> String {
+    if let Ok(out) = new_ffmpeg_command().args(["-nostdin", "-encoders"]).output().await {
+        let out_str = String::from_utf8_lossy(&out.stdout);
+        if out_str.contains("h264_nvenc") { return "h264_nvenc".to_string(); }
+        if out_str.contains("h264_amf") { return "h264_amf".to_string(); }
+        if out_str.contains("h264_qsv") { return "h264_qsv".to_string(); }
     }
     "libx264".to_string() // Fallback
 }
@@ -400,32 +401,25 @@ pub async fn render_final_video(
 
 #[tauri::command]
 pub async fn get_media_info(
-    app_handle: AppHandle,
+    _app_handle: AppHandle,
     path: String,
 ) -> Result<String, String> {
     println!("Calling get_media_info for path: {}", path);
-    // Escape single quotes for standard paths isn't normally necessary since Tauri's sidecar command 
-    // handles arguments as is, but we are just passing path directly to args.
-    
-    let sidecar_command = app_handle
-        .shell()
-        .sidecar("ffprobe")
-        .map_err(|e| {
-            eprintln!("Failed to create ffprobe sidecar: {}", e);
-            format!("Failed to create ffprobe sidecar: {}", e)
-        })?
-        .args(vec![
+
+    let output = new_ffprobe_command()
+        .args(&[
             "-v", "quiet",
             "-print_format", "json",
             "-show_format",
             "-show_streams",
             &path
-        ]);
-
-    let output = sidecar_command.output().await.map_err(|e| {
-        eprintln!("ffprobe command failed to execute: {}", e);
-        e.to_string()
-    })?;
+        ])
+        .output()
+        .await
+        .map_err(|e| {
+            eprintln!("ffprobe command failed to execute: {}", e);
+            e.to_string()
+        })?;
     
     if !output.status.success() {
         let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
@@ -601,7 +595,7 @@ pub async fn create_blank_video(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let output = tokio::process::Command::new(crate::get_ffmpeg_path())
+    let output = new_ffmpeg_command()
         .args(&[
             "-nostdin",
             "-y",
