@@ -28,6 +28,9 @@ export default defineConfig(({mode}) => {
     },
     build: {
       rollupOptions: {
+        checks: {
+          pluginTimings: false,
+        },
         output: {
           manualChunks(id) {
             if (id.includes('node_modules')) {
@@ -35,7 +38,7 @@ export default defineConfig(({mode}) => {
             }
           }
         }
-      },
+      } as any,
       chunkSizeWarningLimit: 1000,
     },
   };

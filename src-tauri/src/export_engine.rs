@@ -198,6 +198,7 @@ pub struct StemOptions {
     pub normalize: Option<bool>,
     pub target_lufs: Option<f64>,
     pub max_peak: Option<f64>,
+    #[allow(dead_code)]
     pub normalization_mode: Option<String>,
 }
 
@@ -480,54 +481,54 @@ pub fn write_flac_mono_16bit_pure_rust(samples: &[f32], out_file: &Path) -> Resu
     out_bytes.extend_from_slice(&md5_digest.0);
 
     // 3. Encode frames of up to 4096 samples
-    let mut frame_Bytes = Vec::with_capacity(8224);
+    let mut frame_bytes = Vec::with_capacity(8224);
     for (frame_idx, chunk) in pcm_samples.chunks(4096).enumerate() {
-        frame_Bytes.clear();
+        frame_bytes.clear();
         // Sync code 0b11111111111110 + reserved(0) + blocking_strategy(0 = fixed-blocksize)
-        frame_Bytes.push(0xFF);
-        frame_Bytes.push(0xF8);
+        frame_bytes.push(0xFF);
+        frame_bytes.push(0xF8);
 
         let is_standard_4096 = chunk.len() == 4096;
         // Block size bits: 0b1100 (4096) or 0b0111 (16-bit block_size-1 at end of header)
         // Sample rate bits: 0b1010 (48 kHz)
         if is_standard_4096 {
-            frame_Bytes.push(0xCA); // 0b1100_1010
+            frame_bytes.push(0xCA); // 0b1100_1010
         } else {
-            frame_Bytes.push(0x7A); // 0b0111_1010
+            frame_bytes.push(0x7A); // 0b0111_1010
         }
 
         // Channel assignment: 0b0000 (1 channel mono), Sample size: 0b100 (16 bits), Reserved: 0
-        frame_Bytes.push(0x08);
+        frame_bytes.push(0x08);
 
-        encode_flac_utf8_u64(frame_idx as u64, &mut frame_Bytes);
+        encode_flac_utf8_u64(frame_idx as u64, &mut frame_bytes);
 
         if !is_standard_4096 {
             let bs_minus_1 = (chunk.len().saturating_sub(1)) as u16;
-            frame_Bytes.extend_from_slice(&bs_minus_1.to_be_bytes());
+            frame_bytes.extend_from_slice(&bs_minus_1.to_be_bytes());
         }
 
-        let crc8 = flac_crc8(&frame_Bytes);
-        frame_Bytes.push(crc8);
+        let crc8 = flac_crc8(&frame_bytes);
+        frame_bytes.push(crc8);
 
         // Check if all samples in chunk are identical (e.g. silence)
         let first_sample = chunk[0];
         let is_constant = chunk.iter().all(|&s| s == first_sample);
         if is_constant {
             // SUBFRAME_CONSTANT: pad(0) + type(000000) + wasted(0) = 0x00
-            frame_Bytes.push(0x00);
-            frame_Bytes.extend_from_slice(&first_sample.to_be_bytes());
+            frame_bytes.push(0x00);
+            frame_bytes.extend_from_slice(&first_sample.to_be_bytes());
         } else {
             // SUBFRAME_VERBATIM: pad(0) + type(000001) + wasted(0) = 0x02
-            frame_Bytes.push(0x02);
+            frame_bytes.push(0x02);
             for &s in chunk {
-                frame_Bytes.extend_from_slice(&s.to_be_bytes());
+                frame_bytes.extend_from_slice(&s.to_be_bytes());
             }
         }
 
-        let crc16 = flac_crc16(&frame_Bytes);
-        frame_Bytes.extend_from_slice(&crc16.to_be_bytes());
+        let crc16 = flac_crc16(&frame_bytes);
+        frame_bytes.extend_from_slice(&crc16.to_be_bytes());
 
-        out_bytes.extend_from_slice(&frame_Bytes);
+        out_bytes.extend_from_slice(&frame_bytes);
     }
 
     fs::write(out_file, &out_bytes)
@@ -2023,7 +2024,6 @@ pub async fn export_backstage_assemble(
     use std::fs;
     use std::io::Write;
     use std::path::Path;
-    use tokio::process::Command;
 
     println!("[export_backstage_assemble] Начало экспорта. Всего блоков: {}. Output: {}", blocks.len(), output_path);
 

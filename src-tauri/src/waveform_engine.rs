@@ -171,14 +171,14 @@ pub fn generate_waveform_peaks_internal(file_path: &str, points: usize) -> Resul
     let samples: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Int => {
             if spec.bits_per_sample == 16 {
-                reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / std::i16::MAX as f32).collect()
+                reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / i16::MAX as f32).collect()
             } else if spec.bits_per_sample == 24 {
                 // hound decodes 24-bit integers as i32
                 reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 8388607.0).collect()
             } else if spec.bits_per_sample == 32 {
-                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / std::i32::MAX as f32).collect()
+                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / i32::MAX as f32).collect()
             } else if spec.bits_per_sample == 8 {
-                reader.samples::<i8>().map(|s| s.unwrap_or(0) as f32 / std::i8::MAX as f32).collect()
+                reader.samples::<i8>().map(|s| s.unwrap_or(0) as f32 / i8::MAX as f32).collect()
             } else if spec.bits_per_sample > 0 && spec.bits_per_sample <= 32 {
                 let max_val = ((1i64 << (spec.bits_per_sample - 1)) - 1).max(1) as f32;
                 reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / max_val).collect()

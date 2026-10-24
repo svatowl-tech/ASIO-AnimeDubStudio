@@ -229,7 +229,7 @@ export const useProject = () => {
     }
   };
 
-  const onLoadProject = async (path: string) => {
+  const onLoadProject = useCallback(async (path: string) => {
     if (window.electronAPI) {
       logger.info(`Loading project from path: ${path}`);
       try {
@@ -250,7 +250,47 @@ export const useProject = () => {
         alert(`Ошибка при открытии проекта: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-  };
+  }, [addRecentProject]);
+
+  const onLoadProjectFromFile = useCallback(async (file: File) => {
+    const filePath = (file as any).path;
+    if (filePath && window.electronAPI) {
+      await onLoadProject(filePath);
+      return;
+    }
+    try {
+      const content = await file.text();
+      const parsed = JSON.parse(content);
+      if (parsed && typeof parsed === 'object') {
+        if (window.electronAPI && parsed.projectPath) {
+          const diskRes = await window.electronAPI.loadProjectJson(parsed.projectPath);
+          if (diskRes.success && diskRes.data) {
+            const sanitizedDisk = sanitizeProjectData(diskRes.data);
+            sanitizedDisk.audioSettings = { ...getGlobalAudioSettings(), ...sanitizedDisk.audioSettings };
+            setProject(sanitizedDisk);
+            addRecentProject(sanitizedDisk.name, sanitizedDisk.projectPath || parsed.projectPath);
+            return;
+          }
+        }
+        const fallbackName = file.name.replace(/\.dub$/i, '');
+        const sanitized = sanitizeProjectData({
+          ...parsed,
+          name: parsed.name || fallbackName,
+          tracks: parsed.tracks || [],
+          subtitles: parsed.subtitles || [],
+          roles: parsed.roles || []
+        });
+        sanitized.audioSettings = { ...getGlobalAudioSettings(), ...sanitized.audioSettings };
+        setProject(sanitized);
+        addRecentProject(sanitized.name, sanitized.projectPath || fallbackName);
+      } else {
+        alert("Не удалось загрузить проект: неверный формат файла .dub");
+      }
+    } catch (error) {
+      logger.error(`Failed to load dropped .dub file: ${error}`);
+      alert(`Ошибка при открытии файла проекта (.dub): ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [onLoadProject, addRecentProject]);
 
   const handleCloseProject = async () => {
     if (project) {
@@ -273,6 +313,7 @@ export const useProject = () => {
     handleOpenProject,
     handleSaveProject,
     handleCloseProject,
-    onLoadProject
+    onLoadProject,
+    onLoadProjectFromFile
   };
 };

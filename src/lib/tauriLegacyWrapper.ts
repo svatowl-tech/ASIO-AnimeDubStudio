@@ -361,7 +361,7 @@ export const tauriAPI = {
     try {
         let actualPath = filePath;
         // If user provided a folder path instead of .dub file, try to resolve to .dub
-        if (!actualPath.endsWith('.dub')) {
+        if (!actualPath.toLowerCase().endsWith('.dub')) {
             const cleanFolder = actualPath.replace(/\\/g, '/').replace(/\/+$/, '');
             const folderName = cleanFolder.split('/').filter(Boolean).pop() || 'project';
             const strippedName = folderName.replace(/_Project$/i, '');
@@ -384,8 +384,10 @@ export const tauriAPI = {
         const content = await invoke<string>('read_text_file', { path: actualPath });
         let projectData = JSON.parse(content);
         
-        const normActual = actualPath.replace(/\\/g, '/');
-        const projectPath = normActual.substring(0, normActual.lastIndexOf('/'));
+        const normActual = actualPath.replace(/\\/g, '/').replace(/\/+$/, '');
+        const projectPath = normActual.toLowerCase().endsWith('.dub')
+          ? normActual.substring(0, normActual.lastIndexOf('/'))
+          : normActual;
 
         // Re-localize any moved paths BEFORE overwriting projectData.projectPath
         projectData = relocalizeMovedProjectPaths(projectData, projectPath);
@@ -419,6 +421,35 @@ export const tauriAPI = {
         console.warn("Project file load failed:", err);
         return { success: false, error: String(err) };
     }
+  },
+
+  getStartupProjectPath: async (): Promise<BridgeResponse<string | null>> => {
+    if (!IS_TAURI) return { success: true, data: null };
+    try {
+      const result = await invoke<string | null>('get_startup_project_path');
+      return { success: true, data: result || null };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  },
+
+  onOpenProjectFile: (callback: (filePath: string) => void): (() => void) => {
+    if (!IS_TAURI) return () => {};
+    let unlisten: UnlistenFn | undefined;
+    listen<string>('open-project-file', (event) => {
+      if (event.payload) {
+        callback(event.payload);
+      }
+    }).then((u) => {
+      unlisten = u;
+      listenerRegistry.add(u);
+    });
+    return () => {
+      if (unlisten) {
+        unlisten();
+        listenerRegistry.delete(unlisten);
+      }
+    };
   },
 
   relinkProjectPathsOnDisk: async (projectPath: string, projectData: any): Promise<BridgeResponse<any>> => {

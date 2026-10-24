@@ -37,6 +37,15 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "fileAssociations": [
+      {
+        "ext": ["dub"],
+        "name": "DubStudio Project",
+        "description": "DubStudio Pro Project File",
+        "role": "Editor",
+        "mimeType": "application/x-dubstudio-project"
+      }
+    ],
     "resources": [
       "bin/ffmpeg*",
       "bin/ffprobe*"

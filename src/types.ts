@@ -297,6 +297,8 @@ declare global {
       getMediaInfo: (path: string) => Promise<BridgeResponse<string>>;
       extractMkvAssets: (data: { inputPath: string, videoOutput: string, subOutput?: string, audioIndex: number, subIndex?: number, duration?: number }) => Promise<BridgeResponse<string>>;
       createBlankVideo: (duration: number, outputPath: string) => Promise<BridgeResponse<string>>;
+      getStartupProjectPath?: () => Promise<BridgeResponse<string | null>>;
+      onOpenProjectFile?: (callback: (filePath: string) => void) => () => void;
     };
   }
 }

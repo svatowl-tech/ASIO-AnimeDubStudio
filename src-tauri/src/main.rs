@@ -296,13 +296,108 @@ pub fn is_ffmpeg_available() -> bool {
     cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
+struct StartupProjectState {
+    pending_path: std::sync::Mutex<Option<String>>,
+}
+
+fn normalize_cli_dub_arg(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    if trimmed.is_empty() || trimmed.starts_with('-') {
+        return None;
+    }
+    let path_str = if let Some(stripped) = trimmed.strip_prefix("file://") {
+        #[cfg(target_os = "windows")]
+        {
+            stripped.trim_start_matches('/').replace('/', "\\")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            stripped.to_string()
+        }
+    } else {
+        trimmed.to_string()
+    };
+    if path_str.to_lowercase().ends_with(".dub") {
+        let p = std::path::Path::new(&path_str);
+        if p.exists() {
+            if let Ok(canon) = std::fs::canonicalize(p) {
+                let s = canon.to_string_lossy().to_string();
+                let clean = s.strip_prefix(r"\\?\").unwrap_or(&s).to_string();
+                return Some(clean);
+            }
+        }
+        return Some(path_str);
+    }
+    None
+}
+
+fn extract_dub_path_from_args<I, S>(args: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    for arg in args.into_iter().skip(1) {
+        if let Some(found) = normalize_cli_dub_arg(arg.as_ref()) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn register_windows_dub_file_association() {
+    std::thread::spawn(|| {
+        let Ok(exe_path) = std::env::current_exe() else { return };
+        let exe_str = exe_path.to_string_lossy().to_string();
+        let exe_clean = exe_str.strip_prefix(r"\\?\").unwrap_or(&exe_str);
+        let icon_val = format!("\"{}\",0", exe_clean);
+        let open_cmd = format!("\"{}\" \"%1\"", exe_clean);
+
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        let commands: [(&str, &str); 4] = [
+            (r"HKCU\Software\Classes\.dub", "DubStudioPro.Project"),
+            (r"HKCU\Software\Classes\DubStudioPro.Project", "DubStudio Pro Project"),
+            (r"HKCU\Software\Classes\DubStudioPro.Project\DefaultIcon", &icon_val),
+            (r"HKCU\Software\Classes\DubStudioPro.Project\shell\open\command", &open_cmd),
+        ];
+
+        for (key, val) in commands {
+            let _ = std::process::Command::new("reg")
+                .args(["add", key, "/ve", "/d", val, "/f"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+        }
+    });
+}
+
+#[tauri::command]
+fn get_startup_project_path(state: tauri::State<'_, StartupProjectState>) -> Option<String> {
+    if let Ok(mut lock) = state.pending_path.lock() {
+        if let Some(p) = lock.take() {
+            return Some(p);
+        }
+    }
+    extract_dub_path_from_args(std::env::args())
+}
+
 fn main() {
+    #[cfg(target_os = "windows")]
+    register_windows_dub_file_association();
+
+    let initial_dub_path = extract_dub_path_from_args(std::env::args());
+
     // Shared empty state initially
     let app_state = AppState {
         db: Arc::new(Mutex::new(None)),
     };
 
-    tauri::Builder::default()
+    let startup_project_state = StartupProjectState {
+        pending_path: std::sync::Mutex::new(initial_dub_path),
+    };
+
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -415,12 +510,14 @@ fn main() {
             Ok(())
         })
         .manage(app_state)
+        .manage(startup_project_state)
         .manage(AudioState {
             recorder: std::sync::Mutex::new(AudioRecorder::default()),
         })
         .invoke_handler(tauri::generate_handler![
             greet,
             open_devtools,
+            get_startup_project_path,
             get_audio_devices,
             start_recording,
             stop_recording,
@@ -477,11 +574,32 @@ fn main() {
             create_blank_video,
             parse_script_file
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
-            eprintln!("Error while running tauri application: {:?}", e);
+            eprintln!("Error while building tauri application: {:?}", e);
             std::process::exit(1);
         });
+
+    app.run(|_app_handle, _event| {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        if let tauri::RunEvent::Opened { urls } = _event {
+            use tauri::Manager;
+            for url in urls {
+                if let Ok(path_buf) = url.to_file_path() {
+                    let path_str = path_buf.to_string_lossy().to_string();
+                    if path_str.to_lowercase().ends_with(".dub") {
+                        if let Some(state) = _app_handle.try_state::<StartupProjectState>() {
+                            if let Ok(mut lock) = state.pending_path.lock() {
+                                *lock = Some(path_str.clone());
+                            }
+                        }
+                        let _ = _app_handle.emit("open-project-file", path_str);
+                        break;
+                    }
+                }
+            }
+        }
+    });
 }
 
 // EOF

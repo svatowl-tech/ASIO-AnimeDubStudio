@@ -939,8 +939,8 @@ pub async fn start_recording(
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => build_stream!(f32, |s: f32| s),
-            cpal::SampleFormat::I16 => build_stream!(i16, |s: i16| (s as f32) / std::i16::MAX as f32),
-            cpal::SampleFormat::I32 => build_stream!(i32, |s: i32| (s as f32) / std::i32::MAX as f32),
+            cpal::SampleFormat::I16 => build_stream!(i16, |s: i16| (s as f32) / i16::MAX as f32),
+            cpal::SampleFormat::I32 => build_stream!(i32, |s: i32| (s as f32) / i32::MAX as f32),
             cpal::SampleFormat::U16 => build_stream!(u16, |s: u16| ((s as f32) - 32768.0) / 32768.0),
             _ => { 
                 log_debug(&format!("Inside Realtime thread: Unsupported sample format error: {:?}", sample_format));

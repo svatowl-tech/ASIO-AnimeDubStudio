@@ -234,7 +234,23 @@ pub fn get_file_info(path: String) -> Result<FileInfo, String> {
 
 #[tauri::command]
 pub fn read_text_file(path: String) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))
+    let p = Path::new(&path);
+    if p.is_dir() {
+        if let Ok(entries) = fs::read_dir(p) {
+            for entry in entries.flatten() {
+                let ep = entry.path();
+                if ep.is_file() {
+                    if let Some(ext) = ep.extension().and_then(|s| s.to_str()) {
+                        if ext.eq_ignore_ascii_case("dub") {
+                            return fs::read_to_string(&ep)
+                                .map_err(|e| format!("Failed to read file: {}", e));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fs::read_to_string(p).map_err(|e| format!("Failed to read file: {}", e))
 }
 
 #[tauri::command]

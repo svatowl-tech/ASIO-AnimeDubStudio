@@ -131,8 +131,12 @@ export default function App() {
     handleOpenProject, 
     handleSaveProject: origHandleSaveProject, 
     handleCloseProject,
-    onLoadProject 
+    onLoadProject,
+    onLoadProjectFromFile
   } = useProject();
+
+  const [isNativeDragActive, setIsNativeDragActive] = useState(false);
+  const lastNativeDropTimeRef = useRef<number>(0);
 
   const [saveTrigger, setSaveTrigger] = useState(0);
   const [folderRecoveryState, setFolderRecoveryState] = useState<{
@@ -493,21 +497,18 @@ export default function App() {
     
     let unlistenTauriClose: any = null;
     if (isDesktop && !!(window as any).__TAURI_INTERNALS__) {
-      import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
-        const mainWindow = getCurrentWindow();
-        mainWindow.onCloseRequested(async (event) => {
-          event.preventDefault();
-          try {
-            const { closeStudioWindow } = await import('./lib/windowHelpers');
-            await closeStudioWindow();
-          } catch(e) {
-            console.error("Cleanup error", e);
-          } finally {
-            // Now force destroy the main window which terminates the app if it's the last window
-            mainWindow.destroy().catch(() => {});
-          }
-        }).then(unlisten => unlistenTauriClose = unlisten);
-      });
+      const mainWindow = getCurrentWindow();
+      mainWindow.onCloseRequested(async (event) => {
+        event.preventDefault();
+        try {
+          await closeStudioWindow();
+        } catch(e) {
+          console.error("Cleanup error", e);
+        } finally {
+          // Now force destroy the main window which terminates the app if it's the last window
+          mainWindow.destroy().catch(() => {});
+        }
+      }).then(unlisten => unlistenTauriClose = unlisten);
     }
     
     window.addEventListener('beforeunload', handleUnload);
@@ -983,8 +984,22 @@ export default function App() {
   const handleNativeDrop = useCallback(async (paths: string[]) => {
     for (const path of paths) {
       const fileName = path.split(/[/\\]/).pop() || 'file';
-      const fileExt = fileName.substring(fileName.lastIndexOf('.')).toLowerCase();
+      const dotIdx = fileName.lastIndexOf('.');
+      const fileExt = dotIdx !== -1 ? fileName.substring(dotIdx).toLowerCase() : '';
       const fileDir = path.replace(/\\/g, '/').substring(0, path.replace(/\\/g, '/').lastIndexOf('/'));
+
+      if (fileExt === '.dub') {
+        await onLoadProject(path);
+        continue;
+      }
+
+      if (fileExt === '' && window.electronAPI) {
+        const probeRes = await window.electronAPI.loadProjectJson(path);
+        if (probeRes.success && probeRes.data) {
+          await onLoadProject(path);
+          continue;
+        }
+      }
 
       const isVideo = ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.hevc', '.h265', '.265', '.ts', '.m2ts'].includes(fileExt);
       const isAudio = ['.mp3', '.wav', '.flac', '.ogg', '.m4a'].includes(fileExt);
@@ -1238,7 +1253,7 @@ export default function App() {
         }
       }
     }
-  }, [setProject, createDefaultProject]);
+  }, [setProject, createDefaultProject, onLoadProject]);
 
   useEffect(() => {
     logger.info("Application mounted. Desktop API available:", !!window.electronAPI);
@@ -1264,7 +1279,14 @@ export default function App() {
         try {
           const u = await getCurrentWindow().onDragDropEvent((event) => {
             if (isCancelled) return;
-            if (event.payload.type === 'drop') {
+            const evType = event.payload.type;
+            if (evType === 'enter' || evType === 'over') {
+              setIsNativeDragActive(true);
+            } else if (evType === 'leave') {
+              setIsNativeDragActive(false);
+            } else if (evType === 'drop') {
+              setIsNativeDragActive(false);
+              lastNativeDropTimeRef.current = Date.now();
               const paths = event.payload.paths;
               if (paths && paths.length > 0) {
                 logger.info("Native drop detected:", paths);
@@ -1294,7 +1316,21 @@ export default function App() {
   }, [handleNativeDrop, isDesktop]);
 
 
-  const onDrop = useCallback(async (acceptedFiles: File[]) => {
+  const onDrop = useCallback(async (acceptedFiles: File[], fileRejections?: any[]) => {
+    if (Date.now() - lastNativeDropTimeRef.current < 1000) {
+      return;
+    }
+
+    const rejectedFiles: File[] = Array.isArray(fileRejections)
+      ? fileRejections.map((r: any) => r?.file).filter(Boolean)
+      : [];
+    const allDroppedFiles = [...acceptedFiles, ...rejectedFiles];
+    const dubFiles = allDroppedFiles.filter(f => f.name.toLowerCase().endsWith('.dub'));
+    if (dubFiles.length > 0) {
+      await onLoadProjectFromFile(dubFiles[0]);
+      return;
+    }
+
     const isProjectActive = !!project?.videoUrl || !!project?.projectPath;
     
     const mediaFiles = acceptedFiles.filter(f => f.type.startsWith('video/') || f.type.startsWith('audio/') || ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.hevc', '.h265', '.265', '.ts', '.m2ts', '.mp3', '.wav', '.flac', '.ogg', '.m4a'].some(ext => f.name.toLowerCase().endsWith(ext)));
@@ -1538,7 +1574,7 @@ export default function App() {
         alert(msg);
       }
     }
-  }, [project, currentTimeRef.current]);
+  }, [project, currentTimeRef.current, onLoadProjectFromFile]);
 
   const { getRootProps, getInputProps, isDragActive: dropzoneActive } = useDropzone({ 
     onDrop,
@@ -1548,7 +1584,9 @@ export default function App() {
       'audio/*': ['.mp3', '.wav', '.flac', '.ogg', '.m4a'],
       'text/plain': ['.txt', '.csv', '.vtt'],
       'application/x-subrip': ['.srt'],
-      'application/octet-stream': ['.ass', '.srt', '.fb2']
+      'application/octet-stream': ['.ass', '.srt', '.fb2', '.dub'],
+      'application/json': ['.dub'],
+      'application/x-dubstudio-project': ['.dub']
     }
   } as any);
 
@@ -1559,6 +1597,36 @@ export default function App() {
       });
     }
   }, [isDesktop]);
+
+  // --- Open .dub Project on Startup (CLI / Double-Click) & Runtime OS Open Event ---
+  useEffect(() => {
+    if (!isDesktop || !window.electronAPI) return;
+
+    if (window.electronAPI.getStartupProjectPath) {
+      window.electronAPI.getStartupProjectPath().then((res) => {
+        if (res.success && res.data) {
+          logger.info(`Opening startup .dub project from CLI/OS: ${res.data}`);
+          onLoadProject(res.data);
+        }
+      }).catch((err) => {
+        logger.warn("Failed to check startup project path:", err);
+      });
+    }
+
+    let unlistenOpenProject: (() => void) | undefined;
+    if (window.electronAPI.onOpenProjectFile) {
+      unlistenOpenProject = window.electronAPI.onOpenProjectFile((filePath) => {
+        if (filePath) {
+          logger.info(`Received open-project-file event from OS: ${filePath}`);
+          onLoadProject(filePath);
+        }
+      });
+    }
+
+    return () => {
+      if (unlistenOpenProject) unlistenOpenProject();
+    };
+  }, [isDesktop, onLoadProject]);
 
   // --- App Startup Check ---
   useEffect(() => {
@@ -3152,7 +3220,7 @@ export default function App() {
       <input {...getInputProps()} />
       
       <AnimatePresence>
-        {dropzoneActive && (
+        {(dropzoneActive || isNativeDragActive) && (
           <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -3162,10 +3230,10 @@ export default function App() {
             <div className="w-24 h-24 bg-indigo-500 rounded-full flex items-center justify-center mb-6 shadow-2xl shadow-indigo-500/50">
               <Upload className="w-12 h-12 text-white animate-bounce" />
             </div>
-            <h2 className="text-3xl font-black mb-2">Загрузить файл</h2>
-            <p className="text-indigo-200 font-bold">Видео, аудио, книги или субтитры</p>
+            <h2 className="text-3xl font-black mb-2">Загрузить файл или проект</h2>
+            <p className="text-indigo-200 font-bold">Проекты (.dub), видео, аудио, книги или субтитры</p>
             <p className="text-zinc-400 text-sm mt-2">
-              (Поддерживается: mp4, mkv, hevc, mov, wav, flac, ass, srt, vtt, fb2, txt, csv и др.)
+              (Поддерживается: .dub, mp4, mkv, hevc, mov, wav, flac, ass, srt, vtt, fb2, txt, csv и др.)
             </p>
           </motion.div>
         )}
