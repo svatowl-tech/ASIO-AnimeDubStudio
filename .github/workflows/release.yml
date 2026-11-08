@@ -113,7 +113,10 @@ jobs:
       - name: Install npm dependencies and setup FFmpeg sidecars
         env:
           DUBSTUDIO_EMBED_FFMPEG: "1"
-        run: npm ci || npm install
+        run: |
+          rm -f bun.lock bun.lockb
+          npm ci || npm install
+          node scripts/setup-ffmpeg.js
 
       - name: Generate Fresh and Valid Application Icons
         run: npm run generate:icons
@@ -129,6 +132,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          tauriScript: npm run tauri
           tagName: ${{ needs.prepare-release.outputs.tag_name }}
           releaseName: "DubStudio Pro ${{ needs.prepare-release.outputs.tag_name }}"
           releaseBody: |
