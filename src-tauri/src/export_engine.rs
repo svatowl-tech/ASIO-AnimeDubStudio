@@ -17,6 +17,7 @@ use sqlx::Row;
 
 #[inline]
 pub fn new_ffmpeg_command() -> Command {
+    #[allow(unused_mut)]
     let mut cmd = Command::new(crate::get_ffmpeg_path());
     #[cfg(target_os = "windows")]
     {
@@ -27,6 +28,7 @@ pub fn new_ffmpeg_command() -> Command {
 
 #[inline]
 pub fn new_ffprobe_command() -> Command {
+    #[allow(unused_mut)]
     let mut cmd = Command::new(crate::get_ffprobe_path());
     #[cfg(target_os = "windows")]
     {

@@ -114,7 +114,7 @@ jobs:
         env:
           DUBSTUDIO_EMBED_FFMPEG: "1"
         run: |
-          rm -f bun.lock bun.lockb
+          node -e "const fs = require('fs'); ['bun.lock', 'bun.lockb'].forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });"
           npm ci || npm install
           node scripts/setup-ffmpeg.js
 
