@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Monitor } from 'lucide-react';
 import ActorOverlay from './components/ActorOverlay';
+import { StageVideoContainer } from './components/teleprompter/StageVideoContainer';
+import { saveTeleprompterPref } from './components/teleprompter/useTeleprompterLayout';
 import { Project } from './types';
 
 class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
@@ -151,7 +153,13 @@ const StudioModeContent = () => {
       {state.videoSrc && (
         <video 
           ref={videoRef}
-          className="w-full h-full object-contain shadow-2xl"
+          className="w-full h-full object-contain shadow-2xl transition-[padding] duration-150 ease-out"
+          style={{
+            paddingLeft: 'var(--tp-left, 0px)',
+            paddingRight: 'var(--tp-right, 0px)',
+            paddingTop: 'var(--tp-top, 0px)',
+            paddingBottom: 'var(--tp-bottom, 0px)',
+          }}
           src={state.videoSrc}
           playsInline
           crossOrigin="anonymous"
@@ -181,9 +189,9 @@ const StudioModeContent = () => {
         recordingStream={null}
         isWebcamSimulated={false}
         subtitles={state.subtitles || []}
-        teleprompterMode={state.teleprompterMode || 'compact'}
-        teleprompterFontSize={state.teleprompterFontSize || 48}
-        teleprompterLineHeight={state.teleprompterLineHeight || 1.1}
+        teleprompterMode={state.teleprompterMode || 'bottom'}
+        teleprompterFontSize={state.teleprompterFontSize || 22}
+        teleprompterLineHeight={state.teleprompterLineHeight || 1.3}
         teleprompterPacing={state.teleprompterPacing || 'auto'}
         setTeleprompterFontSize={(fontSize) => {
           setState((prev: any) => ({ ...prev, teleprompterFontSize: fontSize }));
@@ -211,7 +219,7 @@ const StudioModeContent = () => {
           channelRef.current?.postMessage({ type: 'UPDATE_TELEPROMPTER_SETTINGS', payload: { position } });
           tauriEmitRef.current?.('update-teleprompter-settings', { position }).catch(() => {});
         }}
-        teleprompterSize={state.teleprompterSize || { width: 800, height: 200 }}
+        teleprompterSize={state.teleprompterSize || { width: 320, height: 72 }}
         setTeleprompterSize={(size) => {
           setState((prev: any) => ({ ...prev, teleprompterSize: size }));
           channelRef.current?.postMessage({ type: 'UPDATE_TELEPROMPTER_SETTINGS', payload: { size } });

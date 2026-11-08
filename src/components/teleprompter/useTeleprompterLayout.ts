@@ -1,7 +1,7 @@
 import { CSSProperties, useMemo } from 'react';
 import { TeleprompterMode } from '../../types';
 
-export const TELEPROMPTER_STORAGE_KEY = 'dubstudio_teleprompter_pref_v2';
+export const TELEPROMPTER_STORAGE_KEY = 'dubstudio_teleprompter_pref_v3';
 
 export interface TeleprompterSavedPref {
   mode: TeleprompterMode;
@@ -12,6 +12,12 @@ export interface TeleprompterSavedPref {
   fontSize: number;
   lineHeight: number;
   pacing: 'auto' | 'manual';
+  autoFit: boolean;
+  speed: number;
+  pipWidth: number;
+  pipHeight: number;
+  pipX: number;
+  pipY: number;
 }
 
 export const getStoredTeleprompterPref = (): Partial<TeleprompterSavedPref> => {
@@ -22,14 +28,20 @@ export const getStoredTeleprompterPref = (): Partial<TeleprompterSavedPref> => {
     // Ignore JSON errors
   }
   return {
-    mode: 'compact',
-    floatWidth: 460,
-    floatHeight: 200,
-    dockWidth: 380,
-    dockHeight: 220,
-    fontSize: 22,
-    lineHeight: 1.4,
+    mode: 'bottom',
+    floatWidth: 640,
+    floatHeight: 68,
+    dockWidth: 320,
+    dockHeight: 68,
+    fontSize: 21,
+    lineHeight: 1.25,
     pacing: 'auto',
+    autoFit: true,
+    speed: 1,
+    pipWidth: 320,
+    pipHeight: 180,
+    pipX: 0,
+    pipY: 0,
   };
 };
 
@@ -49,8 +61,9 @@ export const useTeleprompterLayout = (
   position: { x: number; y: number }
 ) => {
   const containerStyle = useMemo<CSSProperties>(() => {
-    const width = size.width || 460;
-    const height = size.height || 200;
+    const stored = getStoredTeleprompterPref();
+    const width = size.width || 320;
+    const height = size.height || 68;
 
     switch (mode) {
       case 'left':
@@ -59,8 +72,8 @@ export const useTeleprompterLayout = (
           left: 0,
           top: 0,
           bottom: 0,
-          width: `${width}px`,
-          maxWidth: '80vw',
+          width: `${Math.max(240, Math.min(width, 640))}px`,
+          maxWidth: '55vw',
           zIndex: 45,
         };
       case 'right':
@@ -69,8 +82,19 @@ export const useTeleprompterLayout = (
           right: 0,
           top: 0,
           bottom: 0,
-          width: `${width}px`,
-          maxWidth: '80vw',
+          width: `${Math.max(240, Math.min(width, 640))}px`,
+          maxWidth: '55vw',
+          zIndex: 45,
+        };
+      case 'top':
+        return {
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          top: 0,
+          height: 'auto',
+          minHeight: `${Math.max(48, Math.min(height, 240))}px`,
+          maxHeight: '40vh',
           zIndex: 45,
         };
       case 'bottom':
@@ -79,19 +103,27 @@ export const useTeleprompterLayout = (
           left: 0,
           right: 0,
           bottom: 0,
-          height: `${height}px`,
-          maxHeight: '75vh',
+          height: 'auto',
+          minHeight: `${Math.max(48, Math.min(height, 240))}px`,
+          maxHeight: '40vh',
           zIndex: 45,
         };
-      case 'compact':
+      case 'compact': {
+        // Ensure compact floating strip is wide and horizontal even if size.width held a narrow sidebar width
+        const rawW = width > 380 ? width : (stored.floatWidth || 640);
+        const floatW = Math.max(420, rawW);
         return {
           position: 'absolute',
-          left: 'calc(50% - 230px)',
-          top: 'calc(100% - 250px)',
-          width: `${width}px`,
-          height: `${height}px`,
+          left: `calc(50% - ${Math.round(floatW / 2)}px)`,
+          bottom: '16px',
+          width: `${floatW}px`,
+          maxWidth: 'calc(100vw - 32px)',
+          height: 'auto',
+          minHeight: `${Math.max(48, Math.min(height, 180))}px`,
+          maxHeight: '36vh',
           zIndex: 45,
         };
+      }
       case 'expanded':
       default:
         return {
@@ -124,3 +156,4 @@ export const useTeleprompterLayout = (
     motionAnimate,
   };
 };
+

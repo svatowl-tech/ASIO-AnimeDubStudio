@@ -126,7 +126,7 @@ export interface Marker {
   color?: string;
 }
 
-export type TeleprompterMode = 'compact' | 'expanded' | 'left' | 'right' | 'bottom';
+export type TeleprompterMode = 'compact' | 'expanded' | 'left' | 'right' | 'top' | 'bottom';
 
 export interface ProjectUIState {
   zoomLevel?: number;
@@ -137,6 +137,7 @@ export interface ProjectUIState {
   teleprompterLineHeight?: number;
   teleprompterPacing?: 'auto' | 'manual';
   teleprompterSpeed?: number;
+  teleprompterAutoFit?: boolean;
   teleprompterPosition?: { x: number; y: number };
   teleprompterSize?: { width: number; height: number };
   showFixes?: boolean;

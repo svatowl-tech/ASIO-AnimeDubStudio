@@ -61,6 +61,7 @@ import PreRollCountdown from './components/PreRollCountdown';
 import Teleprompter from './components/Teleprompter';
 import { Project, SubtitleLine, AudioTrack, AudioSegment, Fix, Marker, TrackProcessing, TeleprompterMode } from './types';
 import { getStoredTeleprompterPref, saveTeleprompterPref } from './components/teleprompter/useTeleprompterLayout';
+import { StageVideoContainer } from './components/teleprompter/StageVideoContainer';
 import { SubtitleService, ParsedSubtitles } from './services/subtitleService';
 import { TextImportService } from './services/textImportService';
 import { LatencyCalibration } from './components/LatencyCalibration';
@@ -691,12 +692,12 @@ export default function App() {
   const [videoType, setVideoType] = useState<string | null>(null);
   const [showCalibration, setShowCalibration] = useState(false);
   const initialTpPref = getStoredTeleprompterPref();
-  const [teleprompterMode, setTeleprompterMode] = useState<TeleprompterMode>(initialTpPref.mode || 'compact');
+  const [teleprompterMode, setTeleprompterMode] = useState<TeleprompterMode>(initialTpPref.mode || 'bottom');
   const [settingsRevision, setSettingsRevision] = useState(0);
   const [teleprompterPosition, setTeleprompterPosition] = useState({ x: 0, y: 0 });
   const [teleprompterSize, setTeleprompterSize] = useState({ 
-    width: initialTpPref.floatWidth || 460, 
-    height: initialTpPref.floatHeight || 200 
+    width: initialTpPref.dockWidth || 320, 
+    height: initialTpPref.dockHeight || 72 
   });
 
 
@@ -717,9 +718,10 @@ export default function App() {
         projectPath: '/mock/path',
         videoUrl: '/sample-video.mp4',
         subtitles: [
-          { id: 1, start: 0, end: 3, role: 'Character 1', text: 'This is a demo project', combined: 'This is a demo project' },
-          { id: 2, start: 3, end: 7, role: 'Character 2', text: 'For AI Studio preview!', combined: 'For AI Studio preview!' }
-        ],
+          { id: '1', start: 2.2, end: 5.2, role: 'Character 1', text: 'Слышишь этот сигнал? Система перехвата уже запущена, у нас осталось меньше минуты до блокировки шлюза.' },
+          { id: '2', start: 7.4, end: 11.5, role: 'Character 1', text: 'Если мы сейчас же не переключим резервный контур питания на центральный терминал и не сбросим протокол защиты, весь сектор останется без связи!' },
+          { id: '3', start: 13.5, end: 16.5, role: 'Character 2', text: 'Понял тебя, держи канал открытым — захожу в систему!' }
+        ] as any,
         roles: ['Character 1', 'Character 2'],
         selectedRole: 'Character 1',
         tracks: [
@@ -772,9 +774,9 @@ export default function App() {
       handleSeek(Math.max(0, firstUnrecorded.start + offset - preroll));
     }
   }, [project, handleSeek]);
-  const [teleprompterFontSize, setTeleprompterFontSize] = useState(32);
-  const [teleprompterLineHeight, setTeleprompterLineHeight] = useState(1.4);
-  const [teleprompterPacing, setTeleprompterPacing] = useState<'auto' | 'manual'>('auto');
+  const [teleprompterFontSize, setTeleprompterFontSize] = useState(initialTpPref.fontSize || 22);
+  const [teleprompterLineHeight, setTeleprompterLineHeight] = useState(initialTpPref.lineHeight || 1.3);
+  const [teleprompterPacing, setTeleprompterPacing] = useState<'auto' | 'manual'>(initialTpPref.pacing || 'auto');
 
   useEffect(() => {
     if (project?.id && project.uiState) {
@@ -3424,62 +3426,61 @@ export default function App() {
                 }}
               />
             ) : (
-              <video 
-                key={project.videoPath || project.videoUrl || 'default'}
-                ref={videoRef}
-                className="w-full h-full object-contain shadow-2xl"
-                playsInline
-                crossOrigin="anonymous"
-                preload="metadata"
-                onKeyDown={(e) => e.preventDefault()}
-                onPlay={() => {
-                  if (!isPlayingRef.current) {
-                    setIsPlaying(true);
-                    if (projectRef.current) {
-                      playbackEngine.play(projectRef.current.tracks, videoRef.current?.currentTime || 0);
-                    }
-                  }
+              <StageVideoContainer
+                isExpandedPip={
+                  teleprompterMode === 'expanded' &&
+                  ((project.subtitles && project.subtitles.length > 0) || !!project.documentContent)
+                }
+                isPlaying={isPlaying}
+                currentTime={currentTime}
+                duration={duration}
+                onTogglePlay={togglePlay}
+                onExitExpanded={() => {
+                  setTeleprompterMode('bottom');
+                  saveTeleprompterPref({ mode: 'bottom' });
                 }}
-                onPause={() => {
-                  if (isPlayingRef.current) {
-                    setIsPlaying(false);
-                    playbackEngine.stop();
-                  }
-                }}
-                src={getVideoSource()}
-                onLoadedMetadata={(e) => {
-                  let newDuration = e.currentTarget.duration;
-                  logger.info("Video metadata loaded. Duration:", newDuration);
-                  
-                  if (newDuration === Infinity || newDuration < 1) {
-                    e.currentTarget.currentTime = 1e101;
-                    return;
-                  }
-                  setDuration(newDuration);
-                  setVideoError(null);
-                  
-                  // Update Оригинал track duration if it exists
-                  setProject(p => {
-                    if (!p) return p;
-                    const tracks = (p.tracks).map(t => {
-                      if (t.name === 'Оригинал') {
-                        return {
-                          ...t,
-                          segments: (t.segments || []).map(s => 
-                            s.id === 'original-audio-seg' ? { ...s, duration: newDuration, fileDuration: newDuration } : s
-                          )
-                        };
+              >
+                <video 
+                  key={project.videoPath || project.videoUrl || 'default'}
+                  ref={videoRef}
+                  className="w-full h-full object-contain shadow-2xl transition-[padding] duration-150 ease-out"
+                  style={{
+                    paddingLeft: 'var(--tp-left, 0px)',
+                    paddingRight: 'var(--tp-right, 0px)',
+                    paddingTop: 'var(--tp-top, 0px)',
+                    paddingBottom: 'var(--tp-bottom, 0px)',
+                  }}
+                  playsInline
+                  crossOrigin="anonymous"
+                  preload="metadata"
+                  onKeyDown={(e) => e.preventDefault()}
+                  onPlay={() => {
+                    if (!isPlayingRef.current) {
+                      setIsPlaying(true);
+                      if (projectRef.current) {
+                        playbackEngine.play(projectRef.current.tracks, videoRef.current?.currentTime || 0);
                       }
-                      return t;
-                    });
-                    return { ...p, tracks };
-                  });
-                }}
-                onDurationChange={(e) => {
-                  const newDuration = e.currentTarget.duration;
-                  if (newDuration !== Infinity && newDuration > 0) {
+                    }
+                  }}
+                  onPause={() => {
+                    if (isPlayingRef.current) {
+                      setIsPlaying(false);
+                      playbackEngine.stop();
+                    }
+                  }}
+                  src={getVideoSource()}
+                  onLoadedMetadata={(e) => {
+                    let newDuration = e.currentTarget.duration;
+                    logger.info("Video metadata loaded. Duration:", newDuration);
+                    
+                    if (newDuration === Infinity || newDuration < 1) {
+                      e.currentTarget.currentTime = 1e101;
+                      return;
+                    }
                     setDuration(newDuration);
-                    // Also update Оригинал track duration here to keep it in sync
+                    setVideoError(null);
+                    
+                    // Update Оригинал track duration if it exists
                     setProject(p => {
                       if (!p) return p;
                       const tracks = (p.tracks).map(t => {
@@ -3495,42 +3496,64 @@ export default function App() {
                       });
                       return { ...p, tracks };
                     });
-                  }
-                }}
-                onError={(e) => {
-                  const video = e.currentTarget;
-                  const error = video.error;
-                  if (!project?.videoPath && !project?.videoUrl) {
-                    return; // Ignore error if no video is expected
-                  }
+                  }}
+                  onDurationChange={(e) => {
+                    const newDuration = e.currentTarget.duration;
+                    if (newDuration !== Infinity && newDuration > 0) {
+                      setDuration(newDuration);
+                      // Also update Оригинал track duration here to keep it in sync
+                      setProject(p => {
+                        if (!p) return p;
+                        const tracks = (p.tracks).map(t => {
+                          if (t.name === 'Оригинал') {
+                            return {
+                              ...t,
+                              segments: (t.segments || []).map(s => 
+                                s.id === 'original-audio-seg' ? { ...s, duration: newDuration, fileDuration: newDuration } : s
+                              )
+                            };
+                          }
+                          return t;
+                        });
+                        return { ...p, tracks };
+                      });
+                    }
+                  }}
+                  onError={(e) => {
+                    const video = e.currentTarget;
+                    const error = video.error;
+                    if (!project?.videoPath && !project?.videoUrl) {
+                      return; // Ignore error if no video is expected
+                    }
 
-                  // If code 4 occurs on an element with crossOrigin, attempt fallback without crossOrigin
-                  if (error?.code === 4 && video.getAttribute('crossorigin')) {
-                    console.warn("Video failed with crossOrigin, attempting fallback without crossOrigin...");
-                    video.removeAttribute('crossorigin');
-                    video.load();
-                    return;
-                  }
+                    // If code 4 occurs on an element with crossOrigin, attempt fallback without crossOrigin
+                    if (error?.code === 4 && video.getAttribute('crossorigin')) {
+                      console.warn("Video failed with crossOrigin, attempting fallback without crossOrigin...");
+                      video.removeAttribute('crossorigin');
+                      video.load();
+                      return;
+                    }
 
-                  let message = "Видео не может быть загружено. Пожалуйста, проверьте формат файла.";
-                  
-                  if (error) {
-                    if (error.code === 1) message = "Воспроизведение прервано пользователем.";
-                    else if (error.code === 2) message = "Ошибка сети при загрузке видео.";
-                    else if (error.code === 3) message = "Ошибка декодирования (вероятно, из-за аудиокодека). Нажмите «Исправить воспроизведение» ниже, чтобы создать прокси.";
-                    else if (error.code === 4) message = "Формат видео не поддерживается или файл отсутствует.";
-                  }
-                  
-                  setVideoError(message);
-                  console.error("Video Playback Error:", {
-                    code: error?.code,
-                    message: error?.message,
-                    src: video.src || "Multiple sources",
-                    videoPath: project.videoPath,
-                    videoUrl: project.videoUrl
-                  });
-                }}
-              />
+                    let message = "Видео не может быть загружено. Пожалуйста, проверьте формат файла.";
+                    
+                    if (error) {
+                      if (error.code === 1) message = "Воспроизведение прервано пользователем.";
+                      else if (error.code === 2) message = "Ошибка сети при загрузке видео.";
+                      else if (error.code === 3) message = "Ошибка декодирования (вероятно, из-за аудиокодека). Нажмите «Исправить воспроизведение» ниже, чтобы создать прокси.";
+                      else if (error.code === 4) message = "Формат видео не поддерживается или файл отсутствует.";
+                    }
+                    
+                    setVideoError(message);
+                    console.error("Video Playback Error:", {
+                      code: error?.code,
+                      message: error?.message,
+                      src: video.src || "Multiple sources",
+                      videoPath: project.videoPath,
+                      videoUrl: project.videoUrl
+                    });
+                  }}
+                />
+              </StageVideoContainer>
             )}
 
             {project?.referenceAudioPath && (
@@ -3604,47 +3627,68 @@ export default function App() {
                 <div className="w-full h-full relative flex items-center justify-center bg-black overflow-hidden select-none">
                   {/* Fullscreen popup content */}
                   {(project.videoPath || project.videoUrl) && (
-                    <video 
-                      ref={videoRef}
-                      className="w-full h-full object-contain shadow-2xl"
-                      playsInline
-                      crossOrigin="anonymous"
-                      preload="metadata"
-                      onKeyDown={(e) => e.preventDefault()}
-                      onPlay={() => {
-                        if (!isPlayingRef.current) {
-                          setIsPlaying(true);
-                          if (projectRef.current) {
-                            playbackEngine.play(projectRef.current.tracks, videoRef.current?.currentTime || 0);
+                    <StageVideoContainer
+                      isExpandedPip={
+                        teleprompterMode === 'expanded' &&
+                        ((project.subtitles && project.subtitles.length > 0) || !!project.documentContent)
+                      }
+                      isPlaying={isPlaying}
+                      currentTime={currentTime}
+                      duration={duration}
+                      onTogglePlay={togglePlay}
+                      onExitExpanded={() => {
+                        setTeleprompterMode('bottom');
+                        saveTeleprompterPref({ mode: 'bottom' });
+                      }}
+                    >
+                      <video 
+                        ref={videoRef}
+                        className="w-full h-full object-contain shadow-2xl transition-[padding] duration-150 ease-out"
+                        style={{
+                          paddingLeft: 'var(--tp-left, 0px)',
+                          paddingRight: 'var(--tp-right, 0px)',
+                          paddingTop: 'var(--tp-top, 0px)',
+                          paddingBottom: 'var(--tp-bottom, 0px)',
+                        }}
+                        playsInline
+                        crossOrigin="anonymous"
+                        preload="metadata"
+                        onKeyDown={(e) => e.preventDefault()}
+                        onPlay={() => {
+                          if (!isPlayingRef.current) {
+                            setIsPlaying(true);
+                            if (projectRef.current) {
+                              playbackEngine.play(projectRef.current.tracks, videoRef.current?.currentTime || 0);
+                            }
                           }
-                        }
-                      }}
-                      onPause={() => {
-                        if (isPlayingRef.current) {
-                          setIsPlaying(false);
-                          playbackEngine.stop();
-                        }
-                      }}
-                      src={getVideoSource()}
-                      onLoadedMetadata={(e) => {
-                        let newDuration = e.currentTarget.duration;
-                        if (newDuration !== Infinity && newDuration > 0) {
-                          setDuration(newDuration);
-                        }
-                      }}
-                      onDurationChange={(e) => {
-                        const newDuration = e.currentTarget.duration;
-                        if (newDuration !== Infinity && newDuration > 0) {
-                          setDuration(newDuration);
-                        }
-                      }}
-                      onError={(e) => {
-                        const video = e.currentTarget;
-                        const error = video.error;
-                        if (!project?.videoPath && !project?.videoUrl) return;
-                        setVideoError(`Ошибка воспроизведения видео во втором окне: ${error?.message || error?.code}`);
-                      }}
-                    />
+                        }}
+                        onPause={() => {
+                          if (isPlayingRef.current) {
+                            setIsPlaying(false);
+                            playbackEngine.stop();
+                          }
+                        }}
+                        src={getVideoSource()}
+                        onLoadedMetadata={(e) => {
+                          let newDuration = e.currentTarget.duration;
+                          if (newDuration !== Infinity && newDuration > 0) {
+                            setDuration(newDuration);
+                          }
+                        }}
+                        onDurationChange={(e) => {
+                          const newDuration = e.currentTarget.duration;
+                          if (newDuration !== Infinity && newDuration > 0) {
+                            setDuration(newDuration);
+                          }
+                        }}
+                        onError={(e) => {
+                          const video = e.currentTarget;
+                          const error = video.error;
+                          if (!project?.videoPath && !project?.videoUrl) return;
+                          setVideoError(`Ошибка воспроизведения видео во втором окне: ${error?.message || error?.code}`);
+                        }}
+                      />
+                    </StageVideoContainer>
                   )}
                   
                   {/* Actor overlay including teleprompter and webcam over the video, fully responsive */}
@@ -3838,13 +3882,21 @@ export default function App() {
             )}
 
             {/* Video Overlay Controls */}
-            <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-6">
-              <div className="flex items-center justify-between">
+            <div 
+              className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-6 pointer-events-none"
+              style={{
+                paddingLeft: 'calc(var(--tp-left, 0px) + 1.5rem)',
+                paddingRight: 'calc(var(--tp-right, 0px) + 1.5rem)',
+                paddingTop: 'calc(var(--tp-top, 0px) + 1.5rem)',
+                paddingBottom: 'calc(var(--tp-bottom, 0px) + 1.5rem)',
+              }}
+            >
+              <div className="flex items-center justify-between pointer-events-auto">
                 <div className="flex items-center gap-4">
                   <button onClick={togglePlay} className="w-12 h-12 bg-white text-black rounded-full flex items-center justify-center hover:scale-110 transition-transform" title={isPlaying ? "Пауза" : "Воспроизведение"}>
                     {isPlaying ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current ml-1" />}
                   </button>
-                  <div className="text-sm font-mono">
+                  <div className="text-sm font-mono tabular-nums">
                     <span className="text-white">{Math.floor(currentTime / 60)}:{Math.floor(currentTime % 60).toString().padStart(2, '0')}</span>
                     <span className="text-zinc-500"> / {Math.floor(duration / 60)}:{Math.floor(duration % 60).toString().padStart(2, '0')}</span>
                   </div>
@@ -3853,27 +3905,29 @@ export default function App() {
                   <button 
                     onClick={() => {
                       const modeCycle: Record<TeleprompterMode, TeleprompterMode> = {
+                        bottom: 'top',
+                        top: 'left',
                         left: 'right',
-                        right: 'bottom',
-                        bottom: 'compact',
+                        right: 'compact',
                         compact: 'expanded',
-                        expanded: 'left',
+                        expanded: 'bottom',
                       };
-                      const next = modeCycle[teleprompterMode] || 'left';
+                      const next = modeCycle[teleprompterMode] || 'bottom';
                       setTeleprompterMode(next);
                       saveTeleprompterPref({ mode: next });
                     }}
                     className={cn(
-                      "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-all border text-xs font-bold",
+                      "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-all border text-xs font-bold whitespace-nowrap",
                       teleprompterMode === 'expanded' 
                         ? "bg-indigo-600 border-indigo-500 text-white shadow-sm" 
-                        : teleprompterMode === 'left' || teleprompterMode === 'right' || teleprompterMode === 'bottom'
+                        : teleprompterMode === 'left' || teleprompterMode === 'right' || teleprompterMode === 'bottom' || teleprompterMode === 'top'
                           ? "bg-indigo-950/80 border-indigo-500/50 text-indigo-200"
                           : "hover:bg-white/10 text-zinc-400 border-transparent"
                     )}
                     title={`Суфлер: ${
                       teleprompterMode === 'left' ? 'Привязан слева (клик: переключить)' :
                       teleprompterMode === 'right' ? 'Привязан справа (клик: переключить)' :
+                      teleprompterMode === 'top' ? 'Привязан сверху (клик: переключить)' :
                       teleprompterMode === 'bottom' ? 'Привязан снизу (клик: переключить)' :
                       teleprompterMode === 'expanded' ? 'Во весь экран (клик: переключить)' : 'Плавающий (клик: переключить)'
                     }`}
@@ -3882,6 +3936,7 @@ export default function App() {
                     <span className="hidden sm:inline text-[10px]">
                       {teleprompterMode === 'left' ? 'Слева' :
                        teleprompterMode === 'right' ? 'Справа' :
+                       teleprompterMode === 'top' ? 'Сверху' :
                        teleprompterMode === 'bottom' ? 'Снизу' :
                        teleprompterMode === 'expanded' ? 'Экран' : 'Суфлер'}
                     </span>
