@@ -59,7 +59,15 @@
           "process_backstage_remove_silence",
           "export_backstage_video",
           "export_blooper",
-          "force_stop_all"
+          "force_stop_all",
+          "get_startup_project_path",
+          "move_project_folder",
+          "relink_project_paths_on_disk",
+          "parse_script_file",
+          "lib_fetch_manga_info",
+          "lib_download_chapters",
+          "import_local_comic",
+          "save_comic_page_image"
         ],
         "deny": []
       }
