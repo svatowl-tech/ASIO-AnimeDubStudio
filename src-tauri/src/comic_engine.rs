@@ -1622,7 +1622,7 @@ fn extract_epub_local(file_path: &Path, project_path: &str) -> Result<ComicImpor
     if !image_pages.is_empty() && image_pages.len() >= text_chapters.len() {
         return Ok(ComicImportResult {
             id: format!("comic-epub-{}", safe_slug),
-            title: book_title,
+            title: book_title.clone(),
             source_type: "epub".to_string(),
             source_url: None,
             site_domain: None,
@@ -1633,7 +1633,7 @@ fn extract_epub_local(file_path: &Path, project_path: &str) -> Result<ComicImpor
                 id: format!("epub-{}-ch-1", safe_slug),
                 volume: "1".to_string(),
                 number: "1".to_string(),
-                title: book_title.clone(),
+                title: book_title,
                 branch_name: None,
                 pages: image_pages,
             }],
