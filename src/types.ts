@@ -1,3 +1,13 @@
+import type {
+  ComicProjectData,
+  ComicImportProgress,
+  ComicImportResultPayload,
+  LibDownloadRequest,
+  LibTitleInfo,
+} from './types/comic';
+
+export * from './types/comic';
+
 export interface SubtitleLine {
   id: string;
   start: number; // seconds
@@ -6,6 +16,9 @@ export interface SubtitleLine {
   role: string;
   needsFix?: boolean;
   fixComment?: string;
+  comicPinId?: string;
+  comicChapterId?: string;
+  comicPageIndex?: number;
 }
 
 export interface AudioSettings {
@@ -166,6 +179,7 @@ export interface Project {
   fixes?: Fix[]; // Сделаем опциональным
   uiState?: ProjectUIState;
   subtitlesOffset?: number; // Сдвиг таймингов субтитров в секундах
+  comic?: ComicProjectData; // Импортированный комикс / манхва / ранобэ
 }
 
 export interface AudioTrack {
@@ -300,6 +314,11 @@ declare global {
       createBlankVideo: (duration: number, outputPath: string) => Promise<BridgeResponse<string>>;
       getStartupProjectPath?: () => Promise<BridgeResponse<string | null>>;
       onOpenProjectFile?: (callback: (filePath: string) => void) => () => void;
+      libFetchMangaInfo?: (data: { url: string; token?: string | null; apiBase?: string | null }) => Promise<BridgeResponse<LibTitleInfo>>;
+      libDownloadChapters?: (request: LibDownloadRequest) => Promise<BridgeResponse<ComicImportResultPayload>>;
+      importLocalComic?: (data: { filePath: string; projectPath: string }) => Promise<BridgeResponse<ComicImportResultPayload>>;
+      saveComicPageImage?: (data: { projectPath: string; comicId: string; chapterId: string; fileName: string; bytes: number[] }) => Promise<BridgeResponse<string>>;
+      onComicImportProgress?: (callback: (progress: ComicImportProgress) => void) => () => void;
     };
   }
 }

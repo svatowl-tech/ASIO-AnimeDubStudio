@@ -1496,6 +1496,82 @@ export const tauriAPI = {
         return { success: false, error: String(err) };
     }
   },
+
+  libFetchMangaInfo: async (data: { url: string; token?: string | null; apiBase?: string | null }): Promise<BridgeResponse<any>> => {
+    if (!IS_TAURI) return { success: false, error: 'NOT_TAURI' };
+    try {
+      const result = await invoke('lib_fetch_manga_info', {
+        url: data.url,
+        token: data.token || null,
+        apiBase: data.apiBase || null,
+      });
+      return { success: true, data: result };
+    } catch (err) {
+      return { success: false, error: typeof err === 'string' ? err : String(err) };
+    }
+  },
+
+  libDownloadChapters: async (request: any): Promise<BridgeResponse<any>> => {
+    if (!IS_TAURI) return { success: false, error: 'NOT_TAURI' };
+    try {
+      const result = await invokeWithWatchdog('lib_download_chapters', { request }, {
+        progressEvent: 'comic-import-progress',
+        timeoutMs: 120000,
+      });
+      return { success: true, data: result };
+    } catch (err) {
+      return { success: false, error: typeof err === 'string' ? err : String(err) };
+    }
+  },
+
+  importLocalComic: async (data: { filePath: string; projectPath: string }): Promise<BridgeResponse<any>> => {
+    if (!IS_TAURI) return { success: false, error: 'NOT_TAURI' };
+    try {
+      const result = await invoke('import_local_comic', {
+        filePath: data.filePath,
+        projectPath: data.projectPath,
+      });
+      return { success: true, data: result };
+    } catch (err) {
+      return { success: false, error: typeof err === 'string' ? err : String(err) };
+    }
+  },
+
+  saveComicPageImage: async (data: { projectPath: string; comicId: string; chapterId: string; fileName: string; bytes: number[] }): Promise<BridgeResponse<string>> => {
+    if (!IS_TAURI) return { success: false, error: 'NOT_TAURI' };
+    try {
+      const result = await invoke<string>('save_comic_page_image', data);
+      return { success: true, data: result };
+    } catch (err) {
+      return { success: false, error: typeof err === 'string' ? err : String(err) };
+    }
+  },
+
+  onComicImportProgress: (callback: (progress: any) => void): (() => void) => {
+    if (!IS_TAURI) return () => {};
+    let unlistenFn: UnlistenFn | null = null;
+    let active = true;
+    listen('comic-import-progress', (event: any) => {
+      if (active && event?.payload) {
+        callback(event.payload);
+      }
+    }).then((u) => {
+      if (!active) {
+        u();
+      } else {
+        unlistenFn = u;
+        listenerRegistry.add(u);
+      }
+    }).catch(() => {});
+    return () => {
+      active = false;
+      if (unlistenFn) {
+        unlistenFn();
+        listenerRegistry.delete(unlistenFn);
+        unlistenFn = null;
+      }
+    };
+  },
 };
 
 export function setupTauriLegacyWrapper() {

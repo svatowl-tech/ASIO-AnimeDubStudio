@@ -152,6 +152,39 @@ export const TimelineCanvas = React.memo(({
       ctx.fillText(sub.text.substring(0, Math.floor(w / 4)), x + 4, 26);
     });
 
+    // Render timeline markers (including auto comic page markers)
+    if (project.markers && project.markers.length > 0) {
+      project.markers.forEach((marker) => {
+        if (marker.time < vRange.start - 5 || marker.time > vRange.end + 5) return;
+        const x = (marker.time * zoom) - offsetX;
+        const color = marker.color || '#6366f1';
+
+        // Vertical dashed guide line across tracks
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.45;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x, 14);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+        ctx.restore();
+
+        // Compact marker flag on ruler
+        const label = (marker.label || 'Метка').slice(0, 22);
+        ctx.font = 'bold 9px monospace';
+        const textWidth = ctx.measureText(label).width;
+        const badgeW = textWidth + 8;
+
+        ctx.fillStyle = color;
+        ctx.fillRect(x, 1, badgeW, 13);
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'left';
+        ctx.fillText(label, x + 4, 10.5);
+      });
+    }
+
   }, [dimensions, project, duration, zoom, vRange, isHighlightingMissingSubtitles]);
 
   // 2. Draw Dynamic Elements (Loop Range)
@@ -213,7 +246,8 @@ export const TimelineCanvas = React.memo(({
     prevProps.loopRange?.end === nextProps.loopRange?.end &&
     prevProps.project.selectedRole === nextProps.project.selectedRole &&
     JSON.stringify(prevProps.project.selectedRoles) === JSON.stringify(nextProps.project.selectedRoles) &&
-    prevProps.project.subtitles === nextProps.project.subtitles
+    prevProps.project.subtitles === nextProps.project.subtitles &&
+    prevProps.project.markers === nextProps.project.markers
   );
 });
 

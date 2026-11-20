@@ -17,7 +17,8 @@ import {
   Keyboard,
   Sparkles,
   User,
-  ChevronDown
+  ChevronDown,
+  BookOpen
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn, formatHotkey, getDefaultKeyMap } from '../lib/utils';
@@ -63,6 +64,7 @@ interface HeaderProps {
   hasBackstageSessions?: boolean;
   onOpenCastingModal?: () => void;
   onOpenDocumentModal?: () => void;
+  onOpenComicModal?: () => void;
   onUpdateDubberNick?: (nick: string) => void;
 }
 
@@ -166,6 +168,7 @@ const Header: React.FC<HeaderProps> = ({
   onLoadProject,
   onOpenCastingModal,
   onOpenDocumentModal,
+  onOpenComicModal,
   onUpdateDubberNick
 }) => {
   const { toggleSettings } = useUIState();
@@ -205,6 +208,7 @@ const Header: React.FC<HeaderProps> = ({
   }, [recentProjects]);
 
   const baseImportOptions = [
+    { icon: <BookOpen className="w-5 h-5 text-indigo-400" />, title: "Комикс / Манхва (Lib, CBZ, PDF, EPUB)", description: "Импорт глав с MangaLib, RanobeLib, SlashLib или локальный файл", onClick: () => { setShowImportModal(false); onOpenComicModal?.(); } },
     { icon: <FileVideo className="w-5 h-5 text-indigo-400" />, title: "Видео", description: "Открыть видеофайл для озвучки", onClick: () => { setShowImportModal(false); if (isDesktop) handleSelectVideo(); } },
     { icon: <FileText className="w-5 h-5 text-purple-400" />, title: "Субтитры", description: "Импортировать (.ass, .srt, .vtt, .fb2, .csv)", onClick: () => { setShowImportModal(false); if (isDesktop) handleSelectSubs(); } },
     { icon: <FileText className="w-5 h-5 text-blue-400" />, title: "Документ", description: "Импорт текстового документа с распределением времени", onClick: () => { setShowImportModal(false); if (onOpenDocumentModal) { onOpenDocumentModal(); } else if (isDesktop) { handleSelectDocument(); } } },

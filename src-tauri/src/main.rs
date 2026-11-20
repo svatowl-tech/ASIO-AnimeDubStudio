@@ -8,10 +8,12 @@ mod file_io;
 mod media_processor;
 mod logger;
 mod script_parser;
+mod comic_engine;
 
 use audio_engine::{get_audio_devices, start_recording, stop_recording, force_stop_all, check_crashes, AudioState, AudioRecorder};
 use logger::log_debug;
 use script_parser::parse_script_file;
+use comic_engine::{lib_fetch_manga_info, lib_download_chapters, import_local_comic, save_comic_page_image};
 use export_engine::{export_audio, export_stems, export_all_stems, quick_preview_export, batch_export, export_audio_book, export_backstage_video, export_blooper, process_backstage_shorts, process_backstage_remove_silence, export_backstage_assemble};
 use db::{AppState, init_db, save_project_to_db, load_project_from_db, migrate_json_to_db, save_subtitles, generate_stress_test, load_segments_in_range, check_project_assets, verify_project_files, cleanup_orphaned_files, relink_segment_file, calculate_file_hash, find_file_by_hash};
 use waveform_engine::{extract_audio_peaks_bin, generate_waveform_peaks};
@@ -572,7 +574,11 @@ fn main() {
             get_media_info,
             extract_mkv_assets,
             create_blank_video,
-            parse_script_file
+            parse_script_file,
+            lib_fetch_manga_info,
+            lib_download_chapters,
+            import_local_comic,
+            save_comic_page_image
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {

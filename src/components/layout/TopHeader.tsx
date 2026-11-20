@@ -32,6 +32,7 @@ interface TopHeaderProps {
   setExportOperation: (o: string) => void;
   onOpenCastingModal?: () => void;
   onOpenDocumentModal?: () => void;
+  onOpenComicModal?: () => void;
   onUpdateDubberNick?: (nick: string) => void;
 }
 
@@ -146,6 +147,7 @@ export const TopHeader: React.FC<TopHeaderProps> = (props) => {
       handleClearRecentProjects={clearRecentProjects}
       onOpenCastingModal={props.onOpenCastingModal}
       onOpenDocumentModal={props.onOpenDocumentModal}
+      onOpenComicModal={props.onOpenComicModal}
       onUpdateDubberNick={props.onUpdateDubberNick}
     />
   );

@@ -54,6 +54,10 @@ import AudioDeviceManager from './components/AudioDeviceManager';
 import ExportModal from './components/ExportModal';
 import CastingImportModal from './components/CastingImportModal';
 import DocumentImportModal from './components/DocumentImportModal';
+import { ComicImportModal } from './components/comic/ComicImportModal';
+import { ComicReaderStage } from './components/comic/ComicReaderStage';
+import { ComicNavigationPanel } from './components/comic/ComicNavigationPanel';
+import { importLocalComicFile } from './services/comic/comicImportService';
 import QuickImportModal from './components/QuickImportModal';
 import FixImportModal from './components/FixImportModal';
 import { ensureBlankVideoForProject } from './services/blankVideoService';
@@ -99,6 +103,7 @@ import { useTimelineState } from './hooks/useTimelineState';
 import { useTimelineHotkeys } from './hooks/useTimelineHotkeys';
 import { useTimelineHistory } from './hooks/useTimelineHistory';
 import { useProjectActions } from './hooks/useProjectActions';
+import { useComicSync } from './hooks/useComicSync';
 import { ProjectProvider } from './contexts/ProjectContext';
 import { TimelineProvider } from './contexts/TimelineContext';
 import LeftSidebar from './components/layout/LeftSidebar';
@@ -301,6 +306,20 @@ export default function App() {
     handleDiskSaveError
   );
 
+  const [isComicModalOpen, setIsComicModalOpen] = useState(false);
+  const [comicDropError, setComicDropError] = useState<string | null>(null);
+
+  const comicSync = useComicSync({
+    project,
+    setProject,
+    currentTime,
+    currentTimeRef,
+    isRecording,
+    duration,
+    setDuration,
+    onSeek: handleSeek,
+    saveSnapshot,
+  });
 
   const {
     isSessionRecording: isBackstageSessionRecording,
@@ -995,6 +1014,20 @@ export default function App() {
         continue;
       }
 
+      if (fileExt === '.cbz') {
+        try {
+          const importedComic = await importLocalComicFile({
+            filePath: path,
+            projectPath: project?.projectPath,
+          });
+          comicSync.handleComicImported(importedComic, project?.projectPath);
+        } catch (err) {
+          logger.error('Native CBZ drop error:', err);
+          setComicDropError(err instanceof Error ? err.message : 'Не удалось импортировать CBZ комикс.');
+        }
+        continue;
+      }
+
       if (fileExt === '' && window.electronAPI) {
         const probeRes = await window.electronAPI.loadProjectJson(path);
         if (probeRes.success && probeRes.data) {
@@ -1255,7 +1288,7 @@ export default function App() {
         }
       }
     }
-  }, [setProject, createDefaultProject, onLoadProject]);
+  }, [setProject, createDefaultProject, onLoadProject, project?.projectPath, comicSync.handleComicImported]);
 
   useEffect(() => {
     logger.info("Application mounted. Desktop API available:", !!window.electronAPI);
@@ -1330,6 +1363,21 @@ export default function App() {
     const dubFiles = allDroppedFiles.filter(f => f.name.toLowerCase().endsWith('.dub'));
     if (dubFiles.length > 0) {
       await onLoadProjectFromFile(dubFiles[0]);
+      return;
+    }
+
+    const cbzFiles = allDroppedFiles.filter(f => f.name.toLowerCase().endsWith('.cbz'));
+    if (cbzFiles.length > 0) {
+      try {
+        const importedComic = await importLocalComicFile({
+          file: cbzFiles[0],
+          projectPath: project?.projectPath,
+        });
+        comicSync.handleComicImported(importedComic, project?.projectPath);
+      } catch (err) {
+        logger.error('CBZ drop error:', err);
+        setComicDropError(err instanceof Error ? err.message : 'Не удалось импортировать CBZ комикс.');
+      }
       return;
     }
 
@@ -1576,7 +1624,7 @@ export default function App() {
         alert(msg);
       }
     }
-  }, [project, currentTimeRef.current, onLoadProjectFromFile]);
+  }, [project, currentTimeRef.current, onLoadProjectFromFile, comicSync.handleComicImported]);
 
   const { getRootProps, getInputProps, isDragActive: dropzoneActive } = useDropzone({ 
     onDrop,
@@ -1586,7 +1634,8 @@ export default function App() {
       'audio/*': ['.mp3', '.wav', '.flac', '.ogg', '.m4a'],
       'text/plain': ['.txt', '.csv', '.vtt'],
       'application/x-subrip': ['.srt'],
-      'application/octet-stream': ['.ass', '.srt', '.fb2', '.dub'],
+      'application/vnd.comicbook+zip': ['.cbz'],
+      'application/octet-stream': ['.ass', '.srt', '.fb2', '.dub', '.cbz'],
       'application/json': ['.dub'],
       'application/x-dubstudio-project': ['.dub']
     }
@@ -3267,6 +3316,7 @@ export default function App() {
         onOpenBackstageEditor={() => setShowBackstageEditor(true)}
         onOpenCastingModal={() => setIsCastingModalOpen(true)}
         onOpenDocumentModal={() => setIsDocumentModalOpen(true)}
+        onOpenComicModal={() => setIsComicModalOpen(true)}
         onUpdateDubberNick={handleUpdateDubberNick}
         handleBatchExport={handleBatchExport}
         handleMuxVideo={handleMuxVideo}
@@ -3322,6 +3372,28 @@ export default function App() {
                   <p className="text-sm text-zinc-600">Выберите существующий проект или создайте новый, чтобы начать</p>
                 </div>
               </div>
+            ) : project.comic && !isPopoutOpen && !popupBlocked && (comicSync.stageView === 'comic' || (!project.videoPath && !project.videoUrl)) ? (
+              <ComicReaderStage
+                comic={project.comic}
+                projectPath={project.projectPath}
+                roles={project.roles || []}
+                activeRole={project.selectedRole || project.roles?.[0] || 'Персонаж 1'}
+                currentTime={currentTime}
+                isRecording={isRecording}
+                hasVideo={!!(project.videoPath || project.videoUrl)}
+                isRightNavCollapsed={comicSync.isRightNavCollapsed}
+                scrollRequestToken={comicSync.scrollRequestToken}
+                onSwitchToVideo={() => comicSync.setStageView('video')}
+                onExpandRightNav={() => comicSync.setIsRightNavCollapsed(false)}
+                onViewModeChange={comicSync.handleViewModeChange}
+                onZoomChange={comicSync.handleZoomChange}
+                onToggleTimelineSync={comicSync.handleToggleTimelineSync}
+                onActivePageChange={comicSync.handleActivePageChange}
+                onAddPin={comicSync.handleAddBubblePin}
+                onDeletePin={comicSync.handleDeleteBubblePin}
+                onSelectPin={comicSync.handleSelectPin}
+                onPdfPageCountResolved={comicSync.handlePdfPageCountResolved}
+              />
             ) : (!project.videoPath && !project.videoUrl) ? (
               <AudioDAWView 
                 project={project}
@@ -3582,8 +3654,18 @@ export default function App() {
                 }}
               />
             )}
+            {project?.comic && (project.videoPath || project.videoUrl) && comicSync.stageView === 'video' && !isPopoutOpen && (
+              <button
+                onClick={() => comicSync.setStageView('comic')}
+                className="absolute top-3 left-3 z-30 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900/90 hover:bg-indigo-600 text-zinc-200 hover:text-white border border-white/10 text-xs font-medium shadow-lg transition-colors"
+                title="Вернуться к просмотру комикса"
+              >
+                <BookOpen className="w-3.5 h-3.5" />
+                Комикс
+              </button>
+            )}
             
-            {!isPopoutOpen && project && (
+            {!isPopoutOpen && project && !(project.comic && (comicSync.stageView === 'comic' || (!project.videoPath && !project.videoUrl))) && (
               <ActorOverlay 
                 currentLine={currentLine} 
                 nextLine={nextLine} 
@@ -3882,6 +3964,7 @@ export default function App() {
             )}
 
             {/* Video Overlay Controls */}
+            {!(project?.comic && !isPopoutOpen && !popupBlocked && (comicSync.stageView === 'comic' || (!project.videoPath && !project.videoUrl))) && (
             <div 
               className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-6 pointer-events-none"
               style={{
@@ -3955,6 +4038,7 @@ export default function App() {
                 </div>
               </div>
             </div>
+            )}
 
             {/* Webcam Overlay removed - consolidated into ActorOverlay */}
           </div>
@@ -4152,6 +4236,19 @@ export default function App() {
             </div>
           </div>
         </section>
+
+        {project?.comic && (
+          <ComicNavigationPanel
+            comic={project.comic}
+            projectPath={project.projectPath}
+            width={comicSync.rightNavWidth}
+            isCollapsed={comicSync.isRightNavCollapsed}
+            onWidthChange={comicSync.setRightNavWidth}
+            onToggleCollapse={() => comicSync.setIsRightNavCollapsed((v) => !v)}
+            onSelectChapter={comicSync.handleSelectChapter}
+            onSelectPage={comicSync.handleSelectPage}
+          />
+        )}
       </main>
 
       <QuickImportModal 
@@ -4222,6 +4319,28 @@ export default function App() {
           onClose={() => setIsDocumentModalOpen(false)}
           onImportDocument={handleImportDocumentData}
         />
+      )}
+
+      {isComicModalOpen && (
+        <ComicImportModal
+          projectPath={project?.projectPath}
+          onClose={() => setIsComicModalOpen(false)}
+          onComicImported={comicSync.handleComicImported}
+        />
+      )}
+
+      {comicDropError && (
+        <div className="fixed bottom-4 right-4 z-[220] max-w-sm bg-zinc-900 border border-rose-500/40 rounded-xl shadow-2xl px-4 py-3 flex items-start gap-3 text-xs text-rose-200">
+          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+          <div className="flex-1 leading-relaxed">{comicDropError}</div>
+          <button
+            onClick={() => setComicDropError(null)}
+            className="p-0.5 text-zinc-400 hover:text-white transition-colors"
+            title="Закрыть"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
       )}
       
       <StyledExportOverlay 
