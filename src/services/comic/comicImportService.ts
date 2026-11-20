@@ -27,9 +27,10 @@ const DEFAULT_API_BASES = [
 ];
 
 const FALLBACK_IMAGE_SERVERS = [
+  'https://img3.cdnlibs.org',
+  'https://img3.cdnrulib.link',
+  'https://img2.imglib.info',
   'https://img33.imgslib.link',
-  'https://img3.mixlib.me',
-  'https://img2.mixlib.me',
 ];
 
 function isDesktopRuntime(): boolean {
@@ -108,10 +109,13 @@ export async function fetchLibTitleInfo(
 
   for (const base of bases) {
     try {
-      const resp = await fetch(
-        `${base}/manga/${parsed.data.slug}?fields[]=summary&fields[]=chapters_count&fields[]=otherNames`,
+      let resp = await fetch(
+        `${base}/manga/${parsed.data.slug}?fields[]=summary&fields[]=otherNames`,
         { headers }
       );
+      if (resp.status === 422) {
+        resp = await fetch(`${base}/manga/${parsed.data.slug}`, { headers });
+      }
       if (resp.status === 401 || resp.status === 403) {
         throw new Error(
           `Сервер ограничил доступ (HTTP ${resp.status}). Попробуйте указать Bearer-токен в настройках доступа.`
@@ -169,6 +173,12 @@ export async function fetchLibTitleInfo(
   const rusTitle = data.rus_name ? String(data.rus_name).trim() : null;
   const engTitle = String(data.eng_name || data.name || parsed.data.slug).trim();
 
+  const summaryText = data.summary
+    ? typeof data.summary === 'string'
+      ? data.summary.trim()
+      : extractPlainParagraphsFromContent(data.summary).join(' ').trim()
+    : null;
+
   return {
     slug: parsed.data.slug,
     siteId: parsed.data.siteId,
@@ -177,7 +187,7 @@ export async function fetchLibTitleInfo(
     title: rusTitle || engTitle,
     rusTitle,
     coverUrl: data.cover?.default || data.cover?.thumbnail || null,
-    summary: data.summary ? String(data.summary).trim() : null,
+    summary: summaryText || null,
     isRanobe: parsed.data.isRanobe,
     chapters,
   };
@@ -261,12 +271,20 @@ export async function downloadLibChapters(params: {
         const constJson = await constResp.json();
         const servers = constJson?.data?.imageServers;
         if (Array.isArray(servers)) {
-          const matched = servers.find(
+          const valid = servers.filter(
             (s: any) =>
-              s?.id === 'main' &&
+              s?.id !== 'crop' &&
+              typeof s?.url === 'string' &&
+              s.url.trim().startsWith('https://') &&
               (!Array.isArray(s.site_ids) || s.site_ids.includes(params.titleInfo.siteId))
           );
-          if (matched?.url) imageServer = String(matched.url).replace(/\/+$/, '');
+          const priority = ['download', 'secondary', 'compress', 'main'];
+          valid.sort((a: any, b: any) => {
+            const ia = priority.indexOf(a.id);
+            const ib = priority.indexOf(b.id);
+            return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+          });
+          if (valid[0]?.url) imageServer = String(valid[0].url).replace(/\/+$/, '');
         }
       }
     } catch {

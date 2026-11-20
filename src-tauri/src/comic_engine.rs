@@ -43,10 +43,10 @@ const ALLOWED_LIB_API_HOSTS: &[&str] = &[
 ];
 
 const FALLBACK_IMAGE_SERVERS: &[&str] = &[
+    "https://img3.cdnlibs.org",
+    "https://img3.cdnrulib.link",
+    "https://img2.imglib.info",
     "https://img33.imgslib.link",
-    "https://img3.mixlib.me",
-    "https://img2.mixlib.me",
-    "https://img4.imgslib.link",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -625,6 +625,24 @@ fn chunk_paragraphs_into_pages(paragraphs: Vec<String>, chapter_id: &str) -> Vec
 }
 
 fn guess_image_ext(url_path: &str, content_type: Option<&str>) -> &'static str {
+    if let Some(ct) = content_type {
+        let ct_l = ct.to_lowercase();
+        if ct_l.contains("webp") {
+            return "webp";
+        }
+        if ct_l.contains("png") {
+            return "png";
+        }
+        if ct_l.contains("gif") {
+            return "gif";
+        }
+        if ct_l.contains("avif") {
+            return "avif";
+        }
+        if ct_l.contains("jpeg") || ct_l.contains("jpg") {
+            return "jpg";
+        }
+    }
     let clean = url_path.split('?').next().unwrap_or(url_path).to_lowercase();
     if clean.ends_with(".webp") {
         return "webp";
@@ -640,21 +658,6 @@ fn guess_image_ext(url_path: &str, content_type: Option<&str>) -> &'static str {
     }
     if clean.ends_with(".jpeg") || clean.ends_with(".jpg") {
         return "jpg";
-    }
-    if let Some(ct) = content_type {
-        let ct_l = ct.to_lowercase();
-        if ct_l.contains("webp") {
-            return "webp";
-        }
-        if ct_l.contains("png") {
-            return "png";
-        }
-        if ct_l.contains("gif") {
-            return "gif";
-        }
-        if ct_l.contains("avif") {
-            return "avif";
-        }
     }
     "jpg"
 }
@@ -683,9 +686,13 @@ async fn resolve_lib_image_servers(
             .and_then(|d| d.get("imageServers"))
             .and_then(|s| s.as_array())
         {
-            // Order: main -> secondary -> compress -> others
+            // Order: download -> secondary -> compress -> main (skip crop-only servers)
             let mut prioritized: Vec<(u8, String)> = Vec::new();
             for item in list {
+                let server_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if server_id == "crop" {
+                    continue;
+                }
                 let matches_site = item
                     .get("site_ids")
                     .and_then(|v| v.as_array())
@@ -695,12 +702,13 @@ async fn resolve_lib_image_servers(
                     continue;
                 }
                 if let Some(raw_url) = item.get("url").and_then(|u| u.as_str()) {
-                    if validate_https_url(raw_url).is_ok() {
-                        let prio = match item.get("id").and_then(|v| v.as_str()).unwrap_or("") {
-                            "main" => 0,
+                    if !raw_url.trim().is_empty() && validate_https_url(raw_url).is_ok() {
+                        let prio = match server_id {
+                            "download" => 0,
                             "secondary" => 1,
                             "compress" => 2,
-                            _ => 3,
+                            "main" => 3,
+                            _ => 4,
                         };
                         prioritized.push((prio, raw_url.trim_end_matches('/').to_string()));
                     }
@@ -741,7 +749,7 @@ pub async fn lib_fetch_manga_info(
 
     for base in &bases {
         let info_url = format!(
-            "{}/manga/{}?fields[]=summary&fields[]=chapters_count&fields[]=otherNames",
+            "{}/manga/{}?fields[]=summary&fields[]=otherNames",
             base, slug
         );
         match fetch_json_with_retry(&client, &info_url).await {
@@ -751,7 +759,22 @@ pub async fn lib_fetch_manga_info(
                 break;
             }
             Err(e) => {
-                last_err = e;
+                // Fallback without fields[] in case a site mirror rejects optional field names (HTTP 422)
+                if e.contains("422") {
+                    let plain_url = format!("{}/manga/{}", base, slug);
+                    match fetch_json_with_retry(&client, &plain_url).await {
+                        Ok(v) => {
+                            manga_json = Some(v);
+                            working_base = base.clone();
+                            break;
+                        }
+                        Err(e2) => {
+                            last_err = e2;
+                        }
+                    }
+                } else {
+                    last_err = e;
+                }
             }
         }
     }
@@ -789,11 +812,27 @@ pub async fn lib_fetch_manga_info(
         .map(|s| s.to_string())
         .filter(|u| validate_https_url(u).is_ok());
 
-    let summary = data
-        .get("summary")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let summary = data.get("summary").and_then(|val| match val {
+        Value::String(s) => {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        Value::Object(_) | Value::Array(_) => {
+            let mut paras = Vec::new();
+            extract_prosemirror_paragraphs(val, &mut paras);
+            let joined = paras.join(" ").trim().to_string();
+            if joined.is_empty() {
+                None
+            } else {
+                Some(joined)
+            }
+        }
+        _ => None,
+    });
 
     let chapters_url = format!("{}/manga/{}/chapters", working_base, slug);
     let chapters_json = fetch_json_with_retry(&client, &chapters_url).await?;
@@ -1116,6 +1155,17 @@ pub async fn lib_download_chapters(
                                         .get("content-type")
                                         .and_then(|h| h.to_str().ok())
                                         .map(|s| s.to_string());
+                                    let is_html = ct
+                                        .as_deref()
+                                        .map(|s| s.to_lowercase().contains("text/html"))
+                                        .unwrap_or(false);
+                                    if is_html {
+                                        err_msg = format!(
+                                            "Сервер вернул HTML вместо изображения (стр. {})",
+                                            p_idx + 1
+                                        );
+                                        break;
+                                    }
                                     if let Ok(bytes) = resp.bytes().await {
                                         if !bytes.is_empty() {
                                             downloaded = Some((bytes.to_vec(), ct, full_url.clone()));
