@@ -251,8 +251,8 @@ export const ComicImportModal: React.FC<ComicImportModalProps> = ({
   const handlePickLocalFile = async () => {
     if (isDesktop && window.electronAPI?.openFile) {
       const res = await window.electronAPI.openFile({
-        title: 'Выберите файл комикса (.cbz, .pdf, .epub)',
-        filters: [{ name: 'Комиксы и книги', extensions: ['cbz', 'pdf', 'epub', 'zip'] }],
+        title: 'Выберите файл комикса (.cbz, .cbr, .fb2, .pdf, .epub)',
+        filters: [{ name: 'Комиксы и книги', extensions: ['cbz', 'cbr', 'fb2', 'pdf', 'epub', 'zip'] }],
       });
       if (res.success && res.data?.path) {
         await handleLocalFileProcess(undefined, res.data.path);
@@ -293,7 +293,7 @@ export const ComicImportModal: React.FC<ComicImportModalProps> = ({
                 Импорт комикса / манхвы
               </h2>
               <p className="text-xs text-zinc-400 truncate">
-                Сайты семейства Lib (MangaLib, RanobeLib...) и файлы CBZ, PDF, EPUB
+                Сайты семейства Lib (MangaLib, RanobeLib...) и файлы CBZ, CBR, FB2, PDF, EPUB
               </p>
             </div>
           </div>
@@ -342,7 +342,7 @@ export const ComicImportModal: React.FC<ComicImportModalProps> = ({
               )}
             >
               <FileArchive className="w-4 h-4" />
-              <span>Локальный файл (.cbz, .pdf, .epub)</span>
+              <span>Локальный файл (.cbz, .cbr, .fb2, .pdf, .epub)</span>
             </button>
           </div>
         </div>
@@ -589,12 +589,12 @@ export const ComicImportModal: React.FC<ComicImportModalProps> = ({
               )}
             </>
           ) : (
-            /* Local File Tab (.cbz, .pdf, .epub) */
+            /* Local File Tab (.cbz, .cbr, .fb2, .pdf, .epub) */
             <div className="space-y-4">
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".cbz,.pdf,.epub,.zip"
+                accept=".cbz,.cbr,.fb2,.pdf,.epub,.zip"
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
@@ -635,7 +635,7 @@ export const ComicImportModal: React.FC<ComicImportModalProps> = ({
                     Нажмите для выбора или перетащите файл комикса
                   </p>
                   <p className="text-xs text-zinc-400">
-                    Поддерживаются архивы CBZ, документы PDF и книги/манга EPUB
+                    Поддерживаются архивы CBZ / CBR, книги и комиксы FB2, документы PDF и EPUB
                   </p>
                 </div>
                 <span className="mt-1 px-4 py-1.5 rounded-lg bg-indigo-600 text-xs font-semibold text-white">

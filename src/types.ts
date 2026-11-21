@@ -19,6 +19,7 @@ export interface SubtitleLine {
   comicPinId?: string;
   comicChapterId?: string;
   comicPageIndex?: number;
+  comicTrackId?: string;
 }
 
 export interface AudioSettings {
@@ -57,6 +58,7 @@ export interface AudioSettings {
     sampleRate: number;
   };
   playOriginalTrackSegments?: boolean;
+  prerollSeconds?: number;
 }
 
 export interface BackstageSession {
@@ -137,6 +139,7 @@ export interface Marker {
   time: number; // seconds
   label?: string;
   color?: string;
+  trackId?: string;
 }
 
 export type TeleprompterMode = 'compact' | 'expanded' | 'left' | 'right' | 'top' | 'bottom';

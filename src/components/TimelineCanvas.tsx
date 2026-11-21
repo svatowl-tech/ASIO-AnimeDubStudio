@@ -152,9 +152,15 @@ export const TimelineCanvas = React.memo(({
       ctx.fillText(sub.text.substring(0, Math.floor(w / 4)), x + 4, 26);
     });
 
-    // Render timeline markers (including auto comic page markers)
+    // Render timeline markers (track-bound comic markers are scoped to the currently armed track)
     if (project.markers && project.markers.length > 0) {
+      const activeTrackId =
+        project.tracks?.find((t) => t.isArmed)?.id ||
+        project.tracks?.find((t) => t.name !== 'Оригинал')?.id ||
+        project.tracks?.[0]?.id;
+
       project.markers.forEach((marker) => {
+        if (marker.trackId && activeTrackId && marker.trackId !== activeTrackId) return;
         if (marker.time < vRange.start - 5 || marker.time > vRange.end + 5) return;
         const x = (marker.time * zoom) - offsetX;
         const color = marker.color || '#6366f1';
@@ -247,7 +253,9 @@ export const TimelineCanvas = React.memo(({
     prevProps.project.selectedRole === nextProps.project.selectedRole &&
     JSON.stringify(prevProps.project.selectedRoles) === JSON.stringify(nextProps.project.selectedRoles) &&
     prevProps.project.subtitles === nextProps.project.subtitles &&
-    prevProps.project.markers === nextProps.project.markers
+    prevProps.project.markers === nextProps.project.markers &&
+    (prevProps.project.tracks?.find((t) => t.isArmed)?.id || '') ===
+      (nextProps.project.tracks?.find((t) => t.isArmed)?.id || '')
   );
 });
 

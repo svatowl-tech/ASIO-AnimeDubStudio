@@ -1,4 +1,5 @@
 import JSZip from 'jszip';
+import { createExtractorFromData } from 'node-unrar-js';
 import * as pdfjsLib from 'pdfjs-dist';
 import { ComicChapter, ComicImportResultPayload, ComicPage } from '../../types/comic';
 import {
@@ -15,6 +16,26 @@ if (typeof window !== 'undefined' && pdfjsLib.GlobalWorkerOptions) {
     'pdfjs-dist/build/pdf.worker.min.mjs',
     import.meta.url
   ).toString();
+}
+
+let cachedUnrarWasmPromise: Promise<ArrayBuffer> | null = null;
+
+async function loadUnrarWasmBinary(): Promise<ArrayBuffer> {
+  if (!cachedUnrarWasmPromise) {
+    const wasmUrl = new URL('node-unrar-js/esm/js/unrar.wasm', import.meta.url).toString();
+    cachedUnrarWasmPromise = fetch(wasmUrl)
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`Не удалось загрузить WASM-модуль unrar (HTTP ${res.status}).`);
+        }
+        return res.arrayBuffer();
+      })
+      .catch((err) => {
+        cachedUnrarWasmPromise = null;
+        throw err;
+      });
+  }
+  return cachedUnrarWasmPromise;
 }
 
 interface CachedPdfEntry {
@@ -72,7 +93,7 @@ function resolveZipRelativePath(baseDir: string, href: string): string | null {
   return parts.join('/');
 }
 
-function mimeFromFileName(name: string): string {
+export function mimeFromFileName(name: string): string {
   const lower = name.toLowerCase();
   if (lower.endsWith('.png')) return 'image/png';
   if (lower.endsWith('.webp')) return 'image/webp';
@@ -82,12 +103,510 @@ function mimeFromFileName(name: string): string {
   return 'image/jpeg';
 }
 
+export function guessExtFromName(name: string): string {
+  const clean = name.split('?')[0].split('#')[0];
+  const ext = clean.split('.').pop()?.toLowerCase() || '';
+  if (['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'bmp'].includes(ext)) {
+    return ext === 'jpeg' ? 'jpg' : ext;
+  }
+  return 'jpg';
+}
+
+function normalizeArchiveEntryPath(rawPath: string): string | null {
+  const normalized = rawPath.replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!normalized || normalized.includes('__MACOSX') || normalized.includes('..')) {
+    return null;
+  }
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length === 0) return null;
+  const fileName = parts[parts.length - 1];
+  if (fileName.startsWith('.')) return null;
+  return parts.join('/');
+}
+
+function isZipSignature(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 4 &&
+    bytes[0] === 0x50 &&
+    bytes[1] === 0x4b &&
+    (bytes[2] === 0x03 || bytes[2] === 0x05 || bytes[2] === 0x07) &&
+    (bytes[3] === 0x04 || bytes[3] === 0x06 || bytes[3] === 0x08)
+  );
+}
+
+export interface ExtractedArchiveImage {
+  path: string;
+  data: Uint8Array;
+}
+
+/**
+ * Extracts image entries from a CBR archive (RAR4/RAR5 via WASM unrar, or ZIP-disguised CBR via JSZip).
+ * Returns sanitized relative paths and raw image byte buffers.
+ */
+export async function extractCbrImageEntries(
+  buffer: ArrayBuffer
+): Promise<ExtractedArchiveImage[]> {
+  const bytes = new Uint8Array(buffer);
+  const results: ExtractedArchiveImage[] = [];
+
+  if (isZipSignature(bytes)) {
+    const zip = await JSZip.loadAsync(buffer);
+    const pending: Array<{ path: string; entry: JSZip.JSZipObject }> = [];
+    zip.forEach((rel, entry) => {
+      if (entry.dir) return;
+      const safe = normalizeArchiveEntryPath(rel);
+      if (!safe) return;
+      const fileName = safe.split('/').pop() || '';
+      if (!isImageFile(fileName)) return;
+      pending.push({ path: safe, entry });
+    });
+
+    for (const item of pending) {
+      const data = await item.entry.async('uint8array');
+      if (data.length > 0) {
+        results.push({ path: item.path, data });
+      }
+    }
+    return results;
+  }
+
+  const wasmBinary = await loadUnrarWasmBinary();
+  let extractor;
+  try {
+    extractor = await createExtractorFromData({
+      wasmBinary,
+      data: buffer,
+    });
+  } catch (err: any) {
+    throw new Error(
+      `Не удалось открыть CBR-архив (${err?.message || 'повреждённый или неподдерживаемый RAR'}).`
+    );
+  }
+
+  try {
+    const extracted = extractor.extract({
+      files: (header) => {
+        if (header.flags.directory) return false;
+        const safe = normalizeArchiveEntryPath(header.name);
+        if (!safe) return false;
+        const fileName = safe.split('/').pop() || '';
+        return isImageFile(fileName);
+      },
+    });
+
+    for (const file of extracted.files) {
+      if (file.fileHeader.flags.directory || !file.extraction || file.extraction.length === 0) {
+        continue;
+      }
+      const safe = normalizeArchiveEntryPath(file.fileHeader.name);
+      if (!safe) continue;
+      // Copy buffer so Emscripten heap reuse cannot mutate extracted page data
+      results.push({
+        path: safe,
+        data: new Uint8Array(file.extraction),
+      });
+    }
+  } catch (err: any) {
+    const reason = String(err?.reason || err?.message || '');
+    if (reason.includes('PASSWORD')) {
+      throw new Error('CBR-архив защищён паролем. Снимите пароль с архива перед импортом.');
+    }
+    throw new Error(`Ошибка распаковки CBR-архива: ${err?.message || 'некорректный RAR-файл'}.`);
+  }
+
+  return results;
+}
+
+export async function parseLocalCbrInBrowser(file: File): Promise<ComicImportResultPayload> {
+  const stem = file.name.replace(/\.[^.]+$/, '') || 'comic';
+  const safeSlug = sanitizeSlug(stem, 'cbr_comic');
+  const buffer = await file.arrayBuffer();
+  const entries = await extractCbrImageEntries(buffer);
+
+  if (entries.length === 0) {
+    throw new Error('В CBR-архиве не найдено изображений страниц.');
+  }
+
+  const grouped = new Map<string, ExtractedArchiveImage[]>();
+  for (const item of entries) {
+    const parts = item.path.split('/');
+    const dirKey = parts.slice(0, -1).join('/');
+    if (!grouped.has(dirKey)) grouped.set(dirKey, []);
+    grouped.get(dirKey)!.push(item);
+  }
+
+  const sortedDirs = Array.from(grouped.keys()).sort(compareNatural);
+  const chapters: ComicChapter[] = [];
+  let coverPath: string | null = null;
+
+  for (let chIdx = 0; chIdx < sortedDirs.length; chIdx++) {
+    const dirKey = sortedDirs[chIdx];
+    const items = grouped.get(dirKey)!.sort((a, b) => compareNatural(a.path, b.path));
+    const chId = `cbr-${safeSlug}-ch-${chIdx + 1}`;
+    const pages: ComicPage[] = [];
+
+    for (let pIdx = 0; pIdx < items.length; pIdx++) {
+      const item = items[pIdx];
+      const blob = new Blob([item.data as unknown as BlobPart], { type: mimeFromFileName(item.path) });
+      const blobUrl = URL.createObjectURL(blob);
+      if (!coverPath) coverPath = blobUrl;
+
+      pages.push({
+        id: `${chId}-p-${pIdx + 1}`,
+        index: pIdx,
+        imagePath: blobUrl,
+      });
+    }
+
+    const dirTitle = dirKey ? dirKey.split('/').pop() || dirKey : `Глава ${chIdx + 1}`;
+    chapters.push({
+      id: chId,
+      volume: '1',
+      number: String(chIdx + 1),
+      title: dirTitle,
+      pages,
+    });
+  }
+
+  return {
+    id: `comic-cbr-${safeSlug}`,
+    title: stem,
+    sourceType: 'cbr',
+    coverPath,
+    isRanobe: false,
+    chapters,
+  };
+}
+
+function decodeFb2BytesInBrowser(bytes: Uint8Array): string {
+  const slice =
+    bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
+      ? bytes.subarray(3)
+      : bytes;
+
+  const headerPreview = new TextDecoder('ascii', { fatal: false })
+    .decode(slice.subarray(0, Math.min(256, slice.length)))
+    .toLowerCase();
+
+  const declaredCp1251 =
+    headerPreview.includes('windows-1251') || headerPreview.includes('cp1251');
+
+  if (!declaredCp1251) {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(slice);
+    } catch {
+      // Fallback to windows-1251 below
+    }
+  }
+
+  try {
+    return new TextDecoder('windows-1251').decode(slice);
+  } catch {
+    return new TextDecoder('utf-8', { fatal: false }).decode(slice);
+  }
+}
+
+function base64ToBlobUrl(rawBase64: string, contentType: string, fallbackName: string): string | null {
+  try {
+    const cleaned = rawBase64.replace(/\s+/g, '');
+    if (!cleaned) return null;
+    const binStr = atob(cleaned);
+    const bytes = new Uint8Array(binStr.length);
+    for (let i = 0; i < binStr.length; i++) {
+      bytes[i] = binStr.charCodeAt(i);
+    }
+    const mime = contentType.trim() || mimeFromFileName(fallbackName);
+    return URL.createObjectURL(new Blob([bytes], { type: mime }));
+  } catch {
+    return null;
+  }
+}
+
+function getImageHrefAttr(el: Element): string | null {
+  for (let i = 0; i < el.attributes.length; i++) {
+    const attr = el.attributes[i];
+    const localName = attr.name.includes(':') ? attr.name.split(':').pop() : attr.name;
+    if (localName === 'href') {
+      const cleaned = attr.value.replace(/^#/, '').trim();
+      if (cleaned) return cleaned;
+    }
+  }
+  return null;
+}
+
+interface ParsedFb2Section {
+  title: string;
+  items: Array<{ type: 'text'; value: string } | { type: 'image'; id: string }>;
+}
+
+function collectFb2Sections(parent: Element, out: ParsedFb2Section[]): void {
+  const childSections: Element[] = [];
+  for (const child of Array.from(parent.children)) {
+    const tag = child.localName?.toLowerCase() || child.tagName.toLowerCase();
+    if (tag === 'section') {
+      childSections.push(child);
+    }
+  }
+
+  if (childSections.length === 0) {
+    const items: ParsedFb2Section['items'] = [];
+    let title = '';
+    for (const child of Array.from(parent.children)) {
+      const tag = child.localName?.toLowerCase() || child.tagName.toLowerCase();
+      if (tag === 'title') {
+        const text = (child.textContent || '').replace(/\s+/g, ' ').trim();
+        if (text && !title) title = text;
+      } else if (tag === 'image') {
+        const href = getImageHrefAttr(child);
+        if (href) items.push({ type: 'image', id: href });
+      } else if (tag === 'p' || tag === 'v' || tag === 'subtitle' || tag === 'text-author') {
+        const text = (child.textContent || '').replace(/\s+/g, ' ').trim();
+        if (text) items.push({ type: 'text', value: text });
+      } else if (tag === 'poem' || tag === 'stanza' || tag === 'cite' || tag === 'epigraph') {
+        const nested = Array.from(child.querySelectorAll('p, v, subtitle, text-author, image'));
+        for (const n of nested) {
+          const nTag = n.localName?.toLowerCase() || n.tagName.toLowerCase();
+          if (nTag === 'image') {
+            const href = getImageHrefAttr(n);
+            if (href) items.push({ type: 'image', id: href });
+          } else {
+            const text = (n.textContent || '').replace(/\s+/g, ' ').trim();
+            if (text) items.push({ type: 'text', value: text });
+          }
+        }
+      }
+    }
+    if (items.length > 0) {
+      out.push({ title, items });
+    }
+    return;
+  }
+
+  // Parent section has nested sections: flush any direct intro content first, then recurse
+  let parentTitle = '';
+  const directItems: ParsedFb2Section['items'] = [];
+  for (const child of Array.from(parent.children)) {
+    const tag = child.localName?.toLowerCase() || child.tagName.toLowerCase();
+    if (tag === 'section') continue;
+    if (tag === 'title') {
+      const text = (child.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text && !parentTitle) parentTitle = text;
+    } else if (tag === 'image') {
+      const href = getImageHrefAttr(child);
+      if (href) directItems.push({ type: 'image', id: href });
+    } else if (tag === 'p' || tag === 'v' || tag === 'subtitle' || tag === 'text-author') {
+      const text = (child.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text) directItems.push({ type: 'text', value: text });
+    }
+  }
+  if (directItems.length > 0) {
+    out.push({ title: parentTitle, items: directItems });
+  }
+  for (const sec of childSections) {
+    collectFb2Sections(sec, out);
+  }
+}
+
+export function parseLocalFb2Bytes(bytes: Uint8Array, stem: string): ComicImportResultPayload {
+  const xmlText = decodeFb2BytesInBrowser(bytes);
+  const safeSlug = sanitizeSlug(stem, 'fb2_comic');
+  const parser = new DOMParser();
+
+  let doc = parser.parseFromString(xmlText, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length > 0) {
+    doc = parser.parseFromString(xmlText, 'text/html');
+  }
+
+  let bookTitle = stem;
+  const bookTitleEl = doc.getElementsByTagName('book-title')[0];
+  if (bookTitleEl?.textContent?.trim()) {
+    bookTitle = bookTitleEl.textContent.replace(/\s+/g, ' ').trim();
+  }
+
+  // Decode embedded <binary> images
+  const binaryMap = new Map<string, string>();
+  const binaryOrder: string[] = [];
+  const binaryEls = Array.from(doc.getElementsByTagName('binary'));
+  for (const binEl of binaryEls) {
+    const id = binEl.getAttribute('id')?.trim();
+    if (!id) continue;
+    const ct = binEl.getAttribute('content-type') || '';
+    const url = base64ToBlobUrl(binEl.textContent || '', ct, id);
+    if (url) {
+      binaryMap.set(id, url);
+      binaryOrder.push(url);
+    }
+  }
+
+  let coverPath: string | null = null;
+  const coverPageEl = doc.getElementsByTagName('coverpage')[0];
+  if (coverPageEl) {
+    const imgEl = coverPageEl.getElementsByTagName('image')[0];
+    const href = imgEl ? getImageHrefAttr(imgEl) : null;
+    if (href && binaryMap.has(href)) {
+      coverPath = binaryMap.get(href)!;
+    }
+  }
+  if (!coverPath && binaryOrder.length > 0) {
+    coverPath = binaryOrder[0];
+  }
+
+  // Collect sections from primary <body> (skip footnotes/comments body)
+  const sections: ParsedFb2Section[] = [];
+  const bodyEls = Array.from(doc.getElementsByTagName('body'));
+  for (const body of bodyEls) {
+    const bodyName = (body.getAttribute('name') || '').toLowerCase();
+    if (bodyName.includes('note') || bodyName.includes('comment')) continue;
+    collectFb2Sections(body, sections);
+  }
+
+  let totalTextChars = 0;
+  let totalBodyImages = 0;
+  for (const sec of sections) {
+    for (const item of sec.items) {
+      if (item.type === 'text') totalTextChars += item.value.length;
+      else if (binaryMap.has(item.id)) totalBodyImages += 1;
+    }
+  }
+
+  const isImageComic =
+    (totalBodyImages > 0 && totalTextChars < totalBodyImages * 80) ||
+    (totalTextChars === 0 && binaryOrder.length > 0);
+
+  if (isImageComic) {
+    const chapters: ComicChapter[] = [];
+    for (let sIdx = 0; sIdx < sections.length; sIdx++) {
+      const sec = sections[sIdx];
+      const chId = `fb2-${safeSlug}-ch-${sIdx + 1}`;
+      const pages: ComicPage[] = [];
+      for (const item of sec.items) {
+        if (item.type === 'image') {
+          const url = binaryMap.get(item.id);
+          if (url) {
+            pages.push({
+              id: `${chId}-p-${pages.length + 1}`,
+              index: pages.length,
+              imagePath: url,
+            });
+          }
+        }
+      }
+      if (pages.length > 0) {
+        chapters.push({
+          id: chId,
+          volume: '1',
+          number: String(chapters.length + 1),
+          title: sec.title || `Глава ${chapters.length + 1}`,
+          pages,
+        });
+      }
+    }
+
+    if (chapters.length === 0 && binaryOrder.length > 0) {
+      const chId = `fb2-${safeSlug}-ch-1`;
+      chapters.push({
+        id: chId,
+        volume: '1',
+        number: '1',
+        title: bookTitle,
+        pages: binaryOrder.map((url, idx) => ({
+          id: `${chId}-p-${idx + 1}`,
+          index: idx,
+          imagePath: url,
+        })),
+      });
+    }
+
+    if (chapters.length > 0) {
+      return {
+        id: `comic-fb2-${safeSlug}`,
+        title: bookTitle,
+        sourceType: 'fb2',
+        coverPath,
+        isRanobe: false,
+        chapters,
+      };
+    }
+  }
+
+  // Text / illustrated book FB2
+  const chapters: ComicChapter[] = [];
+  for (const sec of sections) {
+    const chNum = chapters.length + 1;
+    const chId = `fb2-${safeSlug}-ch-${chNum}`;
+    const pages: ComicPage[] = [];
+    let pendingParas: string[] = [];
+
+    const flushPending = () => {
+      if (pendingParas.length === 0) return;
+      const chunked = chunkParagraphsToPages(pendingParas, chId);
+      pendingParas = [];
+      for (const pg of chunked) {
+        const idx = pages.length;
+        pages.push({
+          ...pg,
+          id: `${chId}-p-${idx + 1}`,
+          index: idx,
+        });
+      }
+    };
+
+    for (const item of sec.items) {
+      if (item.type === 'text') {
+        pendingParas.push(item.value);
+      } else {
+        const url = binaryMap.get(item.id);
+        if (url) {
+          flushPending();
+          const idx = pages.length;
+          pages.push({
+            id: `${chId}-p-${idx + 1}`,
+            index: idx,
+            imagePath: url,
+          });
+        }
+      }
+    }
+    flushPending();
+
+    if (pages.length > 0) {
+      chapters.push({
+        id: chId,
+        volume: '1',
+        number: String(chNum),
+        title: sec.title || `Глава ${chNum}`,
+        pages,
+      });
+    }
+  }
+
+  if (chapters.length === 0) {
+    throw new Error('В FB2-файле не найдено ни текстовых глав, ни изображений страниц.');
+  }
+
+  return {
+    id: `comic-fb2-${safeSlug}`,
+    title: bookTitle,
+    sourceType: 'fb2',
+    coverPath,
+    isRanobe: true,
+    chapters,
+  };
+}
+
+export async function parseLocalFb2InBrowser(file: File): Promise<ComicImportResultPayload> {
+  const stem = file.name.replace(/\.fb2$/i, '').replace(/\.[^.]+$/, '') || 'book';
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return parseLocalFb2Bytes(bytes, stem);
+}
+
 export async function parseLocalCbzInBrowser(file: File): Promise<ComicImportResultPayload> {
   const zip = await JSZip.loadAsync(file);
   const stem = file.name.replace(/\.[^.]+$/, '') || 'comic';
   const safeSlug = sanitizeSlug(stem, 'cbz_comic');
 
   const grouped = new Map<string, { path: string; entry: JSZip.JSZipObject }[]>();
+  let fb2Entry: { name: string; entry: JSZip.JSZipObject } | null = null;
 
   zip.forEach((relativePath, entry) => {
     if (entry.dir) return;
@@ -95,7 +614,12 @@ export async function parseLocalCbzInBrowser(file: File): Promise<ComicImportRes
     if (relativePath.includes('..')) return;
     const parts = relativePath.split('/');
     const fileName = parts[parts.length - 1] || '';
-    if (fileName.startsWith('.') || !isImageFile(fileName)) return;
+    if (fileName.startsWith('.')) return;
+
+    if (fileName.toLowerCase().endsWith('.fb2') && !fb2Entry) {
+      fb2Entry = { name: fileName, entry };
+    }
+    if (!isImageFile(fileName)) return;
 
     const dirKey = parts.slice(0, -1).join('/');
     if (!grouped.has(dirKey)) grouped.set(dirKey, []);
@@ -103,6 +627,12 @@ export async function parseLocalCbzInBrowser(file: File): Promise<ComicImportRes
   });
 
   if (grouped.size === 0) {
+    if (fb2Entry) {
+      const fb2Found = fb2Entry as { name: string; entry: JSZip.JSZipObject };
+      const fb2Bytes = await fb2Found.entry.async('uint8array');
+      const fb2Stem = fb2Found.name.replace(/\.fb2$/i, '') || stem;
+      return parseLocalFb2Bytes(fb2Bytes, fb2Stem);
+    }
     throw new Error('В CBZ-архиве не найдено изображений страниц.');
   }
 

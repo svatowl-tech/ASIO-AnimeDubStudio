@@ -1281,7 +1281,570 @@ fn safe_zip_relative_path(raw_name: &str) -> Option<PathBuf> {
     }
 }
 
-fn extract_cbz_local(file_path: &Path, project_path: &str) -> Result<ComicImportResult, String> {
+fn decode_cp1251_byte(b: u8) -> char {
+    if b < 0x80 {
+        return b as char;
+    }
+    if b >= 0xC0 {
+        return char::from_u32(0x0410 + (b as u32 - 0xC0)).unwrap_or('\u{FFFD}');
+    }
+    const CP1251_80_BF: [char; 64] = [
+        '\u{0402}', '\u{0403}', '\u{201A}', '\u{0453}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+        '\u{20AC}', '\u{2030}', '\u{0409}', '\u{2039}', '\u{040A}', '\u{040C}', '\u{040B}', '\u{040F}',
+        '\u{0452}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+        '\u{FFFD}', '\u{2122}', '\u{0459}', '\u{203A}', '\u{045A}', '\u{045C}', '\u{045B}', '\u{045F}',
+        '\u{00A0}', '\u{040E}', '\u{045E}', '\u{0408}', '\u{00A4}', '\u{0490}', '\u{00A6}', '\u{00A7}',
+        '\u{0401}', '\u{00A9}', '\u{0404}', '\u{00AB}', '\u{00AC}', '\u{00AD}', '\u{00AE}', '\u{0407}',
+        '\u{00B0}', '\u{00B1}', '\u{0406}', '\u{0456}', '\u{0491}', '\u{00B5}', '\u{00B6}', '\u{00B7}',
+        '\u{0451}', '\u{2116}', '\u{0454}', '\u{00BB}', '\u{0458}', '\u{0405}', '\u{0455}', '\u{0457}',
+    ];
+    CP1251_80_BF[(b - 0x80) as usize]
+}
+
+fn decode_fb2_bytes(raw: &[u8]) -> String {
+    // Strip UTF-8 BOM if present
+    let slice = if raw.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        &raw[3..]
+    } else {
+        raw
+    };
+
+    let header_len = slice.len().min(256);
+    let header_ascii = String::from_utf8_lossy(&slice[..header_len]).to_lowercase();
+    let declared_cp1251 =
+        header_ascii.contains("windows-1251") || header_ascii.contains("cp1251");
+
+    if !declared_cp1251 {
+        if let Ok(utf8) = std::str::from_utf8(slice) {
+            return utf8.to_string();
+        }
+    }
+
+    let mut out = String::with_capacity(slice.len() * 2);
+    for &b in slice {
+        out.push(decode_cp1251_byte(b));
+    }
+    out
+}
+
+fn decode_base64_str(input: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity((input.len() * 3) / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+
+    for b in input.bytes() {
+        let val: u8 = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => break,
+            _ => continue, // ignore whitespace/newlines
+        };
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    out
+}
+
+fn local_xml_tag(raw: &[u8]) -> &[u8] {
+    match raw.iter().rposition(|&b| b == b':') {
+        Some(pos) => &raw[pos + 1..],
+        None => raw,
+    }
+}
+
+enum Fb2SectionItem {
+    Text(String),
+    ImageRef(String),
+}
+
+struct Fb2ParsedSection {
+    title: String,
+    items: Vec<Fb2SectionItem>,
+}
+
+fn extract_fb2_from_bytes(
+    raw_bytes: &[u8],
+    stem: &str,
+    project_path: &str,
+) -> Result<ComicImportResult, String> {
+    let xml = decode_fb2_bytes(raw_bytes);
+    let safe_slug = sanitize_path_segment(stem, "fb2_comic");
+    let project_root = PathBuf::from(project_path);
+    let img_dir = ensure_confined_dir(project_path, &[&safe_slug, "images"])?;
+
+    let mut book_title = stem.to_string();
+    let mut cover_ref: Option<String> = None;
+    let mut binary_map: HashMap<String, String> = HashMap::new(); // id -> relative image path
+    let mut binary_order: Vec<String> = Vec::new(); // preserve order of embedded binaries
+    let mut sections: Vec<Fb2ParsedSection> = Vec::new();
+
+    let mut reader = XmlReader::from_reader(Cursor::new(xml.as_bytes()));
+    let mut buf = Vec::new();
+
+    let mut in_title_info = false;
+    let mut in_book_title = false;
+    let mut book_title_acc = String::new();
+    let mut in_coverpage = false;
+
+    let mut in_body = false;
+    let mut body_is_notes = false;
+    let mut section_depth: usize = 0;
+    let mut in_section_title = false;
+    let mut title_acc = String::new();
+    let mut in_paragraph = false;
+    let mut para_acc = String::new();
+    let mut current_section_title = String::new();
+    let mut current_items: Vec<Fb2SectionItem> = Vec::new();
+
+    let mut in_binary = false;
+    let mut binary_id = String::new();
+    let mut binary_ct = String::new();
+    let mut binary_data = String::new();
+    let mut saved_img_counter: usize = 0;
+
+    let flush_current_section = |sections: &mut Vec<Fb2ParsedSection>,
+                                 title: &mut String,
+                                 items: &mut Vec<Fb2SectionItem>| {
+        if !items.is_empty() {
+            let clean_title = title.trim().to_string();
+            sections.push(Fb2ParsedSection {
+                title: clean_title,
+                items: std::mem::take(items),
+            });
+        }
+        title.clear();
+    };
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                let tag = local_xml_tag(e.name().into_inner());
+                match tag {
+                    b"title-info" => in_title_info = true,
+                    b"book-title" if in_title_info => {
+                        in_book_title = true;
+                        book_title_acc.clear();
+                    }
+                    b"coverpage" if in_title_info => in_coverpage = true,
+                    b"body" => {
+                        let mut is_notes = false;
+                        for attr in e.attributes().flatten() {
+                            if local_xml_tag(attr.key.into_inner()) == b"name" {
+                                if let Ok(v) = attr.unescape_value() {
+                                    let low = v.to_lowercase();
+                                    if low.contains("note") || low.contains("comment") {
+                                        is_notes = true;
+                                    }
+                                }
+                            }
+                        }
+                        in_body = true;
+                        body_is_notes = is_notes;
+                    }
+                    b"section" if in_body && !body_is_notes => {
+                        if section_depth > 0 && !current_items.is_empty() {
+                            flush_current_section(
+                                &mut sections,
+                                &mut current_section_title,
+                                &mut current_items,
+                            );
+                        }
+                        section_depth += 1;
+                    }
+                    b"title" if in_body && !body_is_notes && section_depth > 0 => {
+                        in_section_title = true;
+                        title_acc.clear();
+                    }
+                    b"p" | b"v" | b"subtitle" | b"text-author"
+                        if in_body && !body_is_notes =>
+                    {
+                        if !in_section_title {
+                            in_paragraph = true;
+                            para_acc.clear();
+                        }
+                    }
+                    b"image" => {
+                        for attr in e.attributes().flatten() {
+                            if local_xml_tag(attr.key.into_inner()) == b"href" {
+                                if let Ok(v) = attr.unescape_value() {
+                                    let id = v.trim_start_matches('#').trim().to_string();
+                                    if !id.is_empty() {
+                                        if in_coverpage && cover_ref.is_none() {
+                                            cover_ref = Some(id);
+                                        } else if in_body && !body_is_notes {
+                                            current_items.push(Fb2SectionItem::ImageRef(id));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    b"binary" => {
+                        in_binary = true;
+                        binary_id.clear();
+                        binary_ct.clear();
+                        binary_data.clear();
+                        for attr in e.attributes().flatten() {
+                            let k = local_xml_tag(attr.key.into_inner());
+                            if let Ok(v) = attr.unescape_value() {
+                                if k == b"id" {
+                                    binary_id = v.trim().to_string();
+                                } else if k == b"content-type" {
+                                    binary_ct = v.trim().to_string();
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let tag = local_xml_tag(e.name().into_inner());
+                if tag == b"image" {
+                    for attr in e.attributes().flatten() {
+                        if local_xml_tag(attr.key.into_inner()) == b"href" {
+                            if let Ok(v) = attr.unescape_value() {
+                                let id = v.trim_start_matches('#').trim().to_string();
+                                if !id.is_empty() {
+                                    if in_coverpage && cover_ref.is_none() {
+                                        cover_ref = Some(id);
+                                    } else if in_body && !body_is_notes {
+                                        current_items.push(Fb2SectionItem::ImageRef(id));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::Text(e)) => {
+                if in_binary {
+                    if let Ok(raw_txt) = std::str::from_utf8(e.as_ref()) {
+                        binary_data.push_str(raw_txt);
+                    }
+                } else if in_book_title {
+                    if let Ok(t) = e.unescape() {
+                        book_title_acc.push_str(&t);
+                    }
+                } else if in_section_title {
+                    if let Ok(t) = e.unescape() {
+                        let s = t.trim();
+                        if !s.is_empty() {
+                            if !title_acc.is_empty() {
+                                title_acc.push(' ');
+                            }
+                            title_acc.push_str(s);
+                        }
+                    }
+                } else if in_paragraph {
+                    if let Ok(t) = e.unescape() {
+                        para_acc.push_str(&t);
+                    }
+                }
+            }
+            Ok(Event::CData(e)) => {
+                if in_binary {
+                    if let Ok(raw_txt) = std::str::from_utf8(e.as_ref()) {
+                        binary_data.push_str(raw_txt);
+                    }
+                } else if in_paragraph {
+                    if let Ok(t) = std::str::from_utf8(e.as_ref()) {
+                        para_acc.push_str(t);
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let tag = local_xml_tag(e.name().into_inner());
+                match tag {
+                    b"title-info" => in_title_info = false,
+                    b"book-title" if in_book_title => {
+                        let trimmed = book_title_acc.trim();
+                        if !trimmed.is_empty() {
+                            book_title = trimmed.to_string();
+                        }
+                        in_book_title = false;
+                    }
+                    b"coverpage" => in_coverpage = false,
+                    b"body" => {
+                        if in_body && !body_is_notes {
+                            flush_current_section(
+                                &mut sections,
+                                &mut current_section_title,
+                                &mut current_items,
+                            );
+                        }
+                        in_body = false;
+                        body_is_notes = false;
+                        section_depth = 0;
+                    }
+                    b"section" if in_body && !body_is_notes => {
+                        flush_current_section(
+                            &mut sections,
+                            &mut current_section_title,
+                            &mut current_items,
+                        );
+                        section_depth = section_depth.saturating_sub(1);
+                    }
+                    b"title" if in_section_title => {
+                        let clean = title_acc.split_whitespace().collect::<Vec<_>>().join(" ");
+                        if !clean.is_empty() && current_section_title.is_empty() {
+                            current_section_title = clean;
+                        }
+                        in_section_title = false;
+                    }
+                    b"p" | b"v" | b"subtitle" | b"text-author" if in_paragraph => {
+                        let clean = para_acc.split_whitespace().collect::<Vec<_>>().join(" ");
+                        if !clean.is_empty() {
+                            current_items.push(Fb2SectionItem::Text(clean));
+                        }
+                        in_paragraph = false;
+                    }
+                    b"binary" if in_binary => {
+                        in_binary = false;
+                        if !binary_id.is_empty() && !binary_data.is_empty() {
+                            let decoded = decode_base64_str(&binary_data);
+                            if !decoded.is_empty() {
+                                saved_img_counter += 1;
+                                let ext = guess_image_ext(
+                                    &binary_id,
+                                    if binary_ct.is_empty() {
+                                        None
+                                    } else {
+                                        Some(binary_ct.as_str())
+                                    },
+                                );
+                                let out_file = img_dir
+                                    .join(format!("img_{:04}.{}", saved_img_counter, ext));
+                                if fs::write(&out_file, &decoded).is_ok() {
+                                    let rel = to_project_relative(&project_root, &out_file);
+                                    binary_map.insert(binary_id.clone(), rel.clone());
+                                    binary_order.push(rel);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    let cover_path = cover_ref
+        .as_deref()
+        .and_then(|id| binary_map.get(id).cloned())
+        .or_else(|| binary_order.first().cloned());
+
+    let mut total_text_chars: usize = 0;
+    let mut total_body_images: usize = 0;
+    for sec in &sections {
+        for item in &sec.items {
+            match item {
+                Fb2SectionItem::Text(t) => total_text_chars += t.chars().count(),
+                Fb2SectionItem::ImageRef(id) => {
+                    if binary_map.contains_key(id) {
+                        total_body_images += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Image-heavy comic/manga FB2 (e.g. scans packaged into FB2)
+    let is_image_comic = (total_body_images > 0 && total_text_chars < total_body_images * 80)
+        || (total_text_chars == 0 && !binary_order.is_empty());
+
+    if is_image_comic {
+        let mut chapters: Vec<ComicChapterPayload> = Vec::new();
+        for (sec_idx, sec) in sections.iter().enumerate() {
+            let ch_id = format!("fb2-{}-ch-{}", safe_slug, sec_idx + 1);
+            let mut pages: Vec<ComicPagePayload> = Vec::new();
+            for item in &sec.items {
+                if let Fb2SectionItem::ImageRef(id) = item {
+                    if let Some(rel) = binary_map.get(id) {
+                        let p_idx = pages.len();
+                        pages.push(ComicPagePayload {
+                            id: format!("{}-p-{}", ch_id, p_idx + 1),
+                            index: p_idx,
+                            image_path: Some(rel.clone()),
+                            pdf_page_number: None,
+                            text_blocks: None,
+                            width: None,
+                            height: None,
+                        });
+                    }
+                }
+            }
+            if !pages.is_empty() {
+                let ch_title = if sec.title.is_empty() {
+                    format!("Глава {}", chapters.len() + 1)
+                } else {
+                    sec.title.clone()
+                };
+                chapters.push(ComicChapterPayload {
+                    id: ch_id,
+                    volume: "1".to_string(),
+                    number: (chapters.len() + 1).to_string(),
+                    title: ch_title,
+                    branch_name: None,
+                    pages,
+                });
+            }
+        }
+
+        // Fallback: if no body <image> refs matched, expose all decoded <binary> images
+        if chapters.is_empty() && !binary_order.is_empty() {
+            let ch_id = format!("fb2-{}-ch-1", safe_slug);
+            let pages: Vec<ComicPagePayload> = binary_order
+                .iter()
+                .enumerate()
+                .map(|(idx, rel)| ComicPagePayload {
+                    id: format!("{}-p-{}", ch_id, idx + 1),
+                    index: idx,
+                    image_path: Some(rel.clone()),
+                    pdf_page_number: None,
+                    text_blocks: None,
+                    width: None,
+                    height: None,
+                })
+                .collect();
+            chapters.push(ComicChapterPayload {
+                id: ch_id,
+                volume: "1".to_string(),
+                number: "1".to_string(),
+                title: book_title.clone(),
+                branch_name: None,
+                pages,
+            });
+        }
+
+        if !chapters.is_empty() {
+            return Ok(ComicImportResult {
+                id: format!("comic-fb2-{}", safe_slug),
+                title: book_title,
+                source_type: "fb2".to_string(),
+                source_url: None,
+                site_domain: None,
+                cover_path,
+                pdf_path: None,
+                is_ranobe: false,
+                chapters,
+            });
+        }
+    }
+
+    // Text / illustrated ranobe/book FB2
+    let mut chapters: Vec<ComicChapterPayload> = Vec::new();
+    for sec in sections {
+        let ch_num = chapters.len() + 1;
+        let ch_id = format!("fb2-{}-ch-{}", safe_slug, ch_num);
+        let mut pages: Vec<ComicPagePayload> = Vec::new();
+        let mut pending_paras: Vec<String> = Vec::new();
+
+        for item in sec.items {
+            match item {
+                Fb2SectionItem::Text(t) => pending_paras.push(t),
+                Fb2SectionItem::ImageRef(id) => {
+                    if let Some(rel) = binary_map.get(&id) {
+                        if !pending_paras.is_empty() {
+                            let chunked = chunk_paragraphs_into_pages(
+                                std::mem::take(&mut pending_paras),
+                                &ch_id,
+                            );
+                            for mut pg in chunked {
+                                let idx = pages.len();
+                                pg.index = idx;
+                                pg.id = format!("{}-p-{}", ch_id, idx + 1);
+                                pages.push(pg);
+                            }
+                        }
+                        let idx = pages.len();
+                        pages.push(ComicPagePayload {
+                            id: format!("{}-p-{}", ch_id, idx + 1),
+                            index: idx,
+                            image_path: Some(rel.clone()),
+                            pdf_page_number: None,
+                            text_blocks: None,
+                            width: None,
+                            height: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        if !pending_paras.is_empty() {
+            let chunked = chunk_paragraphs_into_pages(pending_paras, &ch_id);
+            for mut pg in chunked {
+                let idx = pages.len();
+                pg.index = idx;
+                pg.id = format!("{}-p-{}", ch_id, idx + 1);
+                pages.push(pg);
+            }
+        }
+
+        if !pages.is_empty() {
+            let ch_title = if !sec.title.is_empty() {
+                sec.title
+            } else {
+                format!("Глава {}", ch_num)
+            };
+            chapters.push(ComicChapterPayload {
+                id: ch_id,
+                volume: "1".to_string(),
+                number: ch_num.to_string(),
+                title: ch_title,
+                branch_name: None,
+                pages,
+            });
+        }
+    }
+
+    if chapters.is_empty() {
+        return Err(
+            "В FB2-файле не найдено ни текстовых глав, ни изображений страниц".to_string(),
+        );
+    }
+
+    Ok(ComicImportResult {
+        id: format!("comic-fb2-{}", safe_slug),
+        title: book_title,
+        source_type: "fb2".to_string(),
+        source_url: None,
+        site_domain: None,
+        cover_path,
+        pdf_path: None,
+        is_ranobe: true,
+        chapters,
+    })
+}
+
+fn extract_fb2_local(file_path: &Path, project_path: &str) -> Result<ComicImportResult, String> {
+    let stem = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("book")
+        .to_string();
+    let raw_bytes =
+        fs::read(file_path).map_err(|e| format!("Не удалось прочитать FB2-файл: {}", e))?;
+    extract_fb2_from_bytes(&raw_bytes, &stem, project_path)
+}
+
+fn extract_cbz_local(
+    file_path: &Path,
+    project_path: &str,
+    source_type: &str,
+) -> Result<ComicImportResult, String> {
     let stem = file_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -1297,6 +1860,8 @@ fn extract_cbz_local(file_path: &Path, project_path: &str) -> Result<ComicImport
 
     // Group entries by parent directory to detect chapters
     let mut chapter_groups: BTreeMap<String, Vec<(String, usize)>> = BTreeMap::new();
+    let mut fb2_entry_index: Option<(String, usize)> = None;
+
     for i in 0..archive.len() {
         let entry = match archive.by_index(i) {
             Ok(e) => e,
@@ -1316,7 +1881,13 @@ fn extract_cbz_local(file_path: &Path, project_path: &str) -> Result<ComicImport
             .file_name()
             .and_then(|f| f.to_str())
             .unwrap_or("");
-        if file_name.starts_with('.') || !is_image_filename(file_name) {
+        if file_name.starts_with('.') {
+            continue;
+        }
+        if file_name.to_lowercase().ends_with(".fb2") && fb2_entry_index.is_none() {
+            fb2_entry_index = Some((file_name.to_string(), i));
+        }
+        if !is_image_filename(file_name) {
             continue;
         }
 
@@ -1332,7 +1903,22 @@ fn extract_cbz_local(file_path: &Path, project_path: &str) -> Result<ComicImport
             .push((raw_name, i));
     }
 
+    // Handle .fb2.zip archives seamlessly
     if chapter_groups.is_empty() {
+        if let Some((fb2_name, fb2_idx)) = fb2_entry_index {
+            let mut fb2_file = archive
+                .by_index(fb2_idx)
+                .map_err(|e| format!("Ошибка чтения FB2 из ZIP-архива: {}", e))?;
+            let mut fb2_bytes = Vec::new();
+            fb2_file
+                .read_to_end(&mut fb2_bytes)
+                .map_err(|e| format!("Ошибка распаковки FB2 из архива: {}", e))?;
+            let fb2_stem = Path::new(&fb2_name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&stem);
+            return extract_fb2_from_bytes(&fb2_bytes, fb2_stem, project_path);
+        }
         return Err("В CBZ-архиве не найдено изображений страниц".to_string());
     }
 
@@ -1348,7 +1934,7 @@ fn extract_cbz_local(file_path: &Path, project_path: &str) -> Result<ComicImport
 
         let ch_folder = format!("ch_{:03}", ch_idx + 1);
         let ch_dir = ensure_confined_dir(project_path, &[&safe_slug, &ch_folder])?;
-        let ch_id = format!("cbz-{}-ch-{}", safe_slug, ch_idx + 1);
+        let ch_id = format!("{}-{}-ch-{}", source_type, safe_slug, ch_idx + 1);
 
         let mut pages = Vec::new();
         for (p_idx, (raw_name, zip_idx)) in entries.into_iter().enumerate() {
@@ -1400,9 +1986,9 @@ fn extract_cbz_local(file_path: &Path, project_path: &str) -> Result<ComicImport
     let _ = comic_dir;
 
     Ok(ComicImportResult {
-        id: format!("comic-cbz-{}", safe_slug),
+        id: format!("comic-{}-{}", source_type, safe_slug),
         title: stem,
-        source_type: "cbz".to_string(),
+        source_type: source_type.to_string(),
         source_url: None,
         site_domain: None,
         cover_path,
@@ -1410,6 +1996,20 @@ fn extract_cbz_local(file_path: &Path, project_path: &str) -> Result<ComicImport
         is_ranobe: false,
         chapters,
     })
+}
+
+fn is_zip_magic(file_path: &Path) -> bool {
+    let Ok(mut f) = File::open(file_path) else {
+        return false;
+    };
+    let mut header = [0u8; 4];
+    if f.read_exact(&mut header).is_err() {
+        return false;
+    }
+    header[0] == b'P'
+        && header[1] == b'K'
+        && matches!(header[2], 0x03 | 0x05 | 0x07)
+        && matches!(header[3], 0x04 | 0x06 | 0x08)
 }
 
 fn resolve_zip_href(base_dir: &str, href: &str) -> Option<String> {
@@ -1779,11 +2379,19 @@ pub async fn import_local_comic(
             .unwrap_or_default();
 
         match ext.as_str() {
-            "cbz" | "zip" => extract_cbz_local(&path, &project_path),
+            "cbz" | "zip" => extract_cbz_local(&path, &project_path, "cbz"),
+            "cbr" => {
+                if is_zip_magic(&path) {
+                    extract_cbz_local(&path, &project_path, "cbr")
+                } else {
+                    Err("CBR_RAR_WASM_REQUIRED".to_string())
+                }
+            }
+            "fb2" => extract_fb2_local(&path, &project_path),
             "epub" => extract_epub_local(&path, &project_path),
             "pdf" => import_pdf_local(&path, &project_path),
             _ => Err(format!(
-                "Формат .{} не поддерживается. Используйте .cbz, .pdf или .epub.",
+                "Формат .{} не поддерживается. Используйте .cbz, .cbr, .fb2, .pdf или .epub.",
                 ext
             )),
         }

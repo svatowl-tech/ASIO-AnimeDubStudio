@@ -1,4 +1,4 @@
-export type ComicSourceType = 'lib' | 'cbz' | 'pdf' | 'epub';
+export type ComicSourceType = 'lib' | 'cbz' | 'cbr' | 'fb2' | 'pdf' | 'epub';
 
 export type ComicViewMode = 'webtoon' | 'page';
 
@@ -32,6 +32,7 @@ export interface ComicBubblePin {
   label: string;
   timelineTime: number; // seconds on timeline
   order: number; // Sequential display number (#1, #2, ...)
+  trackId?: string; // Bound audio track ID so multi-track auditions don't cross-jump
 }
 
 export interface ComicSyncPoint {
@@ -39,7 +40,22 @@ export interface ComicSyncPoint {
   time: number; // seconds on timeline
   chapterId: string;
   pageIndex: number;
-  markerId: string; // 1-to-1 link with Project.markers
+  scrollFraction?: number; // 0..1 vertical position within the page
+  trackId?: string; // Bound audio track ID
+  markerId: string; // 1-to-1 link with Project.markers (empty for fine-grained scroll sync points)
+}
+
+export interface ComicScrollTarget {
+  token: number;
+  chapterId: string;
+  pageIndex: number;
+  /** 0..1 vertical offset within the target page (0 = very top of page) */
+  scrollFraction: number;
+  /** True when targeting a specific bubble pin so viewport centers on the speech bubble */
+  isPinTarget?: boolean;
+  /** Optional bubble pin ID to highlight after jumping */
+  pinId?: string;
+  behavior?: 'auto' | 'smooth';
 }
 
 export interface ComicProjectData {

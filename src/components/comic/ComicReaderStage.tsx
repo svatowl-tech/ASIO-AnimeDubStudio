@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ChevronLeft,
   ChevronRight,
@@ -12,11 +13,13 @@ import {
   Film,
   X,
   Trash2,
+  RotateCcw,
   Check,
   PanelRightOpen,
   Image as ImageIcon,
+  AlertTriangle,
 } from 'lucide-react';
-import { ComicBubblePin, ComicProjectData, ComicViewMode } from '../../types/comic';
+import { ComicBubblePin, ComicProjectData, ComicScrollTarget, ComicViewMode } from '../../types/comic';
 import { resolveComicAssetUrl } from '../../services/comic/comicUtils';
 import { cn, formatTimeHms } from '../../lib/utils';
 import { PdfPageCanvas } from './PdfPageCanvas';
@@ -40,13 +43,17 @@ interface ComicReaderStageProps {
   isRecording: boolean;
   hasVideo: boolean;
   isRightNavCollapsed: boolean;
-  scrollRequestToken: number;
+  scrollTarget: ComicScrollTarget | null;
+  activeTrackId?: string;
+  activeTrackName?: string;
+  isFirstDubTrack?: boolean;
   onSwitchToVideo?: () => void;
   onExpandRightNav: () => void;
   onViewModeChange: (mode: ComicViewMode) => void;
   onZoomChange: (zoom: number) => void;
   onToggleTimelineSync: () => void;
   onActivePageChange: (chapterId: string, pageIndex: number, source: 'scroll' | 'nav') => void;
+  onViewportScrollChange?: (chapterId: string, pageIndex: number, scrollFraction: number) => void;
   onAddPin: (draft: {
     chapterId: string;
     pageIndex: number;
@@ -58,7 +65,12 @@ interface ComicReaderStageProps {
   }) => void;
   onDeletePin: (pinId: string) => void;
   onSelectPin: (pin: ComicBubblePin) => void;
+  onClearTimeline?: () => void;
   onPdfPageCountResolved?: (numPages: number) => void;
+}
+
+function getElementTopInContainer(el: HTMLElement, container: HTMLElement): number {
+  return el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
 }
 
 export const ComicReaderStage: React.FC<ComicReaderStageProps> = ({
@@ -70,26 +82,37 @@ export const ComicReaderStage: React.FC<ComicReaderStageProps> = ({
   isRecording,
   hasVideo,
   isRightNavCollapsed,
-  scrollRequestToken,
+  scrollTarget,
+  activeTrackId,
+  activeTrackName,
+  isFirstDubTrack = true,
   onSwitchToVideo,
   onExpandRightNav,
   onViewModeChange,
   onZoomChange,
   onToggleTimelineSync,
   onActivePageChange,
+  onViewportScrollChange,
   onAddPin,
   onDeletePin,
   onSelectPin,
+  onClearTimeline,
   onPdfPageCountResolved,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const pagesWrapperRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const isProgrammaticScrollRef = useRef(false);
   const programmaticTimerRef = useRef<number | null>(null);
+  const pendingScrollTargetRef = useRef<{ target: ComicScrollTarget; expiresAt: number } | null>(null);
+  const scrollReportRafRef = useRef<number | null>(null);
+  const prevChapterIdRef = useRef<string | undefined>(undefined);
+  const prevPageKeyRef = useRef<string>('');
 
   const [isPinMode, setIsPinMode] = useState(false);
   const [draftPin, setDraftPin] = useState<PendingPinDraft | null>(null);
   const [selectedPinId, setSelectedPinId] = useState<string | null>(null);
+  const [isClearConfirmOpen, setIsClearConfirmOpen] = useState(false);
   const [containerWidth, setContainerWidth] = useState(820);
   const [failedImages, setFailedImages] = useState<Record<string, boolean>>({});
 
@@ -101,6 +124,90 @@ export const ComicReaderStage: React.FC<ComicReaderStageProps> = ({
     () => (comic.pdfPath ? resolveComicAssetUrl(comic.pdfPath, projectPath) : undefined),
     [comic.pdfPath, projectPath]
   );
+
+  const markProgrammaticScroll = useCallback((durationMs = 420) => {
+    isProgrammaticScrollRef.current = true;
+    if (programmaticTimerRef.current) window.clearTimeout(programmaticTimerRef.current);
+    programmaticTimerRef.current = window.setTimeout(() => {
+      isProgrammaticScrollRef.current = false;
+    }, durationMs);
+  }, []);
+
+  const applyScrollTargetNow = useCallback(
+    (target: ComicScrollTarget, forceInstant = false): boolean => {
+      const container = scrollContainerRef.current;
+      if (!container || !activeChapter || activeChapter.id !== target.chapterId) return false;
+
+      const isTopReset = target.scrollFraction <= 0.001 && !target.isPinTarget;
+
+      if (comic.viewMode === 'page') {
+        if (comic.activePageIndex !== target.pageIndex) return false;
+        if (isTopReset) {
+          markProgrammaticScroll(250);
+          container.scrollTop = 0;
+          return true;
+        }
+        const pageEl = pageRefs.current[target.pageIndex];
+        if (!pageEl || pageEl.offsetHeight < 20) return false;
+
+        const pageTop = getElementTopInContainer(pageEl, container);
+        const pageHeight = pageEl.offsetHeight;
+        const rawTop = target.isPinTarget
+          ? pageTop + target.scrollFraction * pageHeight - container.clientHeight * 0.3
+          : pageTop + target.scrollFraction * pageHeight;
+        const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
+        const desiredTop = Math.max(0, Math.min(maxTop, rawTop));
+
+        markProgrammaticScroll(forceInstant ? 250 : 450);
+        container.scrollTo({
+          top: desiredTop,
+          behavior: forceInstant ? 'auto' : target.behavior || 'smooth',
+        });
+        return true;
+      }
+
+      // Webtoon mode
+      const pageEl = pageRefs.current[target.pageIndex];
+      if (!pageEl) return false;
+
+      const pageTop = getElementTopInContainer(pageEl, container);
+      if (isTopReset) {
+        const desiredTop = Math.max(0, pageTop);
+        markProgrammaticScroll(forceInstant ? 250 : 450);
+        container.scrollTo({
+          top: desiredTop,
+          behavior: forceInstant ? 'auto' : target.behavior || 'auto',
+        });
+        return true;
+      }
+
+      if (pageEl.offsetHeight < 20) return false;
+      const pageHeight = pageEl.offsetHeight;
+      const rawTop = target.isPinTarget
+        ? pageTop + target.scrollFraction * pageHeight - container.clientHeight * 0.3
+        : pageTop + target.scrollFraction * pageHeight;
+      const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
+      const desiredTop = Math.max(0, Math.min(maxTop, rawTop));
+
+      markProgrammaticScroll(forceInstant ? 250 : 450);
+      container.scrollTo({
+        top: desiredTop,
+        behavior: forceInstant ? 'auto' : target.behavior || 'smooth',
+      });
+      return true;
+    },
+    [activeChapter, comic.viewMode, comic.activePageIndex, markProgrammaticScroll]
+  );
+
+  const reapplyPendingScroll = useCallback(() => {
+    const pending = pendingScrollTargetRef.current;
+    if (!pending) return;
+    if (Date.now() > pending.expiresAt) {
+      pendingScrollTargetRef.current = null;
+      return;
+    }
+    applyScrollTargetNow(pending.target, true);
+  }, [applyScrollTargetNow]);
 
   // Track stage container width for responsive zoom/PDF rendering
   useEffect(() => {
@@ -115,28 +222,100 @@ export const ComicReaderStage: React.FC<ComicReaderStageProps> = ({
     return () => observer.disconnect();
   }, []);
 
-  // Scroll to requested page in Webtoon mode when triggered by right nav or timeline sync
+  // Re-apply pending cross-chapter / cold-image scroll target as images decode and expand height
   useEffect(() => {
-    if (comic.viewMode !== 'webtoon') return;
-    const targetEl = pageRefs.current[comic.activePageIndex];
-    if (!targetEl) return;
+    const wrapper = pagesWrapperRef.current;
+    if (!wrapper) return;
+    const observer = new ResizeObserver(() => {
+      reapplyPendingScroll();
+    });
+    observer.observe(wrapper);
+    return () => observer.disconnect();
+  }, [reapplyPendingScroll, activeChapter?.id, comic.viewMode]);
 
-    isProgrammaticScrollRef.current = true;
-    targetEl.scrollIntoView({ block: 'start', behavior: 'smooth' });
-    if (programmaticTimerRef.current) window.clearTimeout(programmaticTimerRef.current);
-    programmaticTimerRef.current = window.setTimeout(() => {
-      isProgrammaticScrollRef.current = false;
-    }, 500);
-  }, [scrollRequestToken, comic.activeChapterId, comic.viewMode]);
-
-  // Reset scroll to top on chapter change
+  // Clear draft pin when chapter changes (keep selectedPinId if explicitly targeted by scrollTarget)
   useEffect(() => {
-    if (scrollContainerRef.current) {
+    if (prevChapterIdRef.current !== activeChapter?.id) {
+      prevChapterIdRef.current = activeChapter?.id;
+      setDraftPin(null);
+      if (!scrollTarget || scrollTarget.chapterId !== activeChapter?.id || !scrollTarget.pinId) {
+        setSelectedPinId(null);
+      }
+    }
+  }, [activeChapter?.id, scrollTarget]);
+
+  // Apply explicit scroll targets (manual page top reset OR recorded scroll position / bubble pin jump)
+  useEffect(() => {
+    if (!scrollTarget || !activeChapter || activeChapter.id !== scrollTarget.chapterId) return;
+
+    if (scrollTarget.pinId) {
+      setSelectedPinId(scrollTarget.pinId);
+    }
+
+    const isTopReset = scrollTarget.scrollFraction <= 0.001 && !scrollTarget.isPinTarget;
+    pendingScrollTargetRef.current = {
+      target: scrollTarget,
+      expiresAt: Date.now() + (isTopReset ? 450 : 1600),
+    };
+
+    const applied = applyScrollTargetNow(scrollTarget, false);
+    const raf1 = window.requestAnimationFrame(() => {
+      if (!applied || !isTopReset) {
+        applyScrollTargetNow(scrollTarget, true);
+      } else if (comic.viewMode === 'page' && scrollContainerRef.current) {
+        scrollContainerRef.current.scrollTop = 0;
+      }
+    });
+
+    return () => window.cancelAnimationFrame(raf1);
+  }, [scrollTarget, activeChapter?.id, comic.activePageIndex, comic.viewMode, applyScrollTargetNow]);
+
+  // Guarantee: in Single-Page mode, opening any new page without a non-zero target ALWAYS starts at the very top
+  useEffect(() => {
+    const pageKey = `${activeChapter?.id || ''}:${comic.activePageIndex}:${comic.viewMode}`;
+    if (prevPageKeyRef.current === pageKey) return;
+    prevPageKeyRef.current = pageKey;
+
+    if (comic.viewMode !== 'page' || !scrollContainerRef.current) return;
+    const hasSpecificOffset =
+      scrollTarget &&
+      scrollTarget.chapterId === activeChapter?.id &&
+      scrollTarget.pageIndex === comic.activePageIndex &&
+      (scrollTarget.scrollFraction > 0.001 || scrollTarget.isPinTarget);
+
+    if (!hasSpecificOffset) {
+      markProgrammaticScroll(200);
       scrollContainerRef.current.scrollTop = 0;
     }
-    setDraftPin(null);
-    setSelectedPinId(null);
-  }, [activeChapter?.id]);
+  }, [activeChapter?.id, comic.activePageIndex, comic.viewMode, scrollTarget, markProgrammaticScroll]);
+
+  // Report live vertical scroll fraction within the active page so recording captures exact reading position
+  const handleContainerScroll = useCallback(() => {
+    if (isProgrammaticScrollRef.current || !onViewportScrollChange || !activeChapter) return;
+    if (scrollReportRafRef.current !== null) return;
+
+    scrollReportRafRef.current = window.requestAnimationFrame(() => {
+      scrollReportRafRef.current = null;
+      const container = scrollContainerRef.current;
+      const pageEl = pageRefs.current[comic.activePageIndex];
+      if (!container || !pageEl || pageEl.offsetHeight <= 0) return;
+
+      const pageTop = getElementTopInContainer(pageEl, container);
+      const fraction = Math.max(0, Math.min(1, (container.scrollTop - pageTop) / pageEl.offsetHeight));
+      onViewportScrollChange(activeChapter.id, comic.activePageIndex, fraction);
+    });
+  }, [onViewportScrollChange, activeChapter, comic.activePageIndex]);
+
+  const cancelPendingScrollByUser = useCallback(() => {
+    pendingScrollTargetRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (programmaticTimerRef.current) window.clearTimeout(programmaticTimerRef.current);
+      if (scrollReportRafRef.current !== null) window.cancelAnimationFrame(scrollReportRafRef.current);
+    };
+  }, []);
 
   // IntersectionObserver in Webtoon mode to automatically track currently visible page
   useEffect(() => {
@@ -262,13 +441,16 @@ export const ComicReaderStage: React.FC<ComicReaderStageProps> = ({
     const map: Record<number, ComicBubblePin[]> = {};
     if (!activeChapter) return map;
     for (const pin of comic.pins || []) {
-      if (pin.chapterId === activeChapter.id) {
-        if (!map[pin.pageIndex]) map[pin.pageIndex] = [];
-        map[pin.pageIndex].push(pin);
+      if (pin.chapterId !== activeChapter.id) continue;
+      if (activeTrackId) {
+        if (pin.trackId && pin.trackId !== activeTrackId) continue;
+        if (!pin.trackId && !isFirstDubTrack) continue;
       }
+      if (!map[pin.pageIndex]) map[pin.pageIndex] = [];
+      map[pin.pageIndex].push(pin);
     }
     return map;
-  }, [comic.pins, activeChapter]);
+  }, [comic.pins, activeChapter, activeTrackId, isFirstDubTrack]);
 
   if (!activeChapter) {
     return (
@@ -377,7 +559,7 @@ export const ComicReaderStage: React.FC<ComicReaderStageProps> = ({
             )}
             title={
               comic.syncTimelineWithComic
-                ? 'Синхронизация с таймлайном включена: перемотка аудио перелистывает комикс'
+                ? `Синхронизация включена для дорожки «${activeTrackName || 'Дубли'}»: перемотка аудио перелистывает комикс по меткам этой дорожки`
                 : 'Синхронизация с таймлайном выключена'
             }
           >
@@ -387,7 +569,30 @@ export const ComicReaderStage: React.FC<ComicReaderStageProps> = ({
               <Link2Off className="w-3.5 h-3.5" />
             )}
             <span className="hidden lg:inline">Синхр.</span>
+            {comic.syncTimelineWithComic && activeTrackName && (
+              <span className="hidden xl:inline max-w-[84px] truncate text-[10px] font-medium text-indigo-300/80 border-l border-indigo-400/25 pl-1.5">
+                {activeTrackName}
+              </span>
+            )}
           </button>
+
+          {onClearTimeline && (
+            <button
+              type="button"
+              disabled={isRecording}
+              onClick={() => setIsClearConfirmOpen(true)}
+              className={cn(
+                'flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold border transition-colors whitespace-nowrap',
+                isRecording
+                  ? 'bg-zinc-900/60 border-white/5 text-zinc-600 cursor-not-allowed'
+                  : 'bg-zinc-900 border-white/10 text-zinc-400 hover:text-rose-300 hover:bg-rose-950/50 hover:border-rose-500/40 cursor-pointer'
+              )}
+              title="Очистить записи и метки на таймлайне (комикс и главы останутся в проекте)"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span className="hidden md:inline">Очистить таймлайн</span>
+            </button>
+          )}
 
           <div className="h-4 w-px bg-white/10 mx-0.5" />
 
@@ -435,7 +640,9 @@ export const ComicReaderStage: React.FC<ComicReaderStageProps> = ({
       {/* Recording Auto-Marker Subtle Banner */}
       {isRecording && (
         <div className="shrink-0 bg-rose-950/70 border-b border-rose-500/30 px-3 py-1 flex items-center justify-between text-[11px] text-rose-200 select-none">
-          <span>Идёт запись — при листании страниц авто-метки ставятся на таймлайн</span>
+          <span>
+            Идёт запись ({activeTrackName || 'Дубли'}) — авто-метки привязываются к этой дорожке
+          </span>
           <span className="font-mono tabular-nums text-rose-300">
             Гл. {activeChapter.number} · Стр. {comic.activePageIndex + 1} · {formatTimeHms(currentTime)}
           </span>
@@ -445,12 +652,17 @@ export const ComicReaderStage: React.FC<ComicReaderStageProps> = ({
       {/* Main Scrollable Comic Viewport */}
       <div
         ref={scrollContainerRef}
+        onScroll={handleContainerScroll}
+        onWheel={cancelPendingScrollByUser}
+        onPointerDown={cancelPendingScrollByUser}
+        onTouchStart={cancelPendingScrollByUser}
         className={cn(
           'flex-1 min-h-0 overflow-y-auto overflow-x-auto bg-zinc-950 relative custom-scrollbar',
           comic.viewMode === 'page' ? 'flex flex-col items-center justify-start py-4 px-6' : 'py-2 px-4'
         )}
       >
         <div
+          ref={pagesWrapperRef}
           className={cn(
             'mx-auto flex flex-col items-center',
             comic.viewMode === 'webtoon' ? 'gap-0' : 'gap-4'
@@ -481,9 +693,15 @@ export const ComicReaderStage: React.FC<ComicReaderStageProps> = ({
                   <img
                     src={imgUrl}
                     alt={`Глава ${activeChapter.number}, страница ${idx + 1}`}
-                    loading={idx < 3 ? 'eager' : 'lazy'}
+                    loading={idx < 3 || Math.abs(idx - comic.activePageIndex) <= 1 ? 'eager' : 'lazy'}
                     referrerPolicy="no-referrer"
                     draggable={false}
+                    style={
+                      page.width && page.height
+                        ? { aspectRatio: `${page.width} / ${page.height}` }
+                        : undefined
+                    }
+                    onLoad={reapplyPendingScroll}
                     onError={() => setFailedImages((prev) => ({ ...prev, [page.id]: true }))}
                     className="w-full h-auto block select-none"
                   />
@@ -689,6 +907,56 @@ export const ComicReaderStage: React.FC<ComicReaderStageProps> = ({
           </div>
         )}
       </div>
+
+      {/* Confirmation Modal for Destructive Timeline Reset (keeps comic chapters intact) */}
+      {isClearConfirmOpen &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[260] flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+            onClick={() => setIsClearConfirmOpen(false)}
+          >
+            <div
+              className="w-full max-w-sm bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl p-5 space-y-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-4 h-4 text-rose-400" />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-sm font-bold text-white">Очистить таймлайн?</h3>
+                  <p className="text-xs text-zinc-400 leading-relaxed">
+                    Записанные дубли на дорожках, авто-метки страниц и клик-метки реплик будут сброшены, а курсор вернётся на 00:00. Загруженный комикс и все главы останутся в проекте.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setIsClearConfirmOpen(false)}
+                  className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-200 transition-colors cursor-pointer"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsClearConfirmOpen(false);
+                    setDraftPin(null);
+                    setSelectedPinId(null);
+                    onClearTimeline?.();
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-xs font-semibold text-white transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Очистить таймлайн</span>
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 };

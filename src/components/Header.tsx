@@ -208,9 +208,9 @@ const Header: React.FC<HeaderProps> = ({
   }, [recentProjects]);
 
   const baseImportOptions = [
-    { icon: <BookOpen className="w-5 h-5 text-indigo-400" />, title: "Комикс / Манхва (Lib, CBZ, PDF, EPUB)", description: "Импорт глав с MangaLib, RanobeLib, SlashLib или локальный файл", onClick: () => { setShowImportModal(false); onOpenComicModal?.(); } },
     { icon: <FileVideo className="w-5 h-5 text-indigo-400" />, title: "Видео", description: "Открыть видеофайл для озвучки", onClick: () => { setShowImportModal(false); if (isDesktop) handleSelectVideo(); } },
     { icon: <FileText className="w-5 h-5 text-purple-400" />, title: "Субтитры", description: "Импортировать (.ass, .srt, .vtt, .fb2, .csv)", onClick: () => { setShowImportModal(false); if (isDesktop) handleSelectSubs(); } },
+    { icon: <BookOpen className="w-5 h-5 text-indigo-400" />, title: "Комикс / Манхва (Lib, CBZ, CBR, FB2, PDF, EPUB)", description: "Импорт глав с MangaLib, RanobeLib, SlashLib или локальный файл", onClick: () => { setShowImportModal(false); onOpenComicModal?.(); } },
     { icon: <FileText className="w-5 h-5 text-blue-400" />, title: "Документ", description: "Импорт текстового документа с распределением времени", onClick: () => { setShowImportModal(false); if (onOpenDocumentModal) { onOpenDocumentModal(); } else if (isDesktop) { handleSelectDocument(); } } },
     { icon: <Music className="w-5 h-5 text-amber-400" />, title: "Аудиореференс", description: "Выбрать референсный аудиофайл", onClick: () => { setShowImportModal(false); if (isDesktop) handleSelectReferenceAudio(); } },
     { icon: <Layers className="w-5 h-5 text-indigo-400" />, title: "Пакетный импорт", description: "Импорт всех аудиофайлов из папки", onClick: () => { setShowImportModal(false); handleBulkImport(); } },

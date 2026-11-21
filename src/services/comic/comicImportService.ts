@@ -10,14 +10,19 @@ import {
 } from '../../types/comic';
 import { parseLibUrl } from './libUrlParser';
 import {
+  compareNatural,
   chunkParagraphsToPages,
   extractPlainParagraphsFromContent,
   parseNumericChapterValue,
   sanitizeSlug,
 } from './comicUtils';
 import {
+  extractCbrImageEntries,
+  guessExtFromName,
+  parseLocalCbrInBrowser,
   parseLocalCbzInBrowser,
   parseLocalEpubInBrowser,
+  parseLocalFb2InBrowser,
   parseLocalPdfInBrowser,
 } from './localComicParser';
 
@@ -135,7 +140,7 @@ export async function fetchLibTitleInfo(
 
   if (!mangaJson) {
     throw new Error(
-      `Не удалось обратиться к API Lib из браузера (${lastError}). В десктопной версии DubStudio Pro загрузка выполняется через встроенный Rust-клиент без CORS-ограничений; в веб-предпросмотре вы также можете загрузить локальный файл .cbz, .pdf или .epub.`
+      `Не удалось обратиться к API Lib из браузера (${lastError}). В десктопной версии DubStudio Pro загрузка выполняется через встроенный Rust-клиент без CORS-ограничений; в веб-предпросмотре вы также можете загрузить локальный файл .cbz, .cbr, .fb2, .pdf или .epub.`
     );
   }
 
@@ -378,8 +383,122 @@ export async function downloadLibChapters(params: {
 }
 
 /**
- * Import a local physical comic file (.cbz, .pdf, .epub) either via native Rust (Tauri)
- * or via pure-JS browser parser (Web Preview / drag-and-drop File object).
+ * Extracts a RAR4/RAR5 .cbr archive via WASM unrar on Tauri desktop and persists
+ * every page image natively inside <projectPath>/comics/<slug>/ch_XXX/page_XXXX.<ext>.
+ */
+async function importCbrViaWasmToDesktop(params: {
+  filePath: string;
+  projectPath: string;
+  onProgress?: (progress: ComicImportProgress) => void;
+}): Promise<ComicProjectData> {
+  if (!window.electronAPI?.readBinaryFile || !window.electronAPI?.saveComicPageImage) {
+    throw new Error('В текущей версии настольного клиента недоступна запись страниц CBR.');
+  }
+
+  const fileName = params.filePath.split(/[/\\]/).pop() || 'comic.cbr';
+  const stem = fileName.replace(/\.[^.]+$/, '') || 'comic';
+  const safeSlug = sanitizeSlug(stem, 'cbr_comic');
+
+  params.onProgress?.({
+    stage: 'extract',
+    currentChapter: 1,
+    totalChapters: 1,
+    currentPage: 0,
+    totalPages: 0,
+    message: `Чтение и распаковка RAR-архива ${fileName}...`,
+  });
+
+  const binRes = await window.electronAPI.readBinaryFile(params.filePath);
+  if (!binRes.success || !binRes.data) {
+    throw new Error(binRes.error || 'Не удалось прочитать CBR-файл с диска.');
+  }
+
+  const bytes = binRes.data instanceof Uint8Array ? binRes.data : new Uint8Array(binRes.data);
+  const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const entries = await extractCbrImageEntries(arrayBuffer);
+
+  if (entries.length === 0) {
+    throw new Error('В CBR-архиве не найдено изображений страниц.');
+  }
+
+  const grouped = new Map<string, typeof entries>();
+  for (const item of entries) {
+    const parts = item.path.split('/');
+    const dirKey = parts.slice(0, -1).join('/');
+    if (!grouped.has(dirKey)) grouped.set(dirKey, []);
+    grouped.get(dirKey)!.push(item);
+  }
+
+  const sortedDirs = Array.from(grouped.keys()).sort(compareNatural);
+  const chapters: ComicChapter[] = [];
+  let coverPath: string | null = null;
+
+  for (let chIdx = 0; chIdx < sortedDirs.length; chIdx++) {
+    const dirKey = sortedDirs[chIdx];
+    const items = grouped.get(dirKey)!.sort((a, b) => compareNatural(a.path, b.path));
+    const chFolder = `ch_${String(chIdx + 1).padStart(3, '0')}`;
+    const chId = `cbr-${safeSlug}-ch-${chIdx + 1}`;
+    const pages = [];
+
+    for (let pIdx = 0; pIdx < items.length; pIdx++) {
+      const item = items[pIdx];
+      const ext = guessExtFromName(item.path);
+      const outName = `page_${String(pIdx + 1).padStart(4, '0')}.${ext}`;
+
+      const saveRes = await window.electronAPI.saveComicPageImage({
+        projectPath: params.projectPath,
+        comicId: safeSlug,
+        chapterId: chFolder,
+        fileName: outName,
+        bytes: Array.from(item.data),
+      });
+
+      if (!saveRes.success || !saveRes.data) {
+        throw new Error(saveRes.error || `Не удалось сохранить страницу ${pIdx + 1} из CBR.`);
+      }
+
+      const relPath = saveRes.data;
+      if (!coverPath) coverPath = relPath;
+
+      pages.push({
+        id: `${chId}-p-${pIdx + 1}`,
+        index: pIdx,
+        imagePath: relPath,
+      });
+
+      params.onProgress?.({
+        stage: 'pages',
+        currentChapter: chIdx + 1,
+        totalChapters: sortedDirs.length,
+        currentPage: pIdx + 1,
+        totalPages: items.length,
+        message: `Сохранение CBR: глава ${chIdx + 1}/${sortedDirs.length}, стр. ${pIdx + 1}/${items.length}`,
+      });
+    }
+
+    const dirTitle = dirKey ? dirKey.split('/').pop() || dirKey : `Глава ${chIdx + 1}`;
+    chapters.push({
+      id: chId,
+      volume: '1',
+      number: String(chIdx + 1),
+      title: dirTitle,
+      pages,
+    });
+  }
+
+  return buildComicProjectFromImport({
+    id: `comic-cbr-${safeSlug}`,
+    title: stem,
+    sourceType: 'cbr',
+    coverPath,
+    isRanobe: false,
+    chapters,
+  });
+}
+
+/**
+ * Import a local physical comic file (.cbz, .cbr, .fb2, .pdf, .epub) either via native Rust (Tauri)
+ * or via pure-JS/WASM browser parser (Web Preview / drag-and-drop File object).
  */
 export async function importLocalComicFile(params: {
   file?: File;
@@ -410,6 +529,15 @@ export async function importLocalComicFile(params: {
       filePath: params.filePath,
       projectPath,
     });
+
+    if (!res.success && res.error?.includes('CBR_RAR_WASM_REQUIRED')) {
+      return importCbrViaWasmToDesktop({
+        filePath: params.filePath,
+        projectPath,
+        onProgress: params.onProgress,
+      });
+    }
+
     if (!res.success || !res.data) {
       throw new Error(res.error || 'Не удалось импортировать локальный файл комикса.');
     }
@@ -434,6 +562,14 @@ export async function importLocalComicFile(params: {
     const parsed = await parseLocalCbzInBrowser(params.file);
     return buildComicProjectFromImport(parsed);
   }
+  if (ext === 'cbr') {
+    const parsed = await parseLocalCbrInBrowser(params.file);
+    return buildComicProjectFromImport(parsed);
+  }
+  if (ext === 'fb2') {
+    const parsed = await parseLocalFb2InBrowser(params.file);
+    return buildComicProjectFromImport(parsed);
+  }
   if (ext === 'epub') {
     const parsed = await parseLocalEpubInBrowser(params.file);
     return buildComicProjectFromImport(parsed);
@@ -443,5 +579,5 @@ export async function importLocalComicFile(params: {
     return buildComicProjectFromImport(parsed);
   }
 
-  throw new Error(`Формат .${ext} не поддерживается. Поддерживаются .cbz, .pdf и .epub.`);
+  throw new Error(`Формат .${ext} не поддерживается. Поддерживаются .cbz, .cbr, .fb2, .pdf и .epub.`);
 }

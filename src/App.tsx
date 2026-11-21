@@ -315,9 +315,17 @@ export default function App() {
     currentTime,
     currentTimeRef,
     isRecording,
+    isPlaying,
+    selectedSegmentIds,
     duration,
     setDuration,
     onSeek: handleSeek,
+    onStopPlayback: () => {
+      if (isPlayingRef.current) {
+        togglePlay();
+      }
+    },
+    onClearSelection: () => setSelectedSegmentIds([]),
     saveSnapshot,
   });
 
@@ -1014,7 +1022,7 @@ export default function App() {
         continue;
       }
 
-      if (fileExt === '.cbz') {
+      if (fileExt === '.cbz' || fileExt === '.cbr') {
         try {
           const importedComic = await importLocalComicFile({
             filePath: path,
@@ -1022,8 +1030,8 @@ export default function App() {
           });
           comicSync.handleComicImported(importedComic, project?.projectPath);
         } catch (err) {
-          logger.error('Native CBZ drop error:', err);
-          setComicDropError(err instanceof Error ? err.message : 'Не удалось импортировать CBZ комикс.');
+          logger.error('Native comic archive drop error:', err);
+          setComicDropError(err instanceof Error ? err.message : 'Не удалось импортировать архив комикса.');
         }
         continue;
       }
@@ -1366,17 +1374,20 @@ export default function App() {
       return;
     }
 
-    const cbzFiles = allDroppedFiles.filter(f => f.name.toLowerCase().endsWith('.cbz'));
-    if (cbzFiles.length > 0) {
+    const comicArchiveFiles = allDroppedFiles.filter((f) => {
+      const lower = f.name.toLowerCase();
+      return lower.endsWith('.cbz') || lower.endsWith('.cbr');
+    });
+    if (comicArchiveFiles.length > 0) {
       try {
         const importedComic = await importLocalComicFile({
-          file: cbzFiles[0],
+          file: comicArchiveFiles[0],
           projectPath: project?.projectPath,
         });
         comicSync.handleComicImported(importedComic, project?.projectPath);
       } catch (err) {
-        logger.error('CBZ drop error:', err);
-        setComicDropError(err instanceof Error ? err.message : 'Не удалось импортировать CBZ комикс.');
+        logger.error('Comic archive drop error:', err);
+        setComicDropError(err instanceof Error ? err.message : 'Не удалось импортировать архив комикса.');
       }
       return;
     }
@@ -1635,7 +1646,9 @@ export default function App() {
       'text/plain': ['.txt', '.csv', '.vtt'],
       'application/x-subrip': ['.srt'],
       'application/vnd.comicbook+zip': ['.cbz'],
-      'application/octet-stream': ['.ass', '.srt', '.fb2', '.dub', '.cbz'],
+      'application/vnd.comicbook-rar': ['.cbr'],
+      'application/x-cbr': ['.cbr'],
+      'application/octet-stream': ['.ass', '.srt', '.fb2', '.dub', '.cbz', '.cbr'],
       'application/json': ['.dub'],
       'application/x-dubstudio-project': ['.dub']
     }
@@ -3382,16 +3395,21 @@ export default function App() {
                 isRecording={isRecording}
                 hasVideo={!!(project.videoPath || project.videoUrl)}
                 isRightNavCollapsed={comicSync.isRightNavCollapsed}
-                scrollRequestToken={comicSync.scrollRequestToken}
+                scrollTarget={comicSync.scrollTarget}
+                activeTrackId={comicSync.activeTrackId}
+                activeTrackName={comicSync.activeTrackName}
+                isFirstDubTrack={comicSync.isFirstDubTrack}
                 onSwitchToVideo={() => comicSync.setStageView('video')}
                 onExpandRightNav={() => comicSync.setIsRightNavCollapsed(false)}
                 onViewModeChange={comicSync.handleViewModeChange}
                 onZoomChange={comicSync.handleZoomChange}
                 onToggleTimelineSync={comicSync.handleToggleTimelineSync}
                 onActivePageChange={comicSync.handleActivePageChange}
+                onViewportScrollChange={comicSync.handleViewportScrollPosition}
                 onAddPin={comicSync.handleAddBubblePin}
                 onDeletePin={comicSync.handleDeleteBubblePin}
                 onSelectPin={comicSync.handleSelectPin}
+                onClearTimeline={comicSync.handleClearComicTimeline}
                 onPdfPageCountResolved={comicSync.handlePdfPageCountResolved}
               />
             ) : (!project.videoPath && !project.videoUrl) ? (
