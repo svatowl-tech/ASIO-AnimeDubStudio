@@ -32,6 +32,7 @@ export const ActorOverlay = ({
   isAudiobook = false,
   isBackstageRecording = false,
   activeRole = '',
+  activeRoles,
   project,
   onSettingsChange,
   onSeek,
@@ -65,6 +66,7 @@ export const ActorOverlay = ({
   isAudiobook?: boolean,
   isBackstageRecording?: boolean,
   activeRole?: string,
+  activeRoles?: string[],
   project?: Project,
   onSettingsChange?: (settings: any) => void,
   onSeek?: (time: number) => void,
@@ -170,6 +172,8 @@ export const ActorOverlay = ({
             lineHeight={teleprompterLineHeight}
             pacing={teleprompterPacing}
             activeRole={activeRole}
+            activeRoles={activeRoles ?? project?.selectedRoles}
+            subtitlesOffset={project?.subtitlesOffset || 0}
             dragControls={dragControls}
             onFontSizeChange={setTeleprompterFontSize}
             onLineHeightChange={setTeleprompterLineHeight}

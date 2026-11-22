@@ -228,6 +228,7 @@ const StudioModeContent = () => {
         isAudiobook={state.isAudiobook || false}
         isBackstageRecording={state.isBackstageRecording || false}
         activeRole={state.activeRole || ''}
+        activeRoles={state.activeRoles}
         project={state.project as Project | null}
         onSettingsChange={() => {}}
         onSeek={() => {}}

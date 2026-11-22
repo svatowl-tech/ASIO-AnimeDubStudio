@@ -1,6 +1,11 @@
 import React, { useEffect } from 'react';
 import { Project } from '../types';
 import { getDefaultKeyMap } from '../lib/utils';
+import {
+  findNextSubtitleTarget,
+  findPrevSubtitleTarget,
+  getActiveRoles,
+} from '../lib/subtitleNavigation';
 
 interface UseTimelineHotkeysProps {
   projectRef: React.MutableRefObject<Project | null>;
@@ -56,6 +61,7 @@ export function useTimelineHotkeys({
     handleCopySegments, handleCutSegments, handlePasteSegments,
     onUndo, onRedo
   });
+  const lastSubNavRef = React.useRef<{ id: string; seekTime: number } | null>(null);
 
   useEffect(() => {
     callbacksRef.current = {
@@ -215,109 +221,80 @@ export function useTimelineHotkeys({
         }
       }
 
-      // Seek prev subtitle
+      // Seek prev subtitle (multi-role aware)
       if (isPressed('seek_prev_sub')) {
         blurActiveElement();
         e.preventDefault();
         e.stopPropagation();
         const proj = projectRef.current;
         if (proj && proj.subtitles.length > 0 && callbacksRef.current.handleSeek) {
-          const subs = proj.subtitles;
-          const role = proj.selectedRole;
-          const currentTime = currentTimeRef.current;
-          
-          // 1. Find current index
-          let currentIndex = -1;
-          const exactIndex = subs.findIndex(s => currentTime >= s.start && currentTime <= s.end);
-          if (exactIndex !== -1) {
-            currentIndex = exactIndex;
+          const offset = proj.subtitlesOffset || 0;
+          const activeRoles = getActiveRoles(proj);
+          const target = findPrevSubtitleTarget({
+            subtitles: proj.subtitles,
+            activeRoles,
+            currentTime: currentTimeRef.current,
+            subtitlesOffset: offset,
+            lastTargetId: lastSubNavRef.current?.id,
+            lastTargetSeekTime: lastSubNavRef.current?.seekTime,
+            snapToCurrentStartThreshold: 0.5,
+          });
+
+          if (target) {
+            const seekTime = Math.max(0, target.start + offset);
+            lastSubNavRef.current = { id: target.id, seekTime };
+            callbacksRef.current.handleSeek(seekTime);
+            setTimeout(() => {
+              document.getElementById(`sub-${target.id}`)?.scrollIntoView({ behavior: 'auto', block: 'center' });
+            }, 20);
           } else {
-            for (let i = subs.length - 1; i >= 0; i--) {
-              if (currentTime > subs[i].start) {
-                currentIndex = i;
-                break;
-              }
-            }
-          }
-
-          // 2. Logic: If inside sub and > 0.5s from start, go to start
-          const currentSub = currentIndex !== -1 ? subs[currentIndex] : null;
-          if (currentSub && currentTime > currentSub.start + 0.5) {
-            callbacksRef.current.handleSeek(currentSub.start);
-            window.dispatchEvent(new CustomEvent('syncScroll'));
-            return;
-          }
-
-          // 3. Otherwise find previous
-          let targetIndex = -1;
-          for (let i = currentIndex - 1; i >= 0; i--) {
-            if (subs[i].role === role || !role) {
-              targetIndex = i;
-              break;
-            }
-          }
-          if (targetIndex === -1 && currentIndex > 0) targetIndex = currentIndex - 1;
-
-          if (targetIndex !== -1) {
-            callbacksRef.current.handleSeek(subs[targetIndex].start);
-          } else {
+            lastSubNavRef.current = null;
             callbacksRef.current.handleSeek(0);
+            window.dispatchEvent(new CustomEvent('syncScroll'));
           }
-          window.dispatchEvent(new CustomEvent('syncScroll'));
         }
         return;
       }
 
-      // Seek next subtitle
+      // Seek next subtitle (multi-role aware)
       if (isPressed('seek_next_sub')) {
         blurActiveElement();
         e.preventDefault();
         e.stopPropagation();
         const proj = projectRef.current;
         if (proj && proj.subtitles.length > 0 && callbacksRef.current.handleSeek) {
-          const subs = proj.subtitles;
-          const role = proj.selectedRole;
-          const currentTime = currentTimeRef.current;
+          const offset = proj.subtitlesOffset || 0;
+          const activeRoles = getActiveRoles(proj);
+          const target = findNextSubtitleTarget({
+            subtitles: proj.subtitles,
+            activeRoles,
+            currentTime: currentTimeRef.current,
+            subtitlesOffset: offset,
+            lastTargetId: lastSubNavRef.current?.id,
+            lastTargetSeekTime: lastSubNavRef.current?.seekTime,
+          });
 
-          // 1. Find current index
-          let currentIndex = -1;
-          const exactIndex = subs.findIndex(s => currentTime >= s.start && currentTime <= s.end);
-          if (exactIndex !== -1) {
-            currentIndex = exactIndex;
+          if (target) {
+            const seekTime = Math.max(0, target.start + offset);
+            lastSubNavRef.current = { id: target.id, seekTime };
+            callbacksRef.current.handleSeek(seekTime);
+            setTimeout(() => {
+              document.getElementById(`sub-${target.id}`)?.scrollIntoView({ behavior: 'auto', block: 'center' });
+            }, 20);
           } else {
-            for (let i = subs.length - 1; i >= 0; i--) {
-              if (currentTime > subs[i].start) {
-                currentIndex = i;
-                break;
-              }
-            }
-          }
-
-          // 2. Find next
-          let targetIndex = -1;
-          for (let i = currentIndex + 1; i < subs.length; i++) {
-            if (subs[i].role === role || !role) {
-              targetIndex = i;
-              break;
-            }
-          }
-          if (targetIndex === -1 && currentIndex < subs.length - 1) {
-            targetIndex = currentIndex + 1;
-          }
-
-          if (targetIndex !== -1) {
-            callbacksRef.current.handleSeek(subs[targetIndex].start);
-          } else {
-            // Seek to end
+            lastSubNavRef.current = null;
             let maxEnd = 0;
             proj.tracks.forEach(t => {
               t.segments.forEach(s => {
                 maxEnd = Math.max(maxEnd, s.startTime + s.duration);
               });
             });
+            proj.subtitles.forEach(s => {
+              maxEnd = Math.max(maxEnd, (s.end || s.start) + offset);
+            });
             callbacksRef.current.handleSeek(maxEnd);
+            window.dispatchEvent(new CustomEvent('syncScroll'));
           }
-          window.dispatchEvent(new CustomEvent('syncScroll'));
         }
         return;
       }

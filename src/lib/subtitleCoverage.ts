@@ -23,6 +23,7 @@ export function isOriginalTrack(track: { id?: string; name?: string }): boolean 
     name.includes('оригинал') ||
     name.includes('original') ||
     name.includes('reference') ||
+    name.includes('референс') ||
     id.includes('original') ||
     id.includes('reference') ||
     id === 'originals-track' ||
@@ -122,14 +123,13 @@ export function getSubtitleCoverageStats(project: Project | null): SubtitleCover
       ? project.subtitles.filter((sub) => activeRoles.includes(sub.role))
       : project.subtitles;
 
-  // Gather audio segments from armed dubbing tracks (or all dubbing tracks if no track is armed),
-  // strictly excluding the original / reference tracks which contain master video audio.
+  // Gather audio segments from ALL dubbing tracks (so overlapping lines recorded onto a 2nd/3rd track
+  // are counted together with Track 1 regardless of which track is currently armed), strictly excluding
+  // original / reference tracks which contain master video audio.
   const tracks = project.tracks || [];
   const dubbingTracks = tracks.filter((t) => !isOriginalTrack(t));
-  const armedDubbingTracks = dubbingTracks.filter((t) => t.isArmed);
-  const targetTracks = armedDubbingTracks.length > 0 ? armedDubbingTracks : dubbingTracks;
 
-  const allSegments: AudioSegment[] = targetTracks
+  const allSegments: AudioSegment[] = dubbingTracks
     .flatMap((t) => t.segments || [])
     .filter((seg) => !isOriginalSegment(seg));
   const subtitlesOffset = project.subtitlesOffset || 0;
@@ -172,7 +172,9 @@ export function getNextUnrecordedSubtitle(
   }
 
   const offset = project.subtitlesOffset || 0;
-  const unrecordedList = project.subtitles.filter((s) => unrecordedLineIds.has(s.id));
+  const unrecordedList = project.subtitles
+    .filter((s) => unrecordedLineIds.has(s.id))
+    .sort((a, b) => a.start - b.start || a.end - b.end);
 
   // Find next unrecorded line after currentTime + 0.1s
   const next = unrecordedList.find((s) => s.start + offset > currentTime + 0.1);

@@ -5,6 +5,11 @@ import { Project, SubtitleLine } from '../types';
 import { useSyncScriptScroll } from '../hooks/useSyncScriptScroll';
 import { UniversalParserService } from '../services/UniversalParserService';
 import { getSubtitleCoverageStats } from '../lib/subtitleCoverage';
+import {
+  findNextSubtitleTarget,
+  findPrevSubtitleTarget,
+  getActiveRoles,
+} from '../lib/subtitleNavigation';
 
 interface SidebarProps {
   project: Project | null;
@@ -62,11 +67,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   }, [isDropdownOpen]);
 
   const activeRoles = React.useMemo(() => {
-    if (!project) return [];
-    if (project.selectedRoles && project.selectedRoles.length > 0) {
-      return project.selectedRoles;
-    }
-    return project.selectedRole ? [project.selectedRole] : [];
+    return getActiveRoles(project);
   }, [project?.selectedRoles, project?.selectedRole]);
 
   const coverageStats = React.useMemo(() => {
@@ -105,77 +106,90 @@ const Sidebar: React.FC<SidebarProps> = ({
     return nearestIndex;
   }, [project, currentTime]);
 
-  const handleSeekToLine = React.useCallback((startTime: number) => {
+  const lastNavigatedRef = React.useRef<{ id: string; seekTime: number } | null>(null);
+
+  const scrollToSubtitleId = React.useCallback((subId: string) => {
+    setTimeout(() => {
+      const el = document.getElementById(`sub-${subId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'auto', block: 'center' });
+      }
+    }, 20);
+  }, []);
+
+  const handleSeekToLine = React.useCallback((startTime: number, lineId?: string) => {
     const preroll = project?.audioSettings?.prerollSeconds ?? 3;
-    onSeek(Math.max(0, startTime - preroll));
+    const offset = project?.subtitlesOffset || 0;
+    const seekTime = Math.max(0, startTime + offset - preroll);
+    if (lineId) {
+      lastNavigatedRef.current = { id: lineId, seekTime };
+    }
+    onSeek(seekTime);
     if (!isPlaying) onTogglePlay();
-  }, [project?.audioSettings?.prerollSeconds, onSeek, isPlaying, onTogglePlay]);
+  }, [project?.audioSettings?.prerollSeconds, project?.subtitlesOffset, onSeek, isPlaying, onTogglePlay]);
 
   const { handleManualInteraction } = useSyncScriptScroll(currentTime, project?.subtitles || [], sidebarRef);
 
   const goToPrevSubtitle = React.useCallback(() => {
     if (!project || project.subtitles.length === 0) return;
-    const subs = project.subtitles;
-    const preroll = project?.audioSettings?.prerollSeconds ?? 3;
+    const preroll = project.audioSettings?.prerollSeconds ?? 3;
+    const offset = project.subtitlesOffset || 0;
 
-    // Search for a phrase that started BEFORE current time minus a buffer
-    // Adding 0.6s buffer ensures we don't jump to the start of the current subtitle if we're near its beginning
-    const searchTime = currentTime - 0.6;
+    const target = findPrevSubtitleTarget({
+      subtitles: project.subtitles,
+      activeRoles,
+      currentTime,
+      subtitlesOffset: offset,
+      lastTargetId: lastNavigatedRef.current?.id,
+      lastTargetSeekTime: lastNavigatedRef.current?.seekTime,
+    });
 
-    let targetSubIndex = -1;
-    for (let i = subs.length - 1; i >= 0; i--) {
-      const isRoleMatch = activeRoles.length === 0 || activeRoles.includes(subs[i].role);
-      if (subs[i].start < searchTime && isRoleMatch) {
-        targetSubIndex = i;
-        break;
-      }
-    }
-
-    if (targetSubIndex !== -1) {
-      onSeek(Math.max(0, subs[targetSubIndex].start - preroll));
+    if (target) {
+      const seekTime = Math.max(0, target.start + offset - preroll);
+      lastNavigatedRef.current = { id: target.id, seekTime };
+      onSeek(seekTime);
+      handleManualInteraction();
+      scrollToSubtitleId(target.id);
     } else {
+      lastNavigatedRef.current = null;
       onSeek(0);
+      handleManualInteraction();
+      window.dispatchEvent(new CustomEvent('syncScroll'));
     }
-
-    handleManualInteraction();
-    window.dispatchEvent(new CustomEvent('syncScroll'));
-  }, [project, activeRoles, currentTime, onSeek, handleManualInteraction]);
+  }, [project, activeRoles, currentTime, onSeek, handleManualInteraction, scrollToSubtitleId]);
 
   const goToNextSubtitle = React.useCallback(() => {
     if (!project || project.subtitles.length === 0) return;
-    const subs = project.subtitles;
-    const preroll = project?.audioSettings?.prerollSeconds ?? 3;
+    const preroll = project.audioSettings?.prerollSeconds ?? 3;
+    const offset = project.subtitlesOffset || 0;
 
-    // Search for a phrase that starts AFTER current time + preroll + buffer
-    // This ensures we skip the subtitle we are currently targeting/viewing
-    const searchTime = currentTime + preroll + 0.5;
+    const target = findNextSubtitleTarget({
+      subtitles: project.subtitles,
+      activeRoles,
+      currentTime,
+      subtitlesOffset: offset,
+      lastTargetId: lastNavigatedRef.current?.id,
+      lastTargetSeekTime: lastNavigatedRef.current?.seekTime,
+    });
 
-    let targetSubIndex = -1;
-    for (let i = 0; i < subs.length; i++) {
-      const isRoleMatch = activeRoles.length === 0 || activeRoles.includes(subs[i].role);
-      if (subs[i].start >= searchTime && isRoleMatch) {
-        targetSubIndex = i;
-        break;
-      }
-    }
-
-    // Fallback: if no match for role, find any next subtitle
-    if (targetSubIndex === -1) {
-       targetSubIndex = subs.findIndex(s => s.start > currentTime + 0.5);
-    }
-
-    if (targetSubIndex !== -1) {
-      onSeek(Math.max(0, subs[targetSubIndex].start - preroll));
+    if (target) {
+      const seekTime = Math.max(0, target.start + offset - preroll);
+      lastNavigatedRef.current = { id: target.id, seekTime };
+      onSeek(seekTime);
       handleManualInteraction();
-      window.dispatchEvent(new CustomEvent('syncScroll'));
+      scrollToSubtitleId(target.id);
     } else {
-      // If nothing ahead, go to the end of the script
-      const maxEnd = project.subtitles[project.subtitles.length - 1]?.end || currentTime;
+      // Already past the last active-role line: go to end of script
+      lastNavigatedRef.current = null;
+      const maxEnd = project.subtitles.reduce(
+        (acc, s) => Math.max(acc, (s.end || s.start) + offset),
+        currentTime
+      );
       onSeek(maxEnd);
       handleManualInteraction();
       window.dispatchEvent(new CustomEvent('syncScroll'));
     }
-  }, [project, activeRoles, currentTime, onSeek, handleManualInteraction]);
+  }, [project, activeRoles, currentTime, onSeek, handleManualInteraction, scrollToSubtitleId]);
 
   return (
     <aside 
@@ -379,14 +393,14 @@ const Sidebar: React.FC<SidebarProps> = ({
             <button 
               onClick={goToPrevSubtitle}
               className="flex-1 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 border border-white/5 rounded-lg text-[10px] font-bold text-zinc-300 transition-colors uppercase tracking-wider"
-              disabled={currentTime <= 0.1}
+              disabled={!project.subtitles || project.subtitles.length === 0}
             >
               Пред.
             </button>
             <button 
               onClick={goToNextSubtitle}
               className="flex-1 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 border border-white/5 rounded-lg text-[10px] font-bold text-zinc-300 transition-colors uppercase tracking-wider"
-              disabled={false}
+              disabled={!project.subtitles || project.subtitles.length === 0}
             >
               След.
             </button>
@@ -487,7 +501,7 @@ interface SubtitleItemProps {
   isRecorded?: boolean;
   isUnrecorded?: boolean;
   isHighlightingMissingSubtitles?: boolean;
-  onSeekToTime: (startTime: number) => void;
+  onSeekToTime: (startTime: number, lineId?: string) => void;
 }
 
 const SubtitleItem = React.memo<SubtitleItemProps>(({
@@ -499,10 +513,10 @@ const SubtitleItem = React.memo<SubtitleItemProps>(({
   isHighlightingMissingSubtitles,
   onSeekToTime
 }) => {
-  const { start } = line;
+  const { start, id } = line;
   const handleClick = React.useCallback(() => {
-    onSeekToTime(start);
-  }, [onSeekToTime, start]);
+    onSeekToTime(start, id);
+  }, [onSeekToTime, start, id]);
 
   const showHighlight = isHighlightingMissingSubtitles && isUnrecorded;
 

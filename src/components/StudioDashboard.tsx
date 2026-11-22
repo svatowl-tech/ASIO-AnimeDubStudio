@@ -67,7 +67,9 @@ const StudioDashboard: React.FC<StudioDashboardProps> = ({
             
             <div className="bg-black/40 rounded-xl p-5 border border-white/5 mb-4 shadow-inner">
               <div className="text-xs text-indigo-400 font-bold mb-2 uppercase tracking-wider">
-                Роль: {project.selectedRole || 'Все роли'}
+                {project.selectedRoles && project.selectedRoles.length > 1
+                  ? `Роли (${project.selectedRoles.length}): ${project.selectedRoles.join(', ')}`
+                  : `Роль: ${(project.selectedRoles?.[0] || project.selectedRole) || 'Все роли'}`}
               </div>
               <div className="text-lg font-bold text-white mb-2 leading-relaxed font-sans">
                 {currentLine ? currentLine.text : <span className="text-zinc-600 italic">Ожидание реплики...</span>}

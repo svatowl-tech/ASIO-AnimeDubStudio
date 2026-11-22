@@ -22,6 +22,7 @@ import AudioSegmentView from './AudioSegmentView';
 import { TimelineMinimap } from './TimelineMinimap';
 
 import VirtualizedWaveform from './VirtualizedWaveform';
+import { getActiveFixTimestamps } from '../lib/fixNavigation';
 
 
 export const Playhead = ({ zoom }: { zoom: number }) => {
@@ -374,25 +375,10 @@ export const AdvancedTimeline = ({
   const [snapLine, setSnapLine] = useState<number | null>(null);
   const lastScrubTimeRef = useRef<number | null>(null);
 
-  // Find all unique, sorted fix timestamps (unsatisfied fixes)
+  // Find all unique, sorted fix timestamps (unsatisfied fixes, deduplicated across fixes and subtitles)
   const sortedFixTimes = React.useMemo(() => {
-    const fixTimes: number[] = [];
-    if (project.subtitles) {
-      project.subtitles.forEach(sub => {
-        if (sub.needsFix) {
-          fixTimes.push(sub.start);
-        }
-      });
-    }
-    if (project.fixes) {
-      project.fixes.forEach(fix => {
-        if (!fix.isResolved) {
-          fixTimes.push(fix.timestamp);
-        }
-      });
-    }
-    return Array.from(new Set(fixTimes)).sort((a, b) => a - b);
-  }, [project.fixes, project.subtitles]);
+    return getActiveFixTimestamps(project.subtitles, project.fixes, project.subtitlesOffset || 0);
+  }, [project.fixes, project.subtitles, project.subtitlesOffset]);
 
   const handleJumpToNextFix = () => {
     if (sortedFixTimes.length === 0) return;

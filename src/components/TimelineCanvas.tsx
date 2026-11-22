@@ -253,9 +253,10 @@ export const TimelineCanvas = React.memo(({
     prevProps.project.selectedRole === nextProps.project.selectedRole &&
     JSON.stringify(prevProps.project.selectedRoles) === JSON.stringify(nextProps.project.selectedRoles) &&
     prevProps.project.subtitles === nextProps.project.subtitles &&
+    prevProps.project.subtitlesOffset === nextProps.project.subtitlesOffset &&
+    prevProps.project.tracks === nextProps.project.tracks &&
     prevProps.project.markers === nextProps.project.markers &&
-    (prevProps.project.tracks?.find((t) => t.isArmed)?.id || '') ===
-      (nextProps.project.tracks?.find((t) => t.isArmed)?.id || '')
+    prevProps.isHighlightingMissingSubtitles === nextProps.isHighlightingMissingSubtitles
   );
 });
 

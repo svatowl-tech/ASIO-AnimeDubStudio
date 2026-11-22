@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { SubtitleLine, TeleprompterMode } from '../types';
+import { getSortedActiveSubtitles } from '../lib/subtitleNavigation';
 import { TeleprompterResizer } from './teleprompter/TeleprompterResizer';
 import { getStoredTeleprompterPref, saveTeleprompterPref } from './teleprompter/useTeleprompterLayout';
 
@@ -29,6 +30,8 @@ export const Teleprompter = ({
   lineHeight,
   pacing,
   activeRole,
+  activeRoles,
+  subtitlesOffset = 0,
   dragControls,
   onFontSizeChange,
   onLineHeightChange,
@@ -43,7 +46,9 @@ export const Teleprompter = ({
   fontSize: number,
   lineHeight: number,
   pacing: 'auto' | 'manual',
-  activeRole: string,
+  activeRole?: string,
+  activeRoles?: string[],
+  subtitlesOffset?: number,
   dragControls?: any,
   onFontSizeChange: (size: number) => void,
   onLineHeightChange: (height: number) => void,
@@ -159,13 +164,17 @@ export const Teleprompter = ({
     setMenuAnchor({ x: e.clientX, y: e.clientY });
   }, []);
 
-  // Filter subtitles by activeRole if selected, falling back to all subtitles if none match
+  const effectiveActiveRoles = useMemo(() => {
+    if (activeRoles && activeRoles.length > 0) return activeRoles;
+    return activeRole ? [activeRole] : [];
+  }, [activeRoles, activeRole]);
+
+  // Filter subtitles by all active roles (or fall back to all subtitles) and sort chronologically
   const roleSubtitles = useMemo(() => {
-    const all = subtitles || [];
-    if (!activeRole) return all;
-    const filtered = all.filter(s => s.role === activeRole);
-    return filtered.length > 0 ? filtered : all;
-  }, [subtitles, activeRole]);
+    return getSortedActiveSubtitles(subtitles, effectiveActiveRoles);
+  }, [subtitles, effectiveActiveRoles]);
+
+  const effectiveTime = currentTime - (subtitlesOffset || 0);
 
   // Reset manual offset when switching back to auto pacing
   useEffect(() => {
@@ -174,14 +183,27 @@ export const Teleprompter = ({
     }
   }, [pacing, currentTime]);
 
-  // Find current active line and upcoming line
+  // Find currently active line (supporting overlapping multi-role lines cleanly:
+  // when a newer overlapping line begins, promote it to primary; if multiple lines share the exact same start,
+  // pick the first one as primary so the second appears immediately underneath as secondary)
   const activeIndex = useMemo(() => {
-    return roleSubtitles.findIndex(s => currentTime >= s.start && currentTime <= s.end);
-  }, [roleSubtitles, currentTime]);
+    let bestIdx = -1;
+    let bestStart = -Infinity;
+    for (let i = 0; i < roleSubtitles.length; i++) {
+      const s = roleSubtitles[i];
+      if (effectiveTime >= s.start && effectiveTime <= s.end) {
+        if (s.start > bestStart) {
+          bestStart = s.start;
+          bestIdx = i;
+        }
+      }
+    }
+    return bestIdx;
+  }, [roleSubtitles, effectiveTime]);
 
   const nextIndex = useMemo(() => {
-    return roleSubtitles.findIndex(s => s.start > currentTime);
-  }, [roleSubtitles, currentTime]);
+    return roleSubtitles.findIndex(s => s.start > effectiveTime);
+  }, [roleSubtitles, effectiveTime]);
 
   const baseAnchorIndex = useMemo(() => {
     if (activeIndex !== -1) return activeIndex;
@@ -198,26 +220,38 @@ export const Teleprompter = ({
   }, [baseAnchorIndex, pacing, manualStepOffset, roleSubtitles.length]);
 
   const primaryLine = effectiveIndex !== -1 ? roleSubtitles[effectiveIndex] : null;
-  const secondaryLine =
-    effectiveIndex !== -1 && effectiveIndex + 1 < roleSubtitles.length
-      ? roleSubtitles[effectiveIndex + 1]
-      : null;
+  const secondaryLine = useMemo(() => {
+    if (effectiveIndex === -1) return null;
+    if (pacing === 'manual') {
+      return effectiveIndex + 1 < roleSubtitles.length ? roleSubtitles[effectiveIndex + 1] : null;
+    }
+    // In auto mode, pick the next line after primary that hasn't already ended
+    for (let i = effectiveIndex + 1; i < roleSubtitles.length; i++) {
+      if (roleSubtitles[i].end >= effectiveTime) {
+        return roleSubtitles[i];
+      }
+    }
+    return null;
+  }, [effectiveIndex, pacing, roleSubtitles, effectiveTime]);
 
   const isPrimaryCurrentlySpeaking =
-    !!primaryLine && currentTime >= primaryLine.start && currentTime <= primaryLine.end;
+    !!primaryLine && effectiveTime >= primaryLine.start && effectiveTime <= primaryLine.end;
+
+  const isSecondaryCurrentlySpeaking =
+    !!secondaryLine && effectiveTime >= secondaryLine.start && effectiveTime <= secondaryLine.end;
 
   const timeToNext =
-    !isPrimaryCurrentlySpeaking && primaryLine && primaryLine.start > currentTime
-      ? Math.max(0, primaryLine.start - currentTime)
+    !isPrimaryCurrentlySpeaking && primaryLine && primaryLine.start > effectiveTime
+      ? Math.max(0, primaryLine.start - effectiveTime)
       : null;
 
   const remainingSpeakTime =
     isPrimaryCurrentlySpeaking && primaryLine
-      ? Math.max(0, primaryLine.end - currentTime)
+      ? Math.max(0, primaryLine.end - effectiveTime)
       : null;
 
   // Traffic light state ("принцип светофора"):
-  // - 'green': currently speaking (currentTime >= start && currentTime <= end)
+  // - 'green': currently speaking (effectiveTime >= start && effectiveTime <= end)
   // - 'yellow': <= 1.5 seconds before replica starts
   // - 'red': > 1.5 seconds before replica starts
   // - 'idle': after last replica finished
@@ -233,8 +267,8 @@ export const Teleprompter = ({
   const activeProgress = useMemo(() => {
     if (!primaryLine || !isPrimaryCurrentlySpeaking) return 0;
     const dur = Math.max(0.1, primaryLine.end - primaryLine.start);
-    return Math.max(0, Math.min(100, ((currentTime - primaryLine.start) / dur) * 100));
-  }, [primaryLine, isPrimaryCurrentlySpeaking, currentTime]);
+    return Math.max(0, Math.min(100, ((effectiveTime - primaryLine.start) / dur) * 100));
+  }, [primaryLine, isPrimaryCurrentlySpeaking, effectiveTime]);
 
   // Manual keyboard & wheel navigation
   useEffect(() => {
@@ -376,7 +410,7 @@ export const Teleprompter = ({
               {/* Minimalist Traffic-Light Cue Indicator (Small dot + compact timer, no distracting box) */}
               <div
                 onClick={() => {
-                  if (onSeek) onSeek(primaryLine.start);
+                  if (onSeek) onSeek(Math.max(0, primaryLine.start + (subtitlesOffset || 0)));
                 }}
                 className="shrink-0 flex items-center gap-1.5 px-1.5 py-0.5 rounded cursor-pointer select-none"
                 title={
@@ -446,7 +480,7 @@ export const Teleprompter = ({
                 {/* Current Replica (Traffic-light colored: Red=white waiting, Yellow=amber <=1.5s, Green=emerald speaking) */}
                 <div
                   onClick={() => {
-                    if (onSeek) onSeek(primaryLine.start);
+                    if (onSeek) onSeek(Math.max(0, primaryLine.start + (subtitlesOffset || 0)));
                   }}
                   className={cn(
                     "font-semibold tracking-tight transition-[font-size,line-height,color] duration-150 ease-out whitespace-normal break-words cursor-pointer select-text",
@@ -463,24 +497,32 @@ export const Teleprompter = ({
                   {primaryLine.text}
                 </div>
 
-                {/* Next Replica (Single Muted Compact Preview) */}
+                {/* Next / Simultaneous Overlapping Replica */}
                 {secondaryLine && (
                   <div
                     onClick={() => {
-                      if (onSeek) onSeek(secondaryLine.start);
+                      if (onSeek) onSeek(Math.max(0, secondaryLine.start + (subtitlesOffset || 0)));
                     }}
                     className={cn(
-                      "mt-0.5 text-zinc-400/80 hover:text-zinc-300 transition-colors cursor-pointer select-text whitespace-normal break-words",
+                      "mt-0.5 transition-colors cursor-pointer select-text whitespace-normal break-words",
+                      isSecondaryCurrentlySpeaking
+                        ? "text-emerald-300/95 font-medium"
+                        : "text-zinc-400/80 hover:text-zinc-300",
                       isStripMode ? "line-clamp-1" : "line-clamp-2 pt-1.5 border-t border-white/5"
                     )}
                     style={{
                       fontSize: `${secondaryFontSize}px`,
                       lineHeight: Math.max(1.15, lineHeight - 0.1),
                     }}
-                    title="Следующая реплика (нажмите для перехода)"
+                    title={isSecondaryCurrentlySpeaking ? "Одновременная реплика (нажмите для перехода)" : "Следующая реплика (нажмите для перехода)"}
                   >
                     {secondaryLine.role && secondaryLine.role !== primaryLine.role && (
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mr-1.5">
+                      <span
+                        className={cn(
+                          "text-[10px] font-bold uppercase tracking-wider mr-1.5",
+                          isSecondaryCurrentlySpeaking ? "text-emerald-400/90" : "text-zinc-500"
+                        )}
+                      >
                         [{secondaryLine.role}]
                       </span>
                     )}

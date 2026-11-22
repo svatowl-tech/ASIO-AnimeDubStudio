@@ -80,6 +80,7 @@ import { splitSegmentAtTime } from './lib/timelineUtils';
 
 import { MissingSubtitlesBanner } from './components/MissingSubtitlesBanner';
 import { getSubtitleCoverageStats } from './lib/subtitleCoverage';
+import { getActiveRoles, getSortedActiveSubtitles } from './lib/subtitleNavigation';
 
 // Extracted Components
 import { AudioDAWView } from './components/AudioDAWView';
@@ -651,6 +652,9 @@ export default function App() {
       if (!matchingSub && fix.timestamp !== undefined) {
         // Fallback search in updatedSubtitles
         matchingSub = updatedSubtitles.find(s => fix.timestamp >= s.start && fix.timestamp <= s.end);
+        if (matchingSub) {
+          fix.segmentId = matchingSub.id;
+        }
       }
 
       const commentIsSkip = isSkipOrMissingOrOverride(fix.comment);
@@ -3064,8 +3068,16 @@ export default function App() {
 
 
 
-  const currentLine = project?.subtitles?.find(l => currentTime >= l.start - 0.5 && currentTime <= l.end);
-  const nextLine = project?.subtitles?.find(l => l.start > currentTime);
+  const activeRoles = React.useMemo(() => getActiveRoles(project), [project?.selectedRoles, project?.selectedRole]);
+  const activeOrderedSubtitles = React.useMemo(
+    () => getSortedActiveSubtitles(project?.subtitles, activeRoles),
+    [project?.subtitles, activeRoles]
+  );
+  const effectiveSubTime = currentTime - (project?.subtitlesOffset || 0);
+  const currentLine = activeOrderedSubtitles.find(
+    l => effectiveSubTime >= l.start - 0.5 && effectiveSubTime <= l.end
+  );
+  const nextLine = activeOrderedSubtitles.find(l => l.start > effectiveSubTime);
 
   const studioSyncDataRef = useRef({
     project, currentTime, currentLine, nextLine, showWebcam, isRecording,
@@ -3116,10 +3128,13 @@ export default function App() {
           videoPath: state.project.videoPath,
           projectPath: state.project.projectPath,
           selectedRole: state.project.selectedRole,
+          selectedRoles: state.project.selectedRoles,
+          subtitlesOffset: state.project.subtitlesOffset,
           audioSettings: state.project.audioSettings,
           originalPeaks: state.project.originalPeaks
         } : null;
         
+        const syncedActiveRoles = getActiveRoles(state.project);
         const dataPayload = {
             videoSrc: resolvedVideoPath ? getSafeFileUrl(resolvedVideoPath) : state.project?.videoUrl,
             showWebcam: state.showWebcam || !!state.project?.audioSettings?.isBackstageEnabled,
@@ -3131,7 +3146,8 @@ export default function App() {
             teleprompterPosition: state.teleprompterPosition,
             teleprompterSize: state.teleprompterSize,
             isAudiobook: !!state.project?.documentContent,
-            activeRole: state.project?.selectedRole || '',
+            activeRole: syncedActiveRoles[0] || '',
+            activeRoles: syncedActiveRoles,
             project: minimalProject,
             duration: state.duration || 0,
         };
@@ -3716,7 +3732,8 @@ export default function App() {
                 setTeleprompterSize={setTeleprompterSize}
                 isAudiobook={!!project.documentContent}
                 isBackstageRecording={isRecording && isBackstageRecording}
-                activeRole={project.selectedRole || ''}
+                activeRole={activeRoles[0] || ''}
+                activeRoles={activeRoles}
                 project={project}
                 onSeek={handleSeek}
               />
@@ -3824,7 +3841,8 @@ export default function App() {
                     setTeleprompterSize={setTeleprompterSize}
                     isAudiobook={!!project.documentContent}
                     isBackstageRecording={isRecording && isBackstageRecording}
-                    activeRole={project.selectedRole || ''}
+                    activeRole={activeRoles[0] || ''}
+                    activeRoles={activeRoles}
                     project={project}
                     onSeek={handleSeek}
                     isPopout={true}
